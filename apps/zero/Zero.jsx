@@ -2272,29 +2272,45 @@ function relayCallError(shots, yards) {
 /* One axis, phrased as an instruction rather than a measurement. The scope
  * moves the way you want the group to move, so an impact ABOVE the call is
  * corrected DOWN -- the sign flip is the whole reason this is a component and
- * not an inline template string. */
+ * not an inline template string.
+ *
+ * The number is ALWAYS printed, even when it is inside its own noise. Hiding
+ * it takes the judgement away from the coach, who can see the string, knows
+ * the conditions, and is better placed than a t-test to decide whether a
+ * quarter minute is worth chasing. Confidence is carried by how the number
+ * LOOKS -- full colour and a bare interval when confirmed, dimmed and marked
+ * "unconfirmed" when the interval still spans zero -- so the distinction is
+ * legible at a glance without ever being withheld. */
 function CorrectionAxis({ moa, ci, sig, pos, neg, color }) {
   const dial = -moa;                                  // move the group back
-  const word = dial >= 0 ? pos : neg;
   const mag = Math.abs(dial);
+  // Below half a hundredth there is no direction worth naming, and "0.00 UP"
+  // reads as an instruction when it is really a zero.
+  const word = mag < 0.005 ? '' : (dial > 0 ? pos : neg);
   return (
     <div style={{ flex: 1, textAlign: 'center' }}>
       <div style={{ fontFamily: 'var(--fm)', fontSize: 17, fontWeight: 700,
         color: sig ? color : 'var(--dim)' }}>
-        {sig ? `${mag.toFixed(2)}` : '—'}
-        {sig && <span style={{ fontSize: 10, marginLeft: 3 }}>{word}</span>}
+        {mag.toFixed(2)}
+        {word && <span style={{ fontSize: 10, marginLeft: 3 }}>{word}</span>}
       </div>
       <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
         textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 }}>
-        {sig
-          ? `MOA ±${ci.toFixed(2)}`
-          : (ci != null ? `${mag.toFixed(2)} ±${ci.toFixed(2)} · hold` : `${mag.toFixed(2)} · n too small`)}
+        {ci == null
+          ? 'MOA · one shot'
+          : `MOA ±${ci.toFixed(2)}${sig ? '' : ' · unconfirmed'}`}
       </div>
     </div>
   );
 }
 
-/* The coach's card. Deliberately refuses to give a number it cannot defend. */
+/* Both axes as a spoken instruction: "1.00 down and 0.50 left". */
+function dialSentence(ce) {
+  const part = (moa, pos, neg) => `${Math.abs(moa).toFixed(2)} ${moa > 0 ? pos : neg}`;
+  return `${part(ce.elevMoa, 'down', 'up')} and ${part(ce.windMoa, 'left', 'right')}`;
+}
+
+/* The coach's card. Always shows the number; marks how much to trust it. */
 function CallErrorCard({ ce, color, name }) {
   if (!ce) return null;
   const any = ce.windSig || ce.elevSig;
@@ -2329,11 +2345,13 @@ function CallErrorCard({ ce, color, name }) {
               ce.windSig ? `${Math.abs(ce.windMoa).toFixed(2)} ${ce.windMoa > 0 ? 'left' : 'right'}` : null,
             ].filter(Boolean).join(' and ')}</b> — {name || 'this shooter'} is
             landing that far from their own call, consistently enough that it is not
-            chance. The third number is how tightly they are calling at all; it does
-            not go to zero however well the rifle is zeroed.</>
-          : <>No correction yet. The offset so far is inside its own 90% interval,
-            which means it is scatter, not a zero error. Dialling on it would move a
-            correct rifle. The third number is how tightly they are calling.</>}
+            chance.{(!ce.elevSig || !ce.windSig) && ' The dimmed axis is still inside its own interval — your call.'} The
+            third number is how tightly they are calling at all; it does not go to zero
+            however well the rifle is zeroed.</>
+          : <>Reading <b>{dialSentence(ce)}</b>, but both intervals still span zero — on
+            this many shots that is as consistent with scatter as with a zero error, so
+            it is a trend to watch rather than a number to dial. It firms up as the
+            string grows. The third number is how tightly they are calling.</>}
       </div>
     </div>
   );

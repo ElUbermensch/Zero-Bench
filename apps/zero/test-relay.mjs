@@ -230,15 +230,21 @@ ok(/0\.50\s*LEFT/.test(textA),
 ok(textA.includes('Dial 1.00 down and 0.50 left'),
    '...spelled out as a sentence a coach can say out loud');
 ok(/±0\.00/.test(textA), '...with the interval on that mean beside it');
+ok(!textA.includes('unconfirmed'),
+   "...and no 'unconfirmed' mark, because A's offset clears its own interval");
 ok(/1\.12[\s\S]{0,40}MOA call miss/.test(textA),
    'the radial call miss (1.12 MOA) is a separate number from either correction');
 
-// B: half an inch either way. The mean is zero and the spread is not.
-ok(!/\d\.\d\d\s*(UP|DOWN|LEFT|RIGHT)/.test(textB),
-   "B's alternating call errors produce no correction at all");
-ok(textB.includes('No correction yet'),
-   '...and the card says so outright rather than printing a mean of nothing');
-ok(textB.includes('hold'), '...marking each axis as hold rather than as 0.00');
+// B: half an inch either way. The mean is zero and the spread is not. The
+// number is still printed -- the coach can see the string and decides.
+ok(/0\.00/.test(textB),
+   "B's offset is printed even though it is inside its own noise");
+ok(textB.includes('±0.32'),
+   '...next to the interval that makes it untrustworthy (±0.32 MOA)');
+ok(textB.includes('unconfirmed'), '...explicitly marked unconfirmed rather than withheld');
+ok(textB.includes('trend to watch rather than a number to dial'),
+   '...and spelled out in words, so nobody dials 0.00 by mistake');
+ok(!/\bhold\b/.test(textB), 'nothing is hidden behind a dash or a "hold"');
 // B is on the 200yd line, A on the 100. Half an inch is 0.48 MOA at 100 and
 // 0.24 at 200 -- if minutes came from the relay rather than from each
 // shooter, this reads 0.48 and the coach corrects the wrong man.

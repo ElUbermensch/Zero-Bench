@@ -1,7 +1,7 @@
 # Pair fire — the live relay
 
 **Status: built.** Migration `0004_relay.sql`, the relay client in `zero-core`, the
-UI in `Zero.jsx`. 61 SQL assertions across two suites and a 59-assertion three-device
+UI in `Zero.jsx`. 61 SQL assertions across two suites and a 62-assertion three-device
 browser test (`apps/zero/test-relay.mjs`) cover it.
 
 ---
@@ -182,16 +182,26 @@ calling. That is a real and useful number, so it is shown, in its own cell, clea
 labelled **MOA call miss**. But it is not a correction. The correction is the mean
 *signed* error vector, decomposed into elevation and windage.
 
-**Why it sometimes refuses to give one.** A mean over four shots is mostly noise. Each
-axis carries a 90% interval on the mean (Student *t*, `se = s/√n`), and when that
-interval spans zero the card prints **hold** rather than a number:
+**The number is always printed — confidence is shown, not enforced.** A mean over four
+shots is mostly noise, so each axis carries a 90% interval on the mean (Student *t*,
+`se = s/√n`). An earlier cut of this suppressed the number when that interval spanned
+zero. That was wrong: it took the judgement away from the coach, who can see the string,
+knows the conditions, and is better placed than a *t*-test to decide whether a quarter
+minute is worth chasing.
 
-> No correction yet. The offset so far is inside its own 90% interval, which means it is
-> scatter, not a zero error. Dialling on it would move a correct rifle.
+So the value is always on screen, and confidence is carried by how it looks:
 
-Small *n* is exactly where this matters, which is why it is a *t* table and not 1.645 —
-at 3 shots the multiplier is 2.35, and a normal approximation would call a correction
-significant when it is not.
+| | number | label |
+|---|---|---|
+| clears its interval | shooter's colour | `MOA ±0.12` |
+| inside its interval | dimmed | `MOA ±0.32 · unconfirmed` |
+
+with the sentence underneath saying it plainly — *"Reading 0.35 down and 0.10 left, but
+both intervals still span zero … a trend to watch rather than a number to dial."*
+
+Small *n* is exactly where the interval matters, which is why it is a *t* table and not
+1.645 — at 3 shots the multiplier is 2.35, and a normal approximation would mark a
+correction confirmed when it is not.
 
 The sign is flipped into an instruction, since the sight moves the way you want the group
 to move: impacts **above** the call give **DOWN**, impacts **right** of it give **LEFT**.
@@ -310,7 +320,7 @@ Relays expire on their own; nothing needs pruning by hand.
 | `supabase/test/rls_test3.sql` | 27 assertions. A stranger cannot list relays, read one by id, read the shot string, enumerate participants, or self-insert a participant row. Wrong codes trip the throttle *and the attempt rows survive*. The `>=` cursor returns two shots sharing one timestamp. The code dies when the relay ends or expires. |
 | `supabase/test/rls_test4.sql` | 34 assertions, two shooters and a coach. Both shooters number from 1 without colliding; neither can write, rewrite or delete the other's rows; the coach can write none; everyone reads everything; slots stick across a rejoin and are reused after someone leaves; each shooter carries their own firing distance; no auth id is exposed; an ended relay accepts nothing. |
 | `packages/zero-core` | 98 assertions, 21 of them pair fire: role and slot come from the server, shots sort by firing point, `is_self` separates your string from your partner's, a coach is refused client-side before a request is even sent. |
-| `apps/zero/test-relay.mjs` | 59 assertions across **three real browser profiles**, driving the actual buttons — nothing calls the relay API to make something appear. The call-error seeds are chosen so the answer is exact arithmetic (impacts 1.0472in above their calls at 100yd is 1.00 MOA), and the two shooters are put on different lines so a relay-wide conversion would be caught. Two negative controls: dropping the prop that overlays the partner's string fails five assertions, and removing the significance gate fails three. |
+| `apps/zero/test-relay.mjs` | 62 assertions across **three real browser profiles**, driving the actual buttons — nothing calls the relay API to make something appear. The call-error seeds are chosen so the answer is exact arithmetic (impacts 1.0472in above their calls at 100yd is 1.00 MOA), and the two shooters are put on different lines so a relay-wide conversion would be caught. One shooter's offset clears its interval and the other's does not, so both the confirmed and unconfirmed presentations are asserted — including that nothing is ever withheld behind a dash. Negative control: dropping the prop that overlays the partner's string fails five assertions. |
 
 The browser suites run against `packages/zero-core/mock-supabase.mjs`, a mock of GoTrue
 and PostgREST. That mock encodes an understanding of Supabase's endpoints, which is

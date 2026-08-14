@@ -76,7 +76,7 @@ The tracker's service worker is cache-first, so **bump `CACHE` in
 
 | Suite | Assertions | What it actually proves |
 |---|---|---|
-| `supabase/test/` | 54 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing |
+| `supabase/test/` | 57 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing |
 | `packages/zero-core` | 60 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
 | `apps/tracker` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
 | `apps/zero` integration | 21 | A tracker batch becomes a Zero load; group size flows back in inches; idempotent across reloads |
@@ -86,11 +86,31 @@ Everything runs against a mock of GoTrue and PostgREST (`packages/zero-core/mock
 That mock encodes an understanding of Supabase's endpoints, which is exactly the thing
 that could be wrong — **the first run against a real project is the test that counts.**
 
+## Keeping the free project awake
+
+Supabase pauses a free project after ~7 days of low activity.
+`.github/workflows/keepalive.yml` calls `public.keepalive()` daily to prevent it.
+Set two **repo variables** (Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Value |
+|---|---|
+| `SUPABASE_URL` | `https://<ref>.supabase.co` |
+| `SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_…` |
+
+Variables, not secrets — the publishable key is not one. The job fails loudly on a
+non-200 so it cannot silently stop protecting the project.
+
+This addresses project *pausing* only. It is not a fix for a live connection dropping
+mid-session; see `docs/PAIR-FIRE.md`.
+
 ## Status
 
 - Zero: synced, tracker-linked, leaderboard — done.
 - Tracker: fully working standalone; **not yet wired to zero-core.** It still stores
   locally only. That is the next piece of work.
+- Pair fire: **not implemented.** No pair-fire code survives in `Zero.jsx`.
+  `docs/PAIR-FIRE.md` has the diagnosis of why the previous attempt kept dying and
+  what it needs before a rebuild.
 - Scores on the leaderboard are self-reported. Constraints reject the implausible
   (a 10-shot 700); nothing makes a score *true*. It is a scoreboard among people who
   know each other, and the app says so rather than implying verification.

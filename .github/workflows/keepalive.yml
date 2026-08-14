@@ -1,0 +1,36 @@
+# Supabase pauses a free project after ~7 days of low activity. A few real
+# queries a day prevents it. This runs one, daily.
+#
+# Scope note: this prevents PROJECT PAUSING, a 7-day timescale. It does nothing
+# for a live connection dropping mid-session -- that is a different problem
+# with a different fix. See docs/PAIR-FIRE.md.
+name: supabase keepalive
+
+on:
+  schedule:
+    - cron: '17 6 * * *'      # daily, off the hour: GitHub throttles :00 heavily
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the keepalive function
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Set repo variables SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY"
+            echo "Settings -> Secrets and variables -> Actions -> Variables"
+            exit 1
+          fi
+          code=$(curl -s -o /tmp/body -w '%{http_code}' \
+            -X POST "$SUPABASE_URL/rest/v1/rpc/keepalive" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Content-Type: application/json" -d '{}')
+          echo "HTTP $code — $(cat /tmp/body)"
+          # A paused project answers 5xx; a wrong key answers 401. Both must fail
+          # the job loudly, or this silently stops protecting anything.
+          [ "$code" = "200" ] || { echo "::error::keepalive failed (HTTP $code)"; exit 1; }
+          echo "Project is awake."

@@ -126,3 +126,21 @@ end $$;
 reset role;
 \echo ''
 \echo 'LEADERBOARD ASSERTIONS PASSED'
+
+-- ============================================================ keepalive probe
+set role anon;
+do $$
+declare t timestamptz; n integer;
+begin
+  select public.keepalive() into t;
+  perform test.check(t is not null, 'keepalive: callable by the anon role (the scheduled ping is unauthenticated)');
+
+  -- it must remain a null-information function: anon still sees no data
+  begin
+    select count(*) into n from public.leaderboard_entries;
+    perform test.check(false, 'keepalive grant must not have opened table access to anon');
+  exception when insufficient_privilege then
+    perform test.check(true, 'keepalive: granting anon EXECUTE did not open any table to anon');
+  end;
+end $$;
+reset role;

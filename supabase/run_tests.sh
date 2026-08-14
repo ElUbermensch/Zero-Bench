@@ -11,8 +11,15 @@ su postgres -c "psql -q -d shooting -v ON_ERROR_STOP=1 -f /tmp/sbrun/test/harnes
 for m in /tmp/sbrun/migrations/*.sql; do
   su postgres -c "psql -q -d shooting -v ON_ERROR_STOP=1 -f $m"
 done
-su postgres -c "psql -q -d shooting -c 'create schema test; grant usage on schema test to authenticated;'"
+su postgres -c "psql -q -d shooting -c 'create schema test; grant usage on schema test to authenticated, anon;'"
+rc=0
 for t in /tmp/sbrun/test/rls_test.sql /tmp/sbrun/test/rls_test2.sql; do
-  su postgres -c "psql -d shooting -v ON_ERROR_STOP=1 -f $t" 2>&1 \
-    | grep -E "PASS|FAIL|ERROR|ASSERTIONS" | sed 's/^NOTICE:  //'
+  out=$(su postgres -c "psql -d shooting -v ON_ERROR_STOP=1 -f $t" 2>&1) || rc=1
+  echo "$out" | grep -E "PASS|FAIL|ERROR|ASSERTIONS" | sed 's/^NOTICE:  //'
+  # A psql ERROR aborts the script without ever printing FAIL, so grepping for
+  # FAIL alone reported success on a suite that never finished.
+  echo "$out" | grep -q "ERROR:" && rc=1
+  echo "$out" | grep -q "FAIL" && rc=1
 done
+if [ $rc -ne 0 ]; then echo; echo "SUITE FAILED"; exit 1; fi
+echo; echo "ALL SQL SUITES PASSED"

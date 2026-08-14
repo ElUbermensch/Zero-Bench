@@ -9,11 +9,20 @@ create table if not exists auth.users (
   email text unique
 );
 
--- Supabase reads the subject claim out of the request JWT. Locally we set the
--- same GUC by hand so RLS policies can be exercised as different users.
+-- Supabase derives auth.uid() and auth.jwt() from the request JWT. Locally we
+-- set the same GUC by hand so RLS policies can be exercised as different users
+-- -- including as an ANONYMOUS user, which is what the relay depends on.
+create or replace function auth.jwt()
+returns jsonb language sql stable as $$
+  select coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb)
+$$;
+
 create or replace function auth.uid()
 returns uuid language sql stable as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    auth.jwt() ->> 'sub'
+  )::uuid
 $$;
 
 -- PostgREST's two roles.
@@ -26,3 +35,9 @@ begin
     create role authenticated nologin;
   end if;
 end $$;
+
+-- Real Supabase grants these; the harness must too. auth.uid() now delegates to
+-- auth.jwt(), and calling a function in the auth schema requires USAGE on it.
+grant usage on schema auth to anon, authenticated;
+grant execute on function auth.uid(), auth.jwt() to anon, authenticated;
+grant select on auth.users to anon, authenticated;

@@ -13,10 +13,15 @@ insert into auth.users (id, email) values
   ('22222222-2222-2222-2222-222222222222', 'b@example.com')
 on conflict do nothing;
 
-create or replace function test.as_user(u uuid) returns void
+/* Impersonate a user. `anon` marks the session as an ANONYMOUS sign-in, which
+ * Supabase signals with an is_anonymous JWT claim. */
+create or replace function test.as_user(u uuid, anon boolean default false) returns void
 language plpgsql as $$
 begin
   perform set_config('request.jwt.claim.sub', u::text, false);
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', u::text, 'role', 'authenticated',
+                       'is_anonymous', anon)::text, false);
 end $$;
 
 create or replace function test.check(ok boolean, label text) returns void

@@ -1,0 +1,5 @@
+{
+  "_comment": "Fill these two in ONCE, here. Both apps read this file at build time. The anon/publishable key is public by design and correct to commit; the secret/service_role key must NEVER appear in this repo.",
+  "url": "",
+  "anonKey": ""
+}

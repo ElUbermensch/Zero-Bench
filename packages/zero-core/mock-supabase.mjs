@@ -129,10 +129,16 @@ export function startMock(opts = {}) {
       if (p.startsWith('/rest/v1/rpc/')) {
         const fn = p.slice('/rest/v1/rpc/'.length);
         const a = auth(req);
-        if (!a || a.expired) return json(res, 401, { message: 'JWT expired' });
         const CODE_ALPHABET = '23456789BCDFGHJKMNPQRSTVWXZ';
 
+        // keepalive is granted to `anon`, so it answers with the bare
+        // publishable key and no user session. That is the whole point of it:
+        // a scheduled job holds no account. The mock used to demand a session
+        // here, which made it stricter than the database and would have hidden
+        // a real grant mistake.
         if (fn === 'keepalive') return json(res, 200, stamp());
+
+        if (!a || a.expired) return json(res, 401, { message: 'JWT expired' });
 
         if (fn === 'create_relay') {
           for (const r of state.relays.values()) {
@@ -228,6 +234,11 @@ export function startMock(opts = {}) {
         return json(res, 404, { message: 'no such function: ' + fn });
       }
 
+      /* PostgREST answers its root with an OpenAPI document to any caller
+       * holding a valid apikey — which is how a client tells "wrong key" (401)
+       * apart from "project asleep" (5xx). */
+      if (p === '/rest/v1/' || p === '/rest/v1') return json(res, 200, { swagger: '2.0' });
+
       /* ------------------------------------------------------------ rest */
       if (p.startsWith('/rest/v1/')) {
         const t = p.slice('/rest/v1/'.length);
@@ -289,6 +300,14 @@ export function startMock(opts = {}) {
             // rows but a write against a row owned by someone else is refused.
             if (t === 'leaderboard_profiles' && row.id && row.id !== a.userId) {
               return json(res, 403, { code: '42501', message: 'RLS: not your profile' });
+            }
+            if (t === 'leaderboard_entries' || t === 'leaderboard_profiles') {
+              // Mirrors the RESTRICTIVE policy in 0004: anonymous devices exist
+              // for the relay and must not be able to publish, or the board is
+              // spammable by anyone who can reach the signup endpoint.
+              if (state.anonUsers.has(a.userId)) {
+                return json(res, 403, { code: '42501', message: 'RLS: anonymous devices cannot publish' });
+              }
             }
             if (t === 'leaderboard_entries') {
               const prior = table(t).get(row.id);

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,9 +13,14 @@ if (/<\/script|<!--/i.test(js)) throw new Error('payload would close the inline 
 const out = shell.replace('<!--APP-->', () => '<script>\n' + js + '\n<\/script>');
 fs.mkdirSync('dist', { recursive: true });
 fs.writeFileSync('dist/index.html', out);
-for (const f of ['manifest.webmanifest', 'sw.js']) fs.copyFileSync('src/' + f, 'dist/' + f);
+fs.copyFileSync('src/manifest.webmanifest', 'dist/manifest.webmanifest');
+// Cache name = hash of the page actually built, so shipping an update never
+// depends on remembering to bump a version string.
+const hash = crypto.createHash('sha256').update(out).digest('hex').slice(0, 12);
+fs.writeFileSync('dist/sw.js',
+  read('src/sw.js').replace('__CACHE_VERSION__', `bench-${hash}`));
 // Icons are committed under src/ rather than generated: dist/ is gitignored, so
 // a fresh clone would otherwise build a PWA with no icons at all.
 fs.mkdirSync('dist/icons', { recursive: true });
 for (const f of fs.readdirSync('src/icons')) fs.copyFileSync('src/icons/' + f, 'dist/icons/' + f);
-console.log('dist/index.html', (out.length / 1024).toFixed(1), 'KB');
+console.log('dist/index.html', (out.length / 1024).toFixed(1), 'KB · cache bench-' + hash);

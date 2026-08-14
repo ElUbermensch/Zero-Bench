@@ -2081,10 +2081,14 @@ const ZeroCore = (() => {
  * The anon key belongs in client code: it is public by design and grants
  * nothing on its own. RLS is what protects the data. Never put the
  * service_role key here. */
-const SHARED_SUPABASE = {
-  url: '',        // e.g. 'https://abcdefgh.supabase.co'
-  anonKey: '',    // the anon / publishable key
-};
+/* Injected at build time from supabase.config.json — ONE file for both apps,
+ * because two constants that must agree are two constants that eventually do
+ * not, and the failure mode is a shooter whose phone talks to a different
+ * project from their coach's. The fallback keeps the source runnable when it
+ * is opened directly without a build. */
+const SHARED_SUPABASE = (typeof __SUPABASE_CONFIG__ !== 'undefined')
+  ? __SUPABASE_CONFIG__
+  : { url: '', anonKey: '' };
 const HAS_SHARED = !!(SHARED_SUPABASE.url && SHARED_SUPABASE.anonKey);
 
 const SYNC_CFG_KEY = 'sync_cfg_v1';

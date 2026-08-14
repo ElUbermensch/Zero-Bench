@@ -13,27 +13,34 @@ records what you loaded. The interesting part is the seam: a batch loaded in Ben
 becomes a selectable load in Zero, and the group it shoots flows back to that batch.
 
 ```
-apps/bench      the reloading PWA (vanilla, single-file build)
-apps/zero         Zero (React, bundled with esbuild)
+apps/bench           the reloading PWA (vanilla, single-file build)
+apps/zero            Zero (React, bundled with esbuild)
 packages/zero-core   shared auth + offline sync, embedded byte-identically in both
-supabase/         migrations and the RLS test suites
-docs/             integration contract and design notes
+supabase/            migrations and the RLS test suites
+tools/               preflight, live verification, the zero-core embed step
+docs/                integration contract and design notes
+DEPLOY.md            start-to-finish deployment
 ```
 
-## Before anything works: fill in the shared backend
+## Deploying
 
-Every install points at **one** Supabase project. Set it in two places:
+**[DEPLOY.md](DEPLOY.md) is the walkthrough** — Supabase project, migrations, Pages,
+verification, in the order that works.
 
-| File | Constant |
-|---|---|
-| `apps/zero/Zero.jsx` | `SHARED_SUPABASE` (near the top) |
-| `apps/bench/src/app.js` | not yet wired — see *Status* |
+Every install points at **one** Supabase project, set in **one** file:
 
-```js
-const SHARED_SUPABASE = {
-  url: 'https://YOUR-PROJECT.supabase.co',
-  anonKey: 'sb_publishable_...',   // publishable key; legacy anon JWT also works
-};
+```jsonc
+// supabase.config.json
+{ "url": "https://abcdefgh.supabase.co", "anonKey": "sb_publishable_..." }
+```
+
+Both apps read it at build time.
+
+```bash
+npm run preflight    # config, secrets, icons, workflows — a second
+npm test             # the suites — a few minutes
+npm run build
+npm run verify       # once the project exists: checks the REAL backend
 ```
 
 **Committing this key is correct.** The publishable/anon key is public by design — it
@@ -43,17 +50,9 @@ which bypasses RLS entirely.
 
 ## Setting up the database
 
-```bash
-supabase link --project-ref YOUR-PROJECT-REF
-supabase db push
-```
-
-Or paste `supabase/migrations/0001_init.sql`, `0002_leaderboard.sql`, `0003_keepalive.sql`
-and `0004_relay.sql` into the dashboard SQL editor, in that order.
-
-**Then enable anonymous sign-ins** (Authentication → Providers → Anonymous). The live
-relay needs no accounts, and "no accounts" is implemented as anonymous sign-in — it
-ships disabled, and with it off a coach cannot join. See `docs/PAIR-FIRE.md`.
+See [DEPLOY.md](DEPLOY.md). In short: apply `supabase/migrations/*.sql` in name order,
+then **enable anonymous sign-ins** (Authentication → Providers → Anonymous), which ships
+disabled and which pair fire needs.
 
 Do **not** run `supabase/test/harness.sql` against a real project — it stubs the `auth`
 schema so the migrations can be tested in vanilla Postgres, and Supabase provides the
@@ -80,8 +79,9 @@ never the copy. `npm test` fails if the two have drifted.
 push to `main` — Bench at `/`, Zero at `/zero/`. Enable it under
 **Settings → Pages → Source: GitHub Actions**.
 
-Bench's service worker is cache-first, so **bump `CACHE` in
-`apps/bench/src/sw.js` on every deploy** or returning users keep the old build.
+Both service workers are cache-first, and their cache names are **hashes of what was
+actually built**. There is nothing to bump: shipping an update cannot depend on
+remembering a manual step.
 
 ## What is verified
 
@@ -96,7 +96,9 @@ Bench's service worker is cache-first, so **bump `CACHE` in
 
 Everything runs against a mock of GoTrue and PostgREST (`packages/zero-core/mock-supabase.mjs`).
 That mock encodes an understanding of Supabase's endpoints, which is exactly the thing
-that could be wrong — **the first run against a real project is the test that counts.**
+that could be wrong — so **`npm run verify` checks the real project**: schema applied,
+anonymous sign-in on, RLS closed to the public key, a relay created and ended, the
+leaderboard readable but not spammable. Run it after deploying. It is the test that counts.
 
 ## Keeping the free project awake
 
@@ -119,8 +121,10 @@ mid-session — the relay solves that by not holding a connection at all. See
 ## Status
 
 - Zero: synced, Bench-linked, leaderboard, live relay — done.
-- Bench: fully working standalone; **not yet wired to zero-core.** It still stores
-  locally only. That is the next piece of work.
+- Bench: fully working standalone; **not yet wired to zero-core.** It stores locally
+  only, so Zero's ⇣ Bench picker has nothing to read yet. The schema and the view it
+  reads through are built and tested; only the client side is missing. Next piece of
+  work — see the end of DEPLOY.md.
 - Pair fire: **built** — two shooters and a coach, mutually visible, partner's shots
   overlaid on your own target in their colour. Polling, not WebSockets, on purpose;
   `docs/PAIR-FIRE.md` explains why the obvious fix for the reported symptom is the

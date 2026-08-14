@@ -1,0 +1,43 @@
+/* Zero's shell is precached so the app opens with no signal — which is the
+ * normal condition at a range, not an edge case.
+ *
+ * CACHE is rewritten at build time with a hash of the bundle. It used to be a
+ * hand-bumped string, and a hand-bumped cache version is a deploy step someone
+ * eventually forgets; the failure mode is returning users pinned to an old
+ * build with no way to tell.
+ *
+ * The API is deliberately NOT cached. Stale sessions or a stale relay would be
+ * worse than an error: the whole point of the relay is that it is current.
+ */
+const CACHE = '__CACHE_VERSION__';
+const SHELL = ['./', './index.html', './bundle.js', './manifest.webmanifest',
+               './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
+               './icons/icon-maskable-512.png'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin !== location.origin) return;          // never touch Supabase
+  e.respondWith(
+    caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
+      if (res && res.ok && res.type === 'basic') {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(req, copy));
+      }
+      return res;
+    }).catch(() => caches.match('./index.html')))
+  );
+});

@@ -1,7 +1,11 @@
 /* Precache the whole shell. The app has no runtime network dependencies, so
  * cache-first is right: once installed it works with no signal, forever.
- * Bump CACHE on every deploy -- that is what ships an update. */
-const CACHE = 'reloading-v1';
+ *
+ * CACHE is rewritten at build time with a hash of what was actually built. It
+ * used to be a hand-bumped string, and a hand-bumped cache version is a deploy
+ * step someone eventually forgets -- the failure mode being returning users
+ * pinned to an old build with no way to tell. */
+const CACHE = '__CACHE_VERSION__';
 const SHELL = ['./', './index.html', './manifest.webmanifest',
                './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png'];
 

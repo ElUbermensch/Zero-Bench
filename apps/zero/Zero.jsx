@@ -1115,54 +1115,7 @@ select.inp{cursor:pointer}
  *      a range_sessions row + a groups row (ES/MR converted to INCHES —
  *      the schema deliberately splits group_es_in from velocity_es_fps).
  * ══════════════════════════════════════════════════════════════════════ */
-/* ============================================================================
- * zero-core — shared auth + sync layer for the Zero PWA family
- *
- * One module, embedded byte-identically in every app (Zero, the reloading
- * tracker, anything later). No SDK, no build step, no dependencies: it talks to
- * Supabase's GoTrue and PostgREST endpoints with fetch, so each app stays a
- * single self-contained file and still works with no signal.
- *
- * Design commitments, each of which exists because the obvious version is wrong:
- *
- *   - A 401 triggers ONE refresh shared by every in-flight request. Naive
- *     per-request refresh stampedes: ten parallel requests become ten refresh
- *     calls, nine of which present an already-rotated token and fail.
- *   - The outbox flushes in declared table order, which IS foreign-key order.
- *     Pushing a `shots` row before its `range_sessions` parent is a 409.
- *   - The pull cursor advances to the greatest `updated_at` actually returned by
- *     the server, never to the client's clock. Using local `now()` silently
- *     drops every row written between the query and the cursor write.
- *   - `updated_at` is never sent. The server stamps it; phone clocks drift and a
- *     device offline since yesterday would otherwise win every conflict.
- *   - A pull never clobbers a row with unsent local edits.
- * ==========================================================================*/
-'use strict';
-
-/* ============================================================================
- * zero-core — shared auth + sync layer for the Zero PWA family
- *
- * One module, embedded byte-identically in every app (Zero, the reloading
- * tracker, anything later). No SDK, no build step, no dependencies: it talks to
- * Supabase's GoTrue and PostgREST endpoints with fetch, so each app stays a
- * single self-contained file and still works with no signal.
- *
- * Design commitments, each of which exists because the obvious version is wrong:
- *
- *   - A 401 triggers ONE refresh shared by every in-flight request. Naive
- *     per-request refresh stampedes: ten parallel requests become ten refresh
- *     calls, nine of which present an already-rotated token and fail.
- *   - The outbox flushes in declared table order, which IS foreign-key order.
- *     Pushing a `shots` row before its `range_sessions` parent is a 409.
- *   - The pull cursor advances to the greatest `updated_at` actually returned by
- *     the server, never to the client's clock. Using local `now()` silently
- *     drops every row written between the query and the cursor write.
- *   - `updated_at` is never sent. The server stamps it; phone clocks drift and a
- *     device offline since yesterday would otherwise win every conflict.
- *   - A pull never clobbers a row with unsent local edits.
- * ==========================================================================*/
-'use strict';
-
+//#region zero-core — GENERATED from packages/zero-core/zero-core.js, do not edit
 /* ============================================================================
  * zero-core — shared auth + sync layer for the Zero PWA family
  *
@@ -1813,8 +1766,13 @@ const ZeroCore = (() => {
      * That is what killed the previous attempt. A plain request on resume
      * simply works, and there is no connection to have quietly died.
      * ================================================================== */
-    let relay = null;   // { id, code, role, name, isHost, sinceShot, sinceMsg,
-                        //   shots:Map, messages:Map, timer, stopped }
+    let relay = null;   // { id, code, role, slot, name, isHost, sinceShot,
+                        //   sinceMsg, shots:Map, messages:Map, timer, stopped }
+                        //
+                        // role decides whether this device may write shots.
+                        // isHost decides only who may END the relay. They are
+                        // separate on purpose: in a pair, BOTH people are
+                        // shooters but only one started it.
 
     const RELAY_POLL_MS = 2500;
     const RELAY_BACKOFF_MAX_MS = 20000;
@@ -1832,9 +1790,9 @@ const ZeroCore = (() => {
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'create', error: r.error }); return r; }
       const row = Array.isArray(r.data) ? r.data[0] : r.data;
-      startRelay({ id: row.id, code: row.code, isHost: true,
+      startRelay({ id: row.id, code: row.code, isHost: true, slot: 1,
                    name: o.hostName || 'Shooter', role: 'shooter' });
-      return { ok: true, relay: row };
+      return { ok: true, relay: row, slot: 1, role: 'shooter' };
     }
 
     async function joinRelay(code, name, role) {
@@ -1850,9 +1808,12 @@ const ZeroCore = (() => {
       // which is how the server-side throttle can record the failed attempt.
       const d = r.data || {};
       if (!d.ok) return { ok: false, reason: d.error, message: d.message };
+      // Trust the SERVER's answer on role and firing point, not the request:
+      // a relay that is already full hands back a coach seat, and rejoining
+      // returns the slot you already held rather than a fresh one.
       startRelay({ id: d.relay.id, code: d.relay.code, isHost: false,
-                   name: name || 'Guest', role: role === 'shooter' ? 'shooter' : 'coach' });
-      return { ok: true, relay: d.relay };
+                   name: name || 'Guest', role: d.role || 'coach', slot: d.slot || null });
+      return { ok: true, relay: d.relay, slot: d.slot || null, role: d.role || 'coach' };
     }
 
     function startRelay(meta) {
@@ -1896,9 +1857,12 @@ const ZeroCore = (() => {
       relay.sinceShot = maxOf(st.shots || [], relay.sinceShot);
       relay.sinceMsg = maxOf(st.messages || [], relay.sinceMsg);
 
-      const shots = [...relay.shots.values()]
-        .sort((a, b) => (a.is_sighter === b.is_sighter)
-          ? a.shot_no - b.shot_no : (a.is_sighter ? -1 : 1));
+      // Ordered by firing point, then sighters before record, then number.
+      // Two shooters both have a shot 1, so shot_no alone no longer orders.
+      const shots = [...relay.shots.values()].sort((a, b) =>
+        (a.slot || 0) - (b.slot || 0) ||
+        (a.is_sighter === b.is_sighter ? 0 : (a.is_sighter ? -1 : 1)) ||
+        a.shot_no - b.shot_no);
       const messages = [...relay.messages.values()]
         .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
 
@@ -1949,18 +1913,35 @@ const ZeroCore = (() => {
       relayResumeHandler = null;
     }
 
-    /** Host only: mirror a shot into the relay. Fire and forget -- a failure
-     *  here must never block logging the shot locally. */
+    /** Mirror one of YOUR OWN shots into the relay. Any participant holding
+     *  the shooter role may do this; the server enforces that the row is
+     *  attributed to the caller, so a partner cannot write your string.
+     *
+     *  Fire and forget -- a failure here must never block logging the shot
+     *  locally, because the local session is the system of record. */
     async function relayPushShot(shot) {
-      if (!relay || !relay.isHost) return { ok: false, reason: 'not-host' };
-      const res = await authed('/rest/v1/relay_shots?on_conflict=relay_id,shot_no,is_sighter', {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.role !== 'shooter') return { ok: false, reason: 'not-shooter' };
+      const uid = session && session.user && session.user.id;
+      // The conflict key includes user_id: re-pushing YOUR shot 3 updates your
+      // row and never touches your partner's shot 3.
+      const res = await authed(
+        '/rest/v1/relay_shots?on_conflict=relay_id,user_id,shot_no,is_sighter', {
         method: 'POST',
         headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
         body: JSON.stringify([{
           relay_id: relay.id,
+          user_id: uid || undefined,
           shot_no: shot.shotNo,
           ring: shot.ring == null ? null : String(shot.ring),
           x_in: shot.x, y_in: shot.y,
+          // The call is what a coach reads. Sending it is the difference
+          // between "he shot a 9 at 4 o'clock" and "he called it centre".
+          call_x_in: shot.callX == null ? null : shot.callX,
+          call_y_in: shot.callY == null ? null : shot.callY,
+          wind_call_moa: shot.windCallMoa == null ? null : shot.windCallMoa,
+          wind_call_dir: shot.windCallDir === 'L' || shot.windCallDir === 'R'
+            ? shot.windCallDir : null,
           is_sighter: !!shot.isSighter,
           note: shot.note || null,
         }]),
@@ -2010,9 +1991,28 @@ const ZeroCore = (() => {
       return r;
     }
 
+    /** Leave without ending it for everyone else. Deletes the participant row
+     *  rather than just stopping the poll, so the firing point is freed and
+     *  the others stop seeing a name that will never come back. Best effort:
+     *  a failed delete must not trap you in a relay you have walked away from. */
+    async function leaveRelay() {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.isHost) return endRelay();
+      const id = relay.id;
+      const uid = session && session.user && session.user.id;
+      stopRelay();
+      if (!uid) return { ok: true };
+      try {
+        await authed('/rest/v1/relay_participants?relay_id=eq.' + encodeURIComponent(id) +
+                     '&user_id=eq.' + encodeURIComponent(uid), { method: 'DELETE' });
+      } catch (_) { /* already gone, or offline -- either way we are out */ }
+      return { ok: true };
+    }
+
     const relayInfo = () => (relay
       ? { id: relay.id, code: relay.code, isHost: relay.isHost,
-          name: relay.name, role: relay.role,
+          name: relay.name, role: relay.role, slot: relay.slot,
+          canShoot: relay.role === 'shooter',
           shotCount: relay.shots.size, participants: relay.participants }
       : null);
 
@@ -2029,7 +2029,7 @@ const ZeroCore = (() => {
       selectView, rpc, ballisticProfiles, batchPerformance,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
-      createRelay, joinRelay, stopRelay, endRelay, pollRelayOnce,
+      createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
       relayPushShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return online; },
@@ -2064,8 +2064,7 @@ const ZeroCore = (() => {
 
   return { create, EVENTS, TABLES, defaultStorage };
 })();
-
-
+//#endregion zero-core
 /* ── Shared deployment ────────────────────────────────────────────────────
  * Every install points at ONE Supabase project so the leaderboard has a
  * population. Fill these in before deploying and users never see a server
@@ -2160,20 +2159,34 @@ function leaderboardEntryFor(session, target, existingId) {
 /* ══════════════════════════════════════════════════════════════════════════
  * LIVE RELAY — the pair-firing kit.
  *
- * A shooter taps "go live" and reads a 4-character code aloud. A coach taps
- * "join live", enters the code, their name and a role, and watches the string
- * build with a shared feed for wind calls.
+ * Pair fire as actually shot: two shooters and a coach, all three watching
+ * each other. Somebody taps "go live" and reads a 4-character code aloud; the
+ * others enter it with a name and a role.
  *
- * Deliberately polled, not socketed: a coach's phone is backgrounded for most
- * of a string, browsers throttle background timers, the heartbeat stops, and
- * the server drops the socket without the client noticing. Polling has no
- * connection to lose.
+ *   shooter  logs their own string, and sees their partner's shots drawn over
+ *            their own target in the partner's colour
+ *   coach    logs nothing, and sees both strings — calls as well as impacts,
+ *            because the gap between the two is what a coach is reading
+ *   everyone shares one feed for wind calls and chatter
+ *
+ * Deliberately polled, not socketed: a phone on the line is backgrounded for
+ * most of a string, browsers throttle background timers, the heartbeat stops,
+ * and the server drops the socket without the client noticing. Polling has no
+ * connection to lose — and because relay_state stamps last_seen_at on every
+ * poll, the poll IS the presence heartbeat. "Watching" means watching.
  * ════════════════════════════════════════════════════════════════════════ */
+
+/* Colour is a function of FIRING POINT, not of join order as each device
+ * happens to observe it, so the partner who is blue on your phone is blue on
+ * the coach's too. Slot 1 takes the app accent; 2 takes the blue already used
+ * for sighters and wind, which reads as "the other one" without competing. */
+const SLOT_COLORS = ['#e8943a', '#4a9eff', '#3db87a', '#b57cff'];
+const slotColor = s => SLOT_COLORS[((+s || 1) - 1) % SLOT_COLORS.length];
 
 /* Statistics from relayed points alone. No target geometry required -- ES and
  * mean radius are pure point geometry, and score is the sum of ring labels. */
 function relayStats(shots) {
-  const rec = shots.filter(s => !s.is_sighter);
+  const rec = (shots || []).filter(s => !s.is_sighter);
   const pts = rec.map(s => ({ x: +s.x_in || 0, y: +s.y_in || 0 }));
   const score = rec.reduce((a, s) => a + (s.ring === 'X' ? 10 : (+s.ring || 0)), 0);
   const xs = rec.filter(s => s.ring === 'X').length;
@@ -2188,185 +2201,162 @@ function relayStats(shots) {
   return { n: pts.length, score, xs, mr, es, pts, cx, cy };
 }
 
-/* Minimal scatter in Zero's existing chart idiom -- same CSS variables as
- * GroupPlot and SightChart, so it reads as part of the app rather than as a
- * second design system bolted on. */
-function RelayPlot({ stats, yards }) {
-  const SZ = 190, pad = 14;
-  const { pts, cx, cy, mr } = stats;
-  if (!pts.length) return null;
-  const span = Math.max(0.6, ...pts.map(p => Math.hypot(p.x - cx, p.y - cy) * 2.4));
-  const k = (SZ / 2 - pad) / (span / 2);
-  const px = p => SZ / 2 + (p.x - cx) * k;
-  const py = p => SZ / 2 - (p.y - cy) * k;
+/* Split a relay's shots into one string per firing point. Shots whose shooter
+ * has left carry a null slot; they are kept under slot 0 rather than dropped,
+ * because a string that vanishes when someone closes their phone is worse
+ * than one attributed to "left the relay". */
+function relaySeries(shots, participants) {
+  const by = new Map();
+  (shots || []).forEach(s => {
+    const k = s.slot == null ? 0 : +s.slot;
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(s);
+  });
+  (participants || []).filter(p => p.role === 'shooter' && p.slot != null)
+    .forEach(p => { if (!by.has(+p.slot)) by.set(+p.slot, []); });
+  return [...by.entries()].sort((a, b) => a[0] - b[0]).map(([slot, ss]) => {
+    const who = (participants || []).find(p => +p.slot === slot);
+    return {
+      slot,
+      name: ss[0]?.shooter || who?.name || (slot ? `Point ${slot}` : 'Left the relay'),
+      isSelf: !!(ss.some(s => s.is_self) || who?.is_self),
+      away: who ? undefined : true,
+      color: slotColor(slot || 1),
+      shots: ss,
+      stats: relayStats(ss),
+    };
+  });
+}
+
+/* Target-centred scatter, one or more strings at once.
+ *
+ * Plotted in TARGET coordinates rather than re-centred on each group's own
+ * centroid. Re-centring makes two groups easy to compare for size and lies
+ * about where either of them actually sits, which is the more important fact
+ * when a coach is deciding whether to call a sight change. */
+function RelayPlot({ series, yards, size }) {
+  const SZ = size || 190, pad = 14, c = SZ / 2;
+  const all = series.flatMap(s => s.stats.pts);
+  if (!all.length) return null;
+  const reach = Math.max(0.5, ...all.map(p => Math.hypot(p.x, p.y)));
+  const k = (c - pad) / (reach * 1.15);
   return (
-    <svg width="100%" viewBox={`0 0 ${SZ} ${SZ}`} style={{ maxWidth: 240, display: 'block', margin: '0 auto' }}>
+    <svg width="100%" viewBox={`0 0 ${SZ} ${SZ}`}
+      style={{ maxWidth: 260, display: 'block', margin: '0 auto' }}>
       <rect width={SZ} height={SZ} fill="var(--surf2)" rx="6"/>
-      <line x1={SZ/2} y1={pad/2} x2={SZ/2} y2={SZ-pad/2} stroke="var(--bdr)" strokeWidth="1"/>
-      <line x1={pad/2} y1={SZ/2} x2={SZ-pad/2} y2={SZ/2} stroke="var(--bdr)" strokeWidth="1"/>
-      {mr != null && <circle cx={SZ/2} cy={SZ/2} r={mr * k} fill="none"
-        stroke="var(--acc)" strokeWidth="1" strokeDasharray="3 3" opacity="0.65"/>}
-      {pts.map((p, i) => (
-        <g key={i}>
-          <circle cx={px(p)} cy={py(p)} r="5" fill="var(--acc)" opacity="0.85"/>
-          <text x={px(p)} y={py(p) + 3} textAnchor="middle"
-            style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: '#1a1d27', fontWeight: 700 }}>{i + 1}</text>
-        </g>
+      <line x1={c} y1={pad / 2} x2={c} y2={SZ - pad / 2} stroke="var(--bdr)" strokeWidth="1"/>
+      <line x1={pad / 2} y1={c} x2={SZ - pad / 2} y2={c} stroke="var(--bdr)" strokeWidth="1"/>
+      {series.map(s => s.stats.mr != null && (
+        <circle key={'mr' + s.slot} cx={c + s.stats.cx * k} cy={c - s.stats.cy * k}
+          r={s.stats.mr * k} fill="none" stroke={s.color} strokeWidth="1"
+          strokeDasharray="3 3" opacity="0.6"/>
       ))}
-      <text x={SZ/2} y={SZ - 3} textAnchor="middle"
+      {series.map(s => s.shots.filter(x => !x.is_sighter).map((x, i) => {
+        const px = c + (+x.x_in || 0) * k, py = c - (+x.y_in || 0) * k;
+        return (
+          <g key={s.slot + '-' + x.id}>
+            {/* the call, when the shooter recorded one: hollow, joined to the
+                impact. The line IS the information. */}
+            {x.call_x_in != null && (
+              <>
+                <line x1={c + (+x.call_x_in) * k} y1={c - (+x.call_y_in || 0) * k}
+                  x2={px} y2={py} stroke={s.color} strokeWidth="0.7" opacity="0.5"/>
+                <circle cx={c + (+x.call_x_in) * k} cy={c - (+x.call_y_in || 0) * k}
+                  r="2.5" fill="none" stroke={s.color} strokeWidth="0.9" opacity="0.7"/>
+              </>
+            )}
+            <circle cx={px} cy={py} r="5" fill={s.color} opacity={s.isSelf ? 0.9 : 0.7}/>
+            <text x={px} y={py + 3} textAnchor="middle"
+              style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: '#1a1d27', fontWeight: 700 }}>
+              {i + 1}</text>
+          </g>
+        );
+      }))}
+      <text x={c} y={SZ - 3} textAnchor="middle"
         style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: 'var(--dim)' }}>
-        dashed ring = mean radius{yards ? ` · ${yards}yd` : ''}</text>
+        centre = point of aim{yards ? ` · ${yards}yd` : ''}
+      </text>
     </svg>
   );
 }
 
-function RelayViewer({ core, onExit }) {
-  const [state, setState] = useState(null);
-  const [ended, setEnded] = useState(false);
-
-  useEffect(() => {
-    const offs = [
-      core.on(core.EVENTS.RELAY_STATE, p => setState(p)),
-      core.on(core.EVENTS.RELAY_ENDED, () => setEnded(true)),
-    ];
-    return () => offs.forEach(o => o());
-  }, [core]);
-
-  const info = core.relayInfo();
-  const shots = state?.shots || [];
-  const st = relayStats(shots);
-  const relay = state?.relay;
-
+/* The four numbers, in one shooter's colour. */
+function RelayScoreRow({ stats, color }) {
   const cell = { textAlign: 'center', flex: 1 };
-  const val = { fontFamily: 'var(--fm)', fontSize: 17, fontWeight: 700, color: 'var(--acc)' };
+  const val = { fontFamily: 'var(--fm)', fontSize: 17, fontWeight: 700, color };
   const lab = { fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
                 textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 };
-
   return (
-    <>
-      <style>{S}</style>
-      <div className="app">
-        <div className="hdr">
-          <button className="bback" onClick={() => { core.stopRelay(); onExit(); }}>← leave</button>
-          <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: ended ? 'var(--dim)' : 'var(--green)' }}>
-            {ended ? '○ ended' : '● live'} · {info?.code}
-          </div>
-        </div>
-        <div className="content">
-          <div style={{ padding: '13px 13px 4px' }}>
-            <div style={{ fontFamily: 'var(--fh)', fontSize: 18, fontWeight: 700 }}>
-              {relay?.host_name || 'Shooter'}{relay?.title ? ` · ${relay.title}` : ''}
-            </div>
-            <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>
-              {[relay?.target_name, relay?.distance_yd && `${relay.distance_yd}yd`,
-                (state?.participants || []).map(p => p.name).join(', ')].filter(Boolean).join(' · ')}
-            </div>
-          </div>
-
-          {ended && (
-            <div className="tcard" style={{ padding: '11px 13px' }}>
-              <div style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--dim)' }}>
-                The shooter ended this relay. The string below is the final state.
-              </div>
-            </div>
-          )}
-
-          <div className="tcard" style={{ padding: '11px 13px' }}>
-            <div style={{ display: 'flex', marginBottom: 10 }}>
-              <div style={cell}><div style={val}>{st.score}<span style={{ fontSize: 11, color: 'var(--dim)' }}>–{st.xs}X</span></div><div style={lab}>Score</div></div>
-              <div style={cell}><div style={val}>{st.mr != null ? st.mr.toFixed(2) : '—'}</div><div style={lab}>MR in</div></div>
-              <div style={cell}><div style={val}>{st.es != null ? st.es.toFixed(2) : '—'}</div><div style={lab}>ES in</div></div>
-              <div style={cell}><div style={val}>{st.n}</div><div style={lab}>Shots</div></div>
-            </div>
-            {st.pts.length > 0
-              ? <RelayPlot stats={st} yards={relay?.distance_yd}/>
-              : <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)', textAlign: 'center', padding: '14px 0' }}>
-                  Waiting for the first shot…
-                </div>}
-          </div>
-
-          {shots.length > 0 && (
-            <div className="tcard" style={{ padding: '11px 13px' }}>
-              <div className="lbl" style={{ marginBottom: 6 }}>Shot string</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {shots.map((s, i) => (
-                  <div key={s.id} style={{ fontFamily: 'var(--fm)', fontSize: 11,
-                    padding: '3px 7px', borderRadius: 4,
-                    background: s.is_sighter ? 'transparent' : 'var(--surf2)',
-                    border: s.is_sighter ? '1px dashed var(--bdr)' : '1px solid var(--bdr)',
-                    color: s.ring === 'X' ? 'var(--acc)' : 'var(--ink)' }}>
-                    {s.is_sighter ? 'S' : i + 1}<span style={{ color: 'var(--dim)' }}>·</span>{s.ring}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="tcard" style={{ padding: '11px 13px' }}>
-            <RelayFeed core={core} messages={state?.messages} disabled={ended}/>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function JoinLiveForm({ core, onJoined, onCancel }) {
-  const [code, setCode] = useState('');
-  const [name, setName] = useState('');
-  const [role, setRole] = useState('coach');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-
-  async function go() {
-    setBusy(true); setErr(null);
-    const r = await core.joinRelay(code, name || 'Guest', role);
-    setBusy(false);
-    if (!r.ok) {
-      setErr(r.message || (r.reason === 'throttled'
-        ? 'Too many attempts. Wait a few minutes.'
-        : 'No live relay with that code.'));
-      return;
-    }
-    onJoined();
-  }
-
-  const inp = { width: '100%', background: 'var(--surf2)', border: '1px solid var(--bdr)',
-                borderRadius: 5, padding: '9px 10px', color: 'var(--ink)',
-                fontFamily: 'var(--fm)', fontSize: 12, marginBottom: 7 };
-
-  return (
-    <div className="tcard" style={{ padding: '11px 13px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-        <div className="lbl">Join a live relay</div>
-        <button onClick={onCancel} style={{ background: 'none', border: 'none',
-          color: 'var(--dim)', cursor: 'pointer', fontSize: 14, padding: 0 }}>×</button>
-      </div>
-      <input style={{ ...inp, fontSize: 22, letterSpacing: '.28em', textAlign: 'center' }}
-        value={code} maxLength={4} autoCapitalize="characters" autoComplete="off"
-        onChange={e => setCode(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, ''))}
-        placeholder="CODE"/>
-      <input style={inp} value={name} onChange={e => setName(e.target.value)}
-        placeholder="your name" maxLength={40}/>
-      <select style={inp} value={role} onChange={e => setRole(e.target.value)}>
-        <option value="coach">Coach — spotting / calling wind</option>
-        <option value="shooter">Shooter — firing partner</option>
-      </select>
-      <button className="badd" style={{ width: '100%', opacity: (code.length === 4 && !busy) ? 1 : 0.4 }}
-        disabled={code.length !== 4 || busy} onClick={go}>
-        {busy ? 'joining…' : '● join live'}</button>
-      {err && <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--red)', marginTop: 7 }}>{err}</div>}
-      <div style={{ fontFamily: 'var(--fm)', fontSize: 8.5, color: 'var(--dim)', marginTop: 7, lineHeight: 1.5 }}>
-        No account needed. The code works only while the shooter is live.
-      </div>
+    <div style={{ display: 'flex' }}>
+      <div style={cell}><div style={val}>{stats.score}
+        <span style={{ fontSize: 11, color: 'var(--dim)' }}>–{stats.xs}X</span></div>
+        <div style={lab}>Score</div></div>
+      <div style={cell}><div style={val}>{stats.mr != null ? stats.mr.toFixed(2) : '—'}</div>
+        <div style={lab}>MR in</div></div>
+      <div style={cell}><div style={val}>{stats.es != null ? stats.es.toFixed(2) : '—'}</div>
+        <div style={lab}>ES in</div></div>
+      <div style={cell}><div style={val}>{stats.n}</div><div style={lab}>Shots</div></div>
     </div>
   );
 }
 
-/* The feed is the only two-way channel, and both ends render it identically --
- * one component rather than two that drift apart. Wind calls are tagged
- * separately from chatter because on a firing line "half value from 4" and
- * "nice shot" want different weight at a glance. */
+/* The string as chips. Called shots get a mark, because "did he call it" is
+ * the first question a coach asks about a dropped point. */
+function RelayShotStrip({ shots, color }) {
+  if (!shots.length) return null;
+  let n = 0;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+      {shots.map(s => {
+        const label = s.is_sighter ? 'S' : String(++n);
+        const called = s.call_x_in != null;
+        const miss = called
+          ? Math.hypot((+s.x_in || 0) - (+s.call_x_in || 0), (+s.y_in || 0) - (+s.call_y_in || 0))
+          : null;
+        return (
+          <div key={s.id} title={called ? `called ${miss.toFixed(2)}" off` : undefined}
+            style={{ fontFamily: 'var(--fm)', fontSize: 11, padding: '3px 7px', borderRadius: 4,
+              background: s.is_sighter ? 'transparent' : 'var(--surf2)',
+              border: `1px ${s.is_sighter ? 'dashed' : 'solid'} ${s.is_sighter ? 'var(--bdr)' : color + '66'}`,
+              color: s.ring === 'X' ? color : 'var(--ink)' }}>
+            {label}<span style={{ color: 'var(--dim)' }}>·</span>{s.ring}
+            {called && <span style={{ color: 'var(--dim)', fontSize: 8 }}> ◦{miss.toFixed(1)}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* One card per shooter: numbers, plot, string. Stacked rather than side by
+ * side because a coach is holding a phone, and two 190px plots on a 430px
+ * screen makes both of them useless. */
+function RelayShooterCard({ s, yards, dense }) {
+  return (
+    <div className="tcard" style={{ padding: '11px 13px', borderColor: s.color + '55' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
+        <div style={{ width: 9, height: 9, borderRadius: 2, background: s.color }}/>
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 11, fontWeight: 700 }}>{s.name}</div>
+        {s.isSelf && <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)' }}>you</div>}
+        {s.away && <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)' }}>left</div>}
+      </div>
+      <RelayScoreRow stats={s.stats} color={s.color}/>
+      {!dense && s.stats.pts.length > 0 && (
+        <div style={{ marginTop: 9 }}><RelayPlot series={[s]} yards={yards}/></div>
+      )}
+      {s.shots.length > 0
+        ? <div style={{ marginTop: 9 }}><RelayShotStrip shots={s.shots} color={s.color}/></div>
+        : <div style={{ marginTop: 9, fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)' }}>
+            Waiting for the first shot…
+          </div>}
+    </div>
+  );
+}
+
+/* The feed is the only two-way channel, and every device renders it from this
+ * one component rather than from two that drift apart. Wind calls are tagged
+ * separately from chatter: on a firing line "half value from 4" and "nice
+ * shot" want different weight at a glance. */
 function RelayFeed({ core, messages, disabled, maxHeight }) {
   const [draft, setDraft] = useState('');
   const ref = useRef(null);
@@ -2417,6 +2407,170 @@ function RelayFeed({ core, messages, disabled, maxHeight }) {
   );
 }
 
+/* Who is here, and who has actually got their eyes on it. Presence is real
+ * rather than decorative: relay_state stamps last_seen_at on every poll, so a
+ * phone that has gone dark stops counting as watching after 20 seconds. */
+function RelayRoster({ participants, serverTime, compact }) {
+  const list = participants || [];
+  if (!list.length) return null;
+  const now = serverTime ? Date.parse(serverTime) : Date.now();
+  const away = p => now - Date.parse(p.last_seen_at) > 20000;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+      {list.map((p, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4,
+          fontFamily: 'var(--fm)', fontSize: compact ? 9 : 10,
+          opacity: away(p) ? 0.45 : 1 }}>
+          <div style={{ width: 7, height: 7, borderRadius: 2,
+            background: p.slot != null ? slotColor(p.slot) : 'var(--dim)' }}/>
+          <span>{p.name}</span>
+          <span style={{ color: 'var(--dim)' }}>
+            {p.role === 'coach' ? 'coach' : `pt${p.slot ?? '?'}`}{away(p) ? ' · away' : ''}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* The full-screen view for anyone not shooting on this device: a coach, or a
+ * shooter who joined from the home screen without binding a session. */
+function RelayViewer({ core, onExit }) {
+  const [state, setState] = useState(null);
+  const [ended, setEnded] = useState(false);
+
+  useEffect(() => {
+    const offs = [
+      core.on(core.EVENTS.RELAY_STATE, p => setState(p)),
+      core.on(core.EVENTS.RELAY_ENDED, () => setEnded(true)),
+    ];
+    return () => offs.forEach(o => o());
+  }, [core]);
+
+  const info = core.relayInfo();
+  const relay = state?.relay;
+  const series = relaySeries(state?.shots, state?.participants);
+  const withShots = series.filter(s => s.stats.pts.length > 0);
+
+  return (
+    <>
+      <style>{S}</style>
+      <div className="app">
+        <div className="hdr">
+          <button className="bback" onClick={() => { core.stopRelay(); onExit(); }}>← leave</button>
+          <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: ended ? 'var(--dim)' : 'var(--green)' }}>
+            {ended ? '○ ended' : '● live'} · {info?.code}
+          </div>
+        </div>
+        <div className="content">
+          <div style={{ padding: '13px 13px 4px' }}>
+            <div style={{ fontFamily: 'var(--fh)', fontSize: 18, fontWeight: 700 }}>
+              {relay?.title || 'Pair fire'}
+            </div>
+            <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>
+              {[relay?.target_name, relay?.distance_yd && `${relay.distance_yd}yd`]
+                .filter(Boolean).join(' · ')}
+            </div>
+            <div style={{ marginTop: 7 }}>
+              <RelayRoster participants={state?.participants} serverTime={state?.serverTime}/>
+            </div>
+          </div>
+
+          {ended && (
+            <div className="tcard" style={{ padding: '11px 13px' }}>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--dim)' }}>
+                This relay has ended. What follows is the final state.
+              </div>
+            </div>
+          )}
+
+          {/* Both strings on one target first, then a card each. The combined
+              plot is the coach's actual question: are these two groups in the
+              same place, or is one of them fighting a different wind? */}
+          {withShots.length > 1 && (
+            <div className="tcard" style={{ padding: '11px 13px' }}>
+              <div className="lbl" style={{ marginBottom: 8 }}>Both strings</div>
+              <RelayPlot series={withShots} yards={relay?.distance_yd} size={230}/>
+            </div>
+          )}
+
+          {series.length === 0 && (
+            <div className="tcard" style={{ padding: '11px 13px' }}>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)' }}>
+                Waiting for the first shot…
+              </div>
+            </div>
+          )}
+          {series.map(s => (
+            <RelayShooterCard key={s.slot} s={s} yards={relay?.distance_yd}
+              dense={withShots.length > 1}/>
+          ))}
+
+          <div className="tcard" style={{ padding: '11px 13px' }}>
+            <RelayFeed core={core} messages={state?.messages} disabled={ended}/>
+          </div>
+
+          <div style={{ margin: '2px 13px 20px', fontFamily: 'var(--fm)', fontSize: 8,
+            color: 'var(--dim)', lineHeight: 1.5 }}>
+            A hollow ring joined to an impact is the shooter's call: where the sights
+            were when the shot broke. The gap between the two is the shot they did not
+            know they threw.
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note }) {
+  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+  const [role, setRole] = useState(fixedRole || 'coach');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  async function go() {
+    setBusy(true); setErr(null);
+    const r = await core.joinRelay(code, name || 'Guest', role);
+    setBusy(false);
+    if (!r.ok) { setErr(relayErrText(r)); return; }
+    onJoined(r);
+  }
+
+  const inp = { width: '100%', background: 'var(--surf2)', border: '1px solid var(--bdr)',
+                borderRadius: 5, padding: '9px 10px', color: 'var(--ink)',
+                fontFamily: 'var(--fm)', fontSize: 12, marginBottom: 7 };
+
+  return (
+    <div className="tcard" style={{ padding: '11px 13px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div className="lbl">{fixedRole === 'shooter' ? 'Join your partner' : 'Join a live relay'}</div>
+        <button onClick={onCancel} style={{ background: 'none', border: 'none',
+          color: 'var(--dim)', cursor: 'pointer', fontSize: 14, padding: 0 }}>×</button>
+      </div>
+      <input style={{ ...inp, fontSize: 22, letterSpacing: '.28em', textAlign: 'center' }}
+        value={code} maxLength={4} autoCapitalize="characters" autoComplete="off"
+        onChange={e => setCode(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, ''))}
+        placeholder="CODE"/>
+      <input style={inp} value={name} onChange={e => setName(e.target.value)}
+        placeholder="your name" maxLength={40}/>
+      {!fixedRole && (
+        <select style={inp} value={role} onChange={e => setRole(e.target.value)}>
+          <option value="coach">Coach — spotting, calling wind, scoring nothing</option>
+          <option value="shooter">Shooter — firing my own string</option>
+        </select>
+      )}
+      <button className="badd" style={{ width: '100%', opacity: (code.length === 4 && !busy) ? 1 : 0.4 }}
+        disabled={code.length !== 4 || busy} onClick={go}>
+        {busy ? 'joining…' : '● join live'}</button>
+      {err && <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--red)', marginTop: 7 }}>{err}</div>}
+      <div style={{ fontFamily: 'var(--fm)', fontSize: 8.5, color: 'var(--dim)', marginTop: 7, lineHeight: 1.5 }}>
+        {note || 'No account needed. The code works only while the relay is live.'}
+      </div>
+    </div>
+  );
+}
+
 /* One place to turn a relay failure into something a shooter can act on.
  * The anonymous-sign-in case is called out by name because it is the single
  * most likely first-run failure: the relay needs no accounts, but "no
@@ -2424,28 +2578,29 @@ function RelayFeed({ core, messages, disabled, maxHeight }) {
 function relayErrText(r) {
   if (!r) return 'Could not reach the server. Check your connection.';
   if (r.reason === 'throttled') return 'Too many attempts. Wait a few minutes.';
+  if (r.reason === 'full') return r.message || 'That relay already has four shooters.';
+  if (r.reason === 'not_found') return 'No live relay with that code.';
   const e = String(r.error || '');
   if (/anonymous|signups? not allowed|signup_disabled/i.test(e))
     return 'Anonymous sign-in is disabled on the server. Enable it under Auth → Providers in the Supabase dashboard.';
   return r.message || 'Could not connect. Check your connection and try again.';
 }
 
-/* ── Host side ────────────────────────────────────────────────────────────
- * The shooter's own device. Deliberately compact: the shooter is on the line
- * and this must not push the shot list off the screen. It shows the code to
- * read aloud, who is actually watching, and the feed -- the feed is the whole
- * reason the host renders the relay at all, since wind calls travel coach →
- * shooter, not the other way. */
-function HostRelayCard({ core, live, hostName, onHostName, onGoLive, onEndLive }) {
+/* ── The shooter's own card, on their own session ─────────────────────────
+ * Deliberately compact: the shooter is on the line, and this must not push
+ * the shot list off the screen. Three states — idle, live, and the join form
+ * for the second shooter of a pair. */
+function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [joining, setJoining] = useState(false);
 
   useEffect(() => {
     if (!core) return undefined;
     return core.on(core.EVENTS.RELAY_STATE, p => setState(p));
   }, [core]);
-  useEffect(() => { if (!live) setState(null); }, [live]);
+  useEffect(() => { if (!live) { setState(null); setJoining(false); } }, [live]);
 
   if (!core) return null;
 
@@ -2455,6 +2610,16 @@ function HostRelayCard({ core, live, hostName, onHostName, onGoLive, onEndLive }
                  lineHeight: 1.5, marginTop: 7 };
 
   if (!live) {
+    if (joining) {
+      return (
+        <div style={{ margin: '8px 0 0' }}>
+          <JoinLiveForm core={core} fixedRole="shooter"
+            note="Your shots mirror to this relay from this session. Your partner's string is drawn over your target in their colour."
+            onCancel={() => setJoining(false)}
+            onJoined={r => { setJoining(false); onJoinLive(r); }}/>
+        </div>
+      );
+    }
     return (
       <div style={wrap}>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -2468,11 +2633,15 @@ function HostRelayCard({ core, live, hostName, onHostName, onGoLive, onEndLive }
               setBusy(false);
               if (!r || !r.ok) setErr(relayErrText(r));
             }}>{busy ? 'starting…' : '● go live'}</button>
+          <button className="badd" onClick={() => setJoining(true)}
+            style={{ background: 'none', border: '1px solid var(--bdr)', color: 'var(--ink)',
+                     whiteSpace: 'nowrap' }}>join</button>
         </div>
         <div style={note}>
-          Hands you a 4-character code. Read it to your coach; they tap <b>● join</b> on
-          their own phone and watch this string build, with a shared feed for wind calls.
-          They need no account.
+          <b>Go live</b> starts a relay and hands you a 4-character code — read it to your
+          partner and your coach. <b>Join</b> puts you on someone else's code as the second
+          shooter. Either way this session's shots mirror across, and your partner's string
+          is drawn over your target in their colour.
         </div>
         {err && <div style={{ ...note, color: 'var(--red)' }}>{err}</div>}
       </div>
@@ -2480,41 +2649,54 @@ function HostRelayCard({ core, live, hostName, onHostName, onGoLive, onEndLive }
   }
 
   const info = core.relayInfo();
-  const others = (state?.participants || []).filter(p => !p.is_self);
-  // Presence comes free: relay_state stamps last_seen_at on every poll, so a
-  // coach whose phone has gone dark stops being counted as watching. Polling
-  // makes this honest in a way a WebSocket's "connected" flag was not.
-  const now = state?.serverTime ? Date.parse(state.serverTime) : Date.now();
-  const away = p => now - Date.parse(p.last_seen_at) > 20000;
-  const watching = others.filter(p => !away(p));
+  const series = relaySeries(state?.shots, state?.participants);
+  const partners = series.filter(s => !s.isSelf && s.shots.length);
 
   return (
-    <div style={{ ...wrap, borderColor: 'var(--green)' }}>
+    <div style={{ ...wrap, borderColor: slotColor(info?.slot) }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
         <div>
           <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--green)',
-            letterSpacing: '.1em', textTransform: 'uppercase' }}>● live · read this out</div>
+            letterSpacing: '.1em', textTransform: 'uppercase' }}>
+            ● live{info?.isHost ? ' · read this out' : ''}
+          </div>
           <div style={{ fontFamily: 'var(--fm)', fontSize: 30, fontWeight: 700,
-            letterSpacing: '.22em', color: 'var(--acc)', marginTop: 2 }}>{info?.code}</div>
+            letterSpacing: '.22em', color: slotColor(info?.slot), marginTop: 2 }}>{info?.code}</div>
         </div>
         <button className="badd" onClick={onEndLive}
-          style={{ background: 'none', border: '1px solid var(--bdr)', color: 'var(--ink)' }}>end</button>
+          style={{ background: 'none', border: '1px solid var(--bdr)', color: 'var(--ink)' }}>
+          {info?.isHost ? 'end' : 'leave'}</button>
       </div>
 
-      <div style={{ fontFamily: 'var(--fm)', fontSize: 9, marginTop: 6,
-        color: watching.length ? 'var(--green)' : 'var(--dim)' }}>
-        {others.length === 0
-          ? 'Nobody has joined yet.'
-          : others.map(p => `${p.name} (${p.role})${away(p) ? ' — away' : ''}`).join(' · ')}
+      <div style={{ marginTop: 7 }}>
+        <RelayRoster participants={state?.participants} serverTime={state?.serverTime} compact/>
       </div>
 
-      <div style={{ marginTop: 9 }}>
+      {partners.length === 0
+        ? <div style={{ ...note, marginTop: 8 }}>
+            Nobody else has fired yet. Their shots will appear over your target in their colour.
+          </div>
+        : partners.map(s => (
+            <div key={s.slot} style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--bdr)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <div style={{ width: 8, height: 8, borderRadius: 2, background: s.color }}/>
+                <div style={{ fontFamily: 'var(--fm)', fontSize: 10, fontWeight: 700 }}>{s.name}</div>
+                <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: s.color, marginLeft: 'auto' }}>
+                  {s.stats.score}–{s.stats.xs}X
+                  <span style={{ color: 'var(--dim)' }}> · {s.stats.n} shots</span>
+                </div>
+              </div>
+              <RelayShotStrip shots={s.shots} color={s.color}/>
+            </div>
+          ))}
+
+      <div style={{ marginTop: 10, paddingTop: 9, borderTop: '1px solid var(--bdr)' }}>
         <RelayFeed core={core} messages={state?.messages} maxHeight={130}/>
       </div>
 
       <div style={note}>
-        Shots mirror to your coach as you log them. Leaving this session does not end
-        the relay — tap <b>end</b>, or it expires on its own.
+        Your shots mirror as you log them. Leaving this session does not end the relay —
+        tap {info?.isHost ? '“end”' : '“leave”'}, or it expires on its own.
       </div>
     </div>
   );
@@ -2781,6 +2963,31 @@ export default function App() {
     return core.on(core.EVENTS.RELAY_ENDED, () => setLiveSess(null));
   }, [core]);
 
+  /* One shot, in the shape the relay wants. The call travels with it: the gap
+   * between where a shooter said the sights were and where the hole is, is the
+   * single most useful thing a coach reads off a live string. */
+  const relayShotFor = (prior, sh, tgt) => {
+    const p = shotXY(sh, tgt);
+    const call = sh.callXY && typeof sh.callXY.x === 'number' ? sh.callXY : null;
+    return {
+      shotNo: prior.filter(x => !!x.isSighter === !!sh.isSighter).length + 1,
+      ring: sh.ring, isSighter: !!sh.isSighter, x: p.x, y: p.y,
+      callX: call ? call.x : null, callY: call ? call.y : null,
+      windCallMoa: Number.isFinite(sh.windCallMoa) ? sh.windCallMoa : null,
+      windCallDir: sh.windCallDir === 'L' || sh.windCallDir === 'R' ? sh.windCallDir : null,
+    };
+  };
+
+  /* Bind a relay to a local session and push what has already been fired. A
+   * shooter who goes live (or joins their partner) at shot 8 must not present
+   * an empty target to everyone who just arrived. */
+  const bindRelay = (sess, tgt) => {
+    setLiveSess(sess.id);
+    const prior = sess.shots || [];
+    prior.forEach((sh, i) =>
+      core.relayPushShot(relayShotFor(prior.slice(0, i), sh, tgt)));
+  };
+
   const goLive = async (sess, tgt, name) => {
     if (!core) return { ok: false, error: 'no backend configured' };
     const r = await core.createRelay({
@@ -2789,29 +2996,27 @@ export default function App() {
       targetName: tgt?.name || null,
       distanceYd: +sess.rangeYards || null,
     });
-    if (!r.ok) return r;
-    setLiveSess(sess.id);
-    // Backfill the string already fired. A shooter who goes live mid-session
-    // should not present an empty target to the coach who just joined.
-    const prior = sess.shots || [];
-    prior.forEach((sh, i) => core.relayPushShot({
-      shotNo: prior.slice(0, i).filter(x => !!x.isSighter === !!sh.isSighter).length + 1,
-      ring: sh.ring, isSighter: !!sh.isSighter, ...shotXY(sh, tgt),
-    }));
+    if (r.ok) bindRelay(sess, tgt);
     return r;
   };
 
-  const endLive = async () => { setLiveSess(null); if (core) await core.endRelay(); };
+  // The second shooter of a pair: JoinLiveForm has already joined by the time
+  // this runs, so all that is left is to bind it to the session they are
+  // actually shooting.
+  const joinLive = (sess, tgt) => { if (core) bindRelay(sess, tgt); };
+
+  // "End" for whoever started it, "leave" for anyone else -- a partner walking
+  // off the line must not take the coach's screen down with them.
+  const endLive = async () => {
+    setLiveSess(null);
+    if (core) await (core.relayInfo()?.isHost ? core.endRelay() : core.leaveRelay());
+  };
 
   // Mirror one newly logged shot. Fire and forget by design: the local session
   // is the system of record, and a dead network must never block logging.
   const mirrorShot = (sess, tgt, sh) => {
     if (!core || liveSess !== sess.id) return;
-    const prior = sess.shots || [];
-    core.relayPushShot({
-      shotNo: prior.filter(x => !!x.isSighter === !!sh.isSighter).length + 1,
-      ring: sh.ring, isSighter: !!sh.isSighter, ...shotXY(sh, tgt),
-    });
+    core.relayPushShot(relayShotFor(sess.shots || [], sh, tgt));
   };
 
   const importRef = useRef(null);
@@ -2926,6 +3131,7 @@ export default function App() {
       hostName={relayName}
       onHostName={saveRelayName}
       onGoLive={name => goLive(sess, tgt, name)}
+      onJoinLive={() => joinLive(sess, tgt)}
       onEndLive={endLive}
       onPublish={s => {
         const entry = leaderboardEntryFor(s, getTarget(s.targetId), s.lbId);
@@ -2959,6 +3165,7 @@ export default function App() {
             <>
               {showJoin && core && (
                 <JoinLiveForm core={core}
+                  note="Joining from here watches the relay. To shoot in it, open your own session and tap join there so your shots mirror."
                   onCancel={()=>setShowJoin(false)}
                   onJoined={()=>{ setShowJoin(false); setScreen('relay'); }}/>
               )}
@@ -4042,12 +4249,24 @@ function CopyButton({ text }) {
   );
 }
 
-function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack, onAddShot, onDelShot, onDelSess, core, onPublish, live, hostName, onHostName, onGoLive, onEndLive }) {
+function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack, onAddShot, onDelShot, onDelSess, core, onPublish, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
   const [addingShot, setAddingShot] = useState(false);
   const [confirmDelSess, setConfirmDelSess] = useState(false);
   const [confirmDelShot, setConfirmDelShot] = useState(null);
   const [shareText, setShareText] = useState(null);
   const [expandedShot, setExpandedShot] = useState(null);
+  // Live relay state, subscribed here rather than threaded down from App:
+  // the partner's string is a property of the relay, not of this session, and
+  // it must reach the plot without every intermediate component knowing.
+  const [relayState, setRelayState] = useState(null);
+  useEffect(() => {
+    if (!core || !live) { setRelayState(null); return undefined; }
+    return core.on(core.EVENTS.RELAY_STATE, p => setRelayState(p));
+  }, [core, live]);
+  const partners = live
+    ? relaySeries(relayState?.shots, relayState?.participants)
+        .filter(x => !x.isSelf && x.stats.pts.length)
+    : [];
 
   const shots = session.shots || [];
   const a = analytics(shots, target, session.rangeYards);
@@ -4124,8 +4343,9 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
             {session.equipment && <span className="chip" style={{maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{session.equipment}</span>}
           </div>
 
-          <HostRelayCard core={core} live={live} hostName={hostName}
-            onHostName={onHostName} onGoLive={onGoLive} onEndLive={onEndLive}/>
+          <RelayCard core={core} live={live} hostName={hostName}
+            onHostName={onHostName} onGoLive={onGoLive} onJoinLive={onJoinLive}
+            onEndLive={onEndLive}/>
 
           {a && a.n >= 2 && <>
             <div className="shdr">Group analytics</div>
@@ -4142,7 +4362,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
               </div>
             )}
             <div style={{height:10}} />
-            <GroupPlot pts={a.pts} target={target} shots={shots} yards={session.rangeYards} />
+            <GroupPlot pts={a.pts} target={target} shots={shots} yards={session.rangeYards} partners={partners} />
             <ScoreDecomposition session={session} target={target} shots={shots} />
           </>}
           {a && a.score > 0 && a.n < 2 && (
@@ -6583,12 +6803,20 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
   );
 }
 
-function GroupPlot({ pts, target, shots, yards }) {
+function GroupPlot({ pts, target, shots, yards, partners }) {
   if (!pts||pts.length<1) return null;
   const SZ=220, c=SZ/2;
 
-  // Stable stepped view radius — no whiplash on outliers.
-  const viewR = steppedViewRadius(target, pts, { pad: 0.6, minStepIdx: 1 });
+  // A partner's relayed string, drawn over the same target in their firing
+  // point's colour. Hollow, so it never reads as one of your own impacts —
+  // this is context, not your group, and the analytics below ignore it.
+  const others = (partners || []).filter(o => o.stats.pts.length);
+
+  // Stable stepped view radius — no whiplash on outliers. Partner points are
+  // included so their string cannot silently fall outside the frame.
+  const viewR = steppedViewRadius(target,
+    others.length ? pts.concat(others.flatMap(o => o.stats.pts)) : pts,
+    { pad: 0.6, minStepIdx: 1 });
   const sc = (SZ*0.88)/(viewR*2);
 
   // 95% dispersion ellipse over RECORD shots only (match mean-radius population).
@@ -6646,6 +6874,14 @@ function GroupPlot({ pts, target, shots, yards }) {
             <circle cx={ellScreen.ecx} cy={ellScreen.ecy} r={1.6} fill="#e8c840"/>
           </g>
         )}
+        {others.flatMap(o => o.stats.pts.map((pt, i) => (
+          <g key={'p'+o.slot+'-'+i} opacity={0.9}>
+            <circle className="relayed" cx={c+pt.x*sc} cy={c-pt.y*sc} r={4}
+              fill="none" stroke={o.color} strokeWidth={1.6} strokeDasharray="3 1.5"/>
+            <text x={c+pt.x*sc} y={c-pt.y*sc+2} textAnchor="middle" fill={o.color}
+              fontSize={4.5} fontFamily="Space Mono,monospace" fontWeight="700">{i+1}</text>
+          </g>
+        )))}
         {pts.map((pt,i)=>{
           const sh = shots[i];
           const ri = sh ? target.rings.findIndex(r=>r.score===sh.ring) : -1;
@@ -6665,6 +6901,23 @@ function GroupPlot({ pts, target, shots, yards }) {
           );
         })}
       </svg>
+      {others.length > 0 && (
+        <div style={{padding:'6px 12px',borderTop:'1px solid var(--bdr)',display:'flex',gap:12,flexWrap:'wrap'}}>
+          {others.map(o => (
+            <div key={o.slot} style={{display:'flex',alignItems:'center',gap:5,
+              fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>
+              <svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="none"
+                stroke={o.color} strokeWidth="1.6" strokeDasharray="3 1.5"/></svg>
+              <span style={{color:o.color}}>{o.name}</span>
+              <span>{o.stats.score}–{o.stats.xs}X</span>
+            </div>
+          ))}
+          <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',flexBasis:'100%'}}>
+            Dashed rings are relayed from your partner. They are not part of your group
+            statistics.
+          </div>
+        </div>
+      )}
       {ell && (
         <div style={{padding:'8px 12px',borderTop:'1px solid var(--bdr)',display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
           <div>

@@ -1,9 +1,19 @@
 -- ============================================================================
 -- 0004: live relay / pair-firing kit.
 --
--- A shooter goes live and gets a 4-character code. A coach enters the code,
--- their name and a role, and watches the shot string, group plot, score and
--- mean radius update as shots are logged, with a shared feed for wind calls.
+-- PAIR FIRE, as actually shot: two shooters and a coach, all three watching
+-- each other's work. One of them starts a relay and gets a 4-character code;
+-- the others enter it with a name and a role.
+--
+--   * a SHOOTER logs their own string, and sees their partner's shots and
+--     calls drawn over their own target in a second colour
+--   * a COACH logs nothing and sees both strings side by side -- calls as
+--     well as impacts, which is the thing a coach is actually reading
+--   * everyone shares one feed for wind calls and chatter
+--
+-- The consequence for this schema is that there is no single privileged
+-- writer. Every shooter writes THEIR OWN string and nobody else's, which is
+-- enforced per row rather than per relay. See relay_shots below.
 --
 -- SECURITY MODEL -- this differs from every other table in the schema.
 --
@@ -62,29 +72,51 @@ create table public.relay_participants (
   user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name          text not null default 'Guest',
   role          text not null default 'coach' check (role in ('coach', 'shooter')),
+  -- Firing point number, 1..MAX_SHOOTERS, assigned on first becoming a
+  -- shooter and never reused within a relay. This is what makes "your partner
+  -- in a different colour" consistent on every device: colour is a function of
+  -- slot, not of join order as each client happens to observe it. Coaches have
+  -- no slot.
+  slot          smallint check (slot between 1 and 4),
   joined_at     timestamptz not null default now(),
   last_seen_at  timestamptz not null default now(),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
   unique (relay_id, user_id)
 );
+create unique index ux_relay_slot on public.relay_participants (relay_id, slot)
+  where slot is not null;
 create index ix_relay_part_lookup on public.relay_participants (user_id, relay_id);
 
 -- ------------------------------------------------------------------ shots
 -- A projection for viewing, not a system of record: Zero's own session stays
--- the source of truth on the shooter's device.
+-- the source of truth on each shooter's device.
+--
+-- user_id is the whole design. Shot 3 is not "the relay's shot 3", it is "this
+-- shooter's shot 3", so two shooters firing simultaneously do not collide and
+-- neither can overwrite the other's string by racing to a number.
 create table public.relay_shots (
   id            uuid primary key default gen_random_uuid(),
   relay_id      uuid not null references public.relays(id) on delete cascade,
+  user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
   shot_no       integer not null check (shot_no > 0),
   ring          text,
   x_in          numeric(8,3),
   y_in          numeric(8,3),
+  -- Where the shooter CALLED it: sights at the break. The gap between call and
+  -- impact is the single most useful thing a coach reads off a string -- a
+  -- called flyer is a technique problem, an uncalled one is wind or ammunition.
+  call_x_in     numeric(8,3),
+  call_y_in     numeric(8,3),
+  -- The wind call this shot was fired on, so the coach can see whether their
+  -- own call was taken and what it did.
+  wind_call_moa numeric(6,2),
+  wind_call_dir text check (wind_call_dir in ('L', 'R')),
   is_sighter    boolean not null default false,
   note          text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
-  unique (relay_id, shot_no, is_sighter)
+  unique (relay_id, user_id, shot_no, is_sighter)
 );
 create index ix_relay_shots_feed on public.relay_shots (relay_id, created_at);
 
@@ -201,9 +233,10 @@ begin
     end;
   end loop;
 
-  -- The host is a participant too, so one set of policies covers everyone.
-  insert into public.relay_participants (relay_id, user_id, name, role)
-  values (r.id, auth.uid(), r.host_name, 'shooter');
+  -- The creator is a participant too, so one set of policies covers everyone.
+  -- They take firing point 1; a partner joining later takes 2.
+  insert into public.relay_participants (relay_id, user_id, name, role, slot)
+  values (r.id, auth.uid(), r.host_name, 'shooter', 1);
 
   return r;
 end $$;
@@ -228,6 +261,8 @@ as $$
 declare
   r public.relays;
   recent_fails integer;
+  v_role text;
+  v_slot smallint;
 begin
   if auth.uid() is null then
     return jsonb_build_object('ok', false, 'error', 'not_signed_in');
@@ -258,15 +293,34 @@ begin
 
   insert into public.relay_join_attempts (ok) values (true);
 
-  insert into public.relay_participants (relay_id, user_id, name, role)
+  v_role := case when p_role in ('coach','shooter') then p_role else 'coach' end;
+
+  -- Keep any slot already held: rejoining after a dropped signal must not
+  -- change your colour on everyone else's screen mid-string.
+  select slot into v_slot from public.relay_participants
+   where relay_id = r.id and user_id = auth.uid();
+
+  if v_role = 'shooter' and v_slot is null then
+    -- Take the lowest free firing point rather than max+1, so a shooter who
+    -- leaves and is replaced does not push the numbering upward forever.
+    select min(g) into v_slot from generate_series(1, 4) g
+     where not exists (select 1 from public.relay_participants p
+                        where p.relay_id = r.id and p.slot = g);
+    if v_slot is null then
+      return jsonb_build_object('ok', false, 'error', 'full',
+        'message', 'This relay already has four shooters. Join as a coach.');
+    end if;
+  end if;
+
+  insert into public.relay_participants (relay_id, user_id, name, role, slot)
   values (r.id, auth.uid(),
-          coalesce(nullif(btrim(p_name), ''), 'Guest'),
-          case when p_role in ('coach','shooter') then p_role else 'coach' end)
+          coalesce(nullif(btrim(p_name), ''), 'Guest'), v_role, v_slot)
   on conflict (relay_id, user_id) do update
-    set name = excluded.name, role = excluded.role,
+    set name = excluded.name, role = excluded.role, slot = excluded.slot,
         last_seen_at = now(), updated_at = now();
 
-  return jsonb_build_object('ok', true, 'relay', to_jsonb(r) - 'target_rings');
+  return jsonb_build_object('ok', true, 'slot', v_slot, 'role', v_role,
+                            'relay', to_jsonb(r) - 'target_rings');
 end $$;
 
 /* One round trip per poll tick: everything new since the caller's cursors,
@@ -299,16 +353,33 @@ begin
     -- identical created_at, so a strict > cursor silently drops every row
     -- that ties the boundary. The overlap costs re-sending the last row or
     -- two; THE CLIENT MUST DEDUPE BY id, which zero-core's relay client does.
-    'shots', coalesce((select jsonb_agg(to_jsonb(s) order by s.created_at, s.shot_no)
+    -- Shots carry the firing point and the shooter's name, NOT their user id:
+    -- co-participants have no business learning each other's auth ids, and
+    -- slot is what the clients colour by anyway. is_self lets a device pick
+    -- its own string out without one.
+    'shots', coalesce((select jsonb_agg(jsonb_build_object(
+                         'id', s.id, 'shot_no', s.shot_no, 'ring', s.ring,
+                         'x_in', s.x_in, 'y_in', s.y_in,
+                         'call_x_in', s.call_x_in, 'call_y_in', s.call_y_in,
+                         'wind_call_moa', s.wind_call_moa,
+                         'wind_call_dir', s.wind_call_dir,
+                         'is_sighter', s.is_sighter, 'note', s.note,
+                         'created_at', s.created_at,
+                         'slot', p.slot, 'shooter', p.name,
+                         'is_self', s.user_id = auth.uid())
+                       order by s.created_at, s.shot_no)
                        from public.relay_shots s
+                       left join public.relay_participants p
+                         on p.relay_id = s.relay_id and p.user_id = s.user_id
                        where s.relay_id = p_relay and s.created_at >= p_since_shot), '[]'::jsonb),
     'messages', coalesce((select jsonb_agg(to_jsonb(m) order by m.created_at, m.id)
                           from public.relay_messages m
                           where m.relay_id = p_relay and m.created_at >= p_since_msg), '[]'::jsonb),
     'participants', coalesce((select jsonb_agg(jsonb_build_object(
-                          'name', p.name, 'role', p.role,
+                          'name', p.name, 'role', p.role, 'slot', p.slot,
                           'last_seen_at', p.last_seen_at,
-                          'is_self', p.user_id = auth.uid()))
+                          'is_self', p.user_id = auth.uid())
+                          order by p.slot nulls last, p.joined_at)
                        from public.relay_participants p where p.relay_id = p_relay), '[]'::jsonb),
     'server_time', now()
   ) into result;
@@ -356,20 +427,33 @@ create policy relay_part_update_self on public.relay_participants for update
 create policy relay_part_delete_self on public.relay_participants for delete
   using (user_id = auth.uid());
 
--- Shots: every participant reads; only the HOST writes. A coach must never be
--- able to fabricate the shooter's string.
+-- Shots: every participant reads all of them -- that mutual visibility IS the
+-- feature. Writing is where it gets narrow, and the gate is per ROW, not per
+-- relay: you may write a shot only if it is attributed to you, you hold the
+-- shooter role in this relay, and the relay is still live.
+--
+-- Three distinct things are therefore impossible: a coach fabricating anybody's
+-- string, a shooter fabricating their PARTNER's string, and either of them
+-- appending to a relay that has ended.
+--
+-- (If a scorer entering shots on a shooter's behalf is ever wanted, that is a
+-- change to this one policy -- allow a coach to insert rows attributed to a
+-- shooter -- and nothing else. It is deliberately not enabled: silently
+-- letting two devices write one string is how a shot string gets duplicated.)
 create policy relay_shots_select on public.relay_shots for select
   using (public.is_relay_participant(relay_id));
-create policy relay_shots_insert_host on public.relay_shots for insert
-  with check (exists (select 1 from public.relays r
-                      where r.id = relay_id and r.host_id = auth.uid()
-                        and r.status = 'live'));
-create policy relay_shots_update_host on public.relay_shots for update
-  using (exists (select 1 from public.relays r
-                 where r.id = relay_id and r.host_id = auth.uid()));
-create policy relay_shots_delete_host on public.relay_shots for delete
-  using (exists (select 1 from public.relays r
-                 where r.id = relay_id and r.host_id = auth.uid()));
+create policy relay_shots_insert_own on public.relay_shots for insert
+  with check (user_id = auth.uid()
+              and exists (select 1 from public.relay_participants p
+                           join public.relays r on r.id = p.relay_id
+                          where p.relay_id = relay_shots.relay_id
+                            and p.user_id = auth.uid()
+                            and p.role = 'shooter'
+                            and r.status = 'live'));
+create policy relay_shots_update_own on public.relay_shots for update
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy relay_shots_delete_own on public.relay_shots for delete
+  using (user_id = auth.uid());
 
 -- Feed: every participant reads and writes their own lines.
 create policy relay_msg_select on public.relay_messages for select

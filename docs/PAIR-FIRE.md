@@ -1,26 +1,31 @@
 # Pair fire — the live relay
 
-**Status: built.** Migration `0004_relay.sql`, the relay client in `zero-core`, and
-the UI in `Zero.jsx`. 27 SQL assertions and a 28-assertion two-device browser test
-(`apps/zero/test-relay.mjs`) cover it.
+**Status: built.** Migration `0004_relay.sql`, the relay client in `zero-core`, the
+UI in `Zero.jsx`. 58 SQL assertions across two suites and a 47-assertion three-device
+browser test (`apps/zero/test-relay.mjs`) cover it.
 
 ---
 
 ## TL;DR
 
-A shooter taps **● go live** on a session and gets a 4-character code. A coach taps
-**● join** on their own phone, enters the code, their name and a role, and watches the
-shot string, group plot, score and mean radius build in real time, with a shared feed
-for wind calls. The coach needs no account.
+Two shooters and a coach, all three watching each other's work.
 
-Two decisions carry the whole design, and both are contrarian:
+Someone taps **● go live** on their session and gets a 4-character code. The partner
+opens *their own* session and taps **join** with that code; the coach taps **● join**
+from the home screen. From then on:
 
-1. **No WebSocket.** The relay polls every 2.5 s. This is not a fallback; it is the
-   transport. §2 explains why, and it is the direct fix for the failure you reported.
-2. **The code is not the access control.** Holding the code is not what grants access
-   — having a row in `relay_participants` is, and the only way to get that row is
-   `join_relay()`, a throttled `security definer` function. One door, so the door can
-   be watched. §3.
+| | sees | writes |
+|---|---|---|
+| **shooter** | their own target as normal, with the partner's shots drawn over it as dashed rings in the partner's colour | their own string only |
+| **coach** | both strings — on one target together, then a card each with score, mean radius, ES and the shot list; calls as well as impacts | nothing but the feed |
+| **everyone** | one shared feed for wind calls and chatter | their own lines |
+
+Two decisions carry the design, and both are contrarian:
+
+1. **No WebSocket.** The relay polls every 2.5 s. This is not a fallback, it is the
+   transport, and it is the direct fix for the failure you reported. §2.
+2. **There is no privileged writer.** Every shooter writes their own string and nobody
+   else's, enforced per row rather than per relay. §3.
 
 ---
 
@@ -55,10 +60,10 @@ mechanism is specific:
 > and the client never detects the loss, because it was never actively detected on the
 > main thread.
 
-**Pair fire is the worst possible case for this.** The premise is that one phone sits
-idle while the other shoots. Screen locks, tab backgrounds, timers throttle, heartbeat
-stops, server drops the socket — and the app shows a connected UI over a dead
-connection. Then the partner's shot never arrives.
+**Pair fire is the worst possible case for this.** The premise is that phones sit idle
+on a firing point while somebody else shoots. Screen locks, tab backgrounds, timers
+throttle, heartbeat stops, server drops the socket — and the app shows a connected UI
+over a dead connection. Then your partner's shot never arrives.
 
 ---
 
@@ -83,28 +88,79 @@ millisecond latency. A 2.5 s poll of one RPC has properties that matter more her
 - it degrades gracefully on the bad cellular signal you get at most ranges
 - it needs no new dependency — `zero-core` already does authenticated REST
 
-The client backs off ×1.8 up to 20 s on failure and snaps back to 2.5 s on the first
+The client backs off ×1.8 up to 20 s on failure, snaps back to 2.5 s on the first
 success, and re-polls immediately on `visibilitychange` and `online` rather than waiting
 out a backoff the user cannot see.
 
 **Presence comes free.** `relay_state` stamps `last_seen_at` on every poll, so the poll
-*is* the heartbeat — there is no separate keepalive to go stale. The host's card shows a
-coach as "away" after 20 s of silence. This is the thing the WebSocket version could not
-do honestly: it showed "connected" over a dead socket.
+*is* the heartbeat — there is no separate keepalive to go stale. The roster greys a name
+out after 20 s of silence. This is the thing the WebSocket version could not do
+honestly: it showed "connected" over a dead socket.
 
-The cost is one request per 2.5 s per participant, only while a relay is open. For a
-handful of shooters that is nothing.
+The cost is one request per 2.5 s per participant, only while a relay is open. For three
+people that is nothing.
 
 If latency ever proves insufficient, add Realtime as an *accelerator* on top of a polling
 layer already proven to work. The reverse order is how the previous attempt failed.
 
 ---
 
-## 3. The security model, stated honestly
+## 3. Two shooters means no privileged writer
 
-"No accounts" is implemented as **anonymous sign-in**, not as unauthenticated access.
-The coach's device gets a real `authenticated` JWT with `is_anonymous: true`; the user
-simply never typed an email. Everything below is ordinary RLS on a real `auth.uid()`.
+The first cut of this had one host who wrote the string and everyone else read it. That
+is wrong for pair fire: both shooters are logging, simultaneously, on the same relay.
+
+So `relay_shots.user_id` is the centre of the schema. **Shot 3 is not "the relay's shot
+3", it is "this shooter's shot 3."** The unique key is
+`(relay_id, user_id, shot_no, is_sighter)`, which means two shooters can both be on
+shot 3 without colliding and neither can overwrite the other's string by racing to a
+number.
+
+The write policy is per row, not per relay:
+
+```sql
+create policy relay_shots_insert_own on public.relay_shots for insert
+  with check (user_id = auth.uid()
+              and exists (select 1 from public.relay_participants p
+                           join public.relays r on r.id = p.relay_id
+                          where p.relay_id = relay_shots.relay_id
+                            and p.user_id = auth.uid()
+                            and p.role = 'shooter'
+                            and r.status = 'live'));
+```
+
+Three distinct things are therefore impossible, and each is tested with the attacker's
+own real token rather than by inspection: a **coach** fabricating anybody's string, a
+**shooter** fabricating their *partner's* string, and either of them appending to a
+relay that has **ended**.
+
+Reading is the opposite — every participant reads every shot, because that mutual
+visibility is the entire feature.
+
+### Firing points, and why colour is server-assigned
+
+Each shooter gets a `slot` (1–4) on joining. Colour is a function of slot, so **the
+partner who is blue on your phone is blue on the coach's**. If colour were assigned by
+join order as each device happened to observe it, three devices would disagree, and a
+coach saying "the blue one is stringing vertically" would mean nothing.
+
+Slots are sticky across a rejoin (a dropped signal must not reshuffle colours mid-string)
+and the lowest free slot is reused when someone leaves, so numbering does not climb
+forever over a long day.
+
+### What the shot carries
+
+Impacts, and also **calls**: `call_x_in`/`call_y_in` (where the sights were at the break)
+and `wind_call_moa`/`wind_call_dir` (the call it was fired on). The coach's plot draws a
+hollow ring joined to the impact by a line. The gap between them is the whole point — a
+called flyer is a technique problem, an uncalled one is wind or ammunition, and that
+distinction is what a coach is on the line to make.
+
+### Anonymity, honestly
+
+"No accounts" is implemented as **anonymous sign-in**, not unauthenticated access. The
+coach's device gets a real `authenticated` JWT with `is_anonymous: true`; the user simply
+never typed an email. Everything above is ordinary RLS on a real `auth.uid()`.
 
 ```
                      ┌─────────────────────────────────────────┐
@@ -112,7 +168,7 @@ simply never typed an email. Everything below is ordinary RLS on a real `auth.ui
                      └────────────────────┬────────────────────┘
                                           │ inserts
                                           ▼
-                              relay_participants row
+                              relay_participants row (+ slot)
                                           │
                      ┌────────────────────┴────────────────────┐
                      │  every relay RLS policy reads this row  │
@@ -123,16 +179,15 @@ simply never typed an email. Everything below is ordinary RLS on a real `auth.ui
   a code can never spell a word; no `0/O/1/I/L`, so it is unambiguous shouted down a
   firing line. 27⁴ = 531,441 codes.
 - **A code is only valid while its relay is `live` and unexpired**, so the target set is
-  however many relays are running right now — typically one or two, not half a million.
-- **`join_relay` returns a result, it does not raise.** This is load-bearing: a `RAISE`
-  rolls back the transaction, which rolled back the failed-attempt row, so the throttle
-  counted nothing and could never trip. The SQL suite regression-tests exactly this by
-  asserting the attempt rows persist.
+  however many relays are running right now — typically one, not half a million.
+- **`join_relay` returns a result, it does not raise.** Load-bearing: a `RAISE` rolls
+  back the transaction, which rolled back the failed-attempt row, so the throttle counted
+  nothing and could never trip. The SQL suite regression-tests exactly this.
 - **Ten failed attempts per user per 15 minutes.** The eleventh is refused *on the
   throttle*, not on the lookup, so a guesser learns nothing by continuing.
-- **Only the host writes shots.** The insert policy checks `relays.host_id = auth.uid()`.
-  A coach can post to the feed and nothing else — the browser test forges a `POST` with
-  the coach's own real token and asserts a 403.
+- **No auth user id ever leaves the server.** `relay_state` returns `slot`, the shooter's
+  display name, and an `is_self` flag — enough to group and colour the strings, and
+  nothing a co-participant has any business knowing.
 - **Anonymous devices cannot publish to the leaderboard.** A `RESTRICTIVE` policy rejects
   any insert whose JWT carries `is_anonymous: true`, or the board is trivially spammable.
 
@@ -142,36 +197,53 @@ default 30 anonymous sign-ins per hour per IP, guessing a live code takes days o
 sustained effort. The prize is someone's shot string. That is an acceptable trade here
 and would **not** be acceptable for anything sensitive.
 
+### One thing deliberately not built
+
+A **scorer entering shots on a shooter's behalf**. That is one change to
+`relay_shots_insert_own` — allow a coach to insert rows attributed to a shooter — and
+nothing else. It is off because letting two devices write one string is how a shot string
+silently ends up with duplicates, and there is no way to tell afterwards which entry was
+real. Say the word if you want it; it should come with a "who is scoring" lock rather
+than as a free-for-all.
+
 ---
 
-## 4. What each side sees
+## 4. What each screen does
 
-**Shooter** — a card on the session, above the shot list: the code in large type, who is
-watching (and who has gone away), and the feed. Leaving the session does not end the
-relay; the home screen shows a live strip that taps back into it. Going live from a
-second session ends the first — one live relay per shooter, enforced by a partial unique
-index on `(code) where status = 'live'`.
+**Shooter.** A card on the session, above the shot list. Idle it offers **● go live**
+(start one, get the code) and **join** (put yourself on someone else's code as the second
+shooter). Live it shows the code, the roster, your partner's running score and string,
+and the feed. Your partner's impacts appear on your own group plot as **dashed hollow
+rings in their colour**, with a legend saying outright that they are relayed and are *not*
+part of your group statistics — because a partner's shots silently inflating your own ES
+would be a genuinely dangerous bug.
 
-Shots already fired are **backfilled** when going live, so a coach joining mid-string
-does not see an empty target.
+Leaving the session does not end the relay; the home screen keeps a live strip that taps
+back into it. The shooter who started it sees **end**; anyone else sees **leave**, which
+frees their firing point without taking the coach's screen down.
 
-**Coach** — a full screen: score and X count, mean radius, extreme spread, shot count, a
-group plot with the mean-radius ring, the numbered shot string, and the feed. Sighters
-are drawn dashed and excluded from the statistics.
+Shots already fired are **backfilled** on going live or joining, so arriving at shot 8
+does not present an empty target.
 
-The relay is a *projection*, not a system of record. Zero's local session remains the
-source of truth on the shooter's device; `relay_shots` is a view of it that expires.
+**Coach.** A full screen: both strings on one target first — that combined plot is the
+coach's actual question, *are these two groups in the same place or is one fighting a
+different wind* — then a card per shooter with score/X, mean radius, ES, shot count and
+the shot list. Called shots are marked with how far off the call was. No control anywhere
+logs a shot.
+
+The relay is a *projection*, not a system of record. Each shooter's local session stays
+the source of truth on their own device; `relay_shots` is a view of it that expires.
 
 ---
 
 ## 5. Before it works on a real project
 
-1. `supabase db push` (or paste `0004_relay.sql` into the SQL editor after `0001`–`0003`).
+1. `supabase db push` (or paste `0001`–`0004` into the SQL editor, in order).
 2. **Enable anonymous sign-ins**: Supabase dashboard → Authentication → Providers →
-   Anonymous. It ships **disabled**, and with it off the coach cannot join at all. The
-   app names this failure explicitly rather than showing a generic error, because it is
-   the single most likely first-run problem.
-3. Consider turning on CAPTCHA for anonymous sign-ins if the app ever goes public.
+   Anonymous. It ships **disabled**, and with it off a coach cannot join at all. The app
+   names this failure explicitly rather than showing a generic error, because it is the
+   single most likely first-run problem.
+3. Consider CAPTCHA on anonymous sign-ins if the app ever goes public.
 
 Relays expire on their own; nothing needs pruning by hand.
 
@@ -181,10 +253,27 @@ Relays expire on their own; nothing needs pruning by hand.
 
 | | |
 |---|---|
-| `supabase/test/rls_test3.sql` | 27 assertions, three actors. A stranger cannot list relays, read one by id, read the shot string, enumerate participants, or self-insert a participant row. Wrong codes trip the throttle *and the attempt rows survive*. A coach can read and post but cannot log shots or end the relay. The `>=` cursor returns two shots sharing one timestamp. The code dies when the relay ends or expires. |
-| `apps/zero/test-relay.mjs` | 28 assertions across two real browser profiles. Drives the actual buttons on both devices — nothing calls the relay API to make something appear. Verified by negative control: removing the one line that mirrors a shot makes it fail. |
+| `supabase/test/rls_test3.sql` | 27 assertions. A stranger cannot list relays, read one by id, read the shot string, enumerate participants, or self-insert a participant row. Wrong codes trip the throttle *and the attempt rows survive*. The `>=` cursor returns two shots sharing one timestamp. The code dies when the relay ends or expires. |
+| `supabase/test/rls_test4.sql` | 31 assertions, two shooters and a coach. Both shooters number from 1 without colliding; neither can write, rewrite or delete the other's rows; the coach can write none; everyone reads everything; slots stick across a rejoin and are reused after someone leaves; no auth id is exposed; an ended relay accepts nothing. |
+| `packages/zero-core` | 98 assertions, 21 of them pair fire: role and slot come from the server, shots sort by firing point, `is_self` separates your string from your partner's, a coach is refused client-side before a request is even sent. |
+| `apps/zero/test-relay.mjs` | 47 assertions across **three real browser profiles**, driving the actual buttons — nothing calls the relay API to make something appear. Verified by negative control: dropping the one prop that overlays the partner's string makes five assertions fail. |
 
-The browser suite runs against `packages/zero-core/mock-supabase.mjs`, a mock of GoTrue
+The browser suites run against `packages/zero-core/mock-supabase.mjs`, a mock of GoTrue
 and PostgREST. That mock encodes an understanding of Supabase's endpoints, which is
 exactly the thing that could be wrong — **the first run against a real project is the
 test that counts.**
+
+---
+
+## 7. A trap worth knowing about
+
+`Zero.jsx` carries zero-core **inline**, because the single-file build has to open
+straight off disk with no bundler. That copy used to be maintained by hand, and during
+this work it drifted: the relay client gained per-shooter attribution in
+`packages/zero-core` while `Zero.jsx` kept the old host-only version. The symptom was a
+second shooter whose shots silently never mirrored, and every obvious suspect — RLS, the
+join flow, the mock — was innocent.
+
+It is a generated region now, fenced by `//#region zero-core` markers and rewritten by
+`tools/embed-core.mjs` as part of `npm run build`. `npm test` runs it with `--check`, so
+drift is a red build rather than an afternoon spent debugging the wrong file.

@@ -385,6 +385,79 @@ section('live relay');
   ok(!late.ok, 'the code stops working once the relay ends');
 }
 
+/* ======================================================= pair fire: two + one */
+section('pair fire — two shooters and a coach');
+{
+  const a = mkClient(), b = mkClient(), coach = mkClient();
+
+  const made = await a.createRelay({ hostName: 'Jaxon', title: 'Pairs', distanceYd: 200 });
+  ok(made.slot === 1, 'the shooter who starts the relay takes firing point 1');
+  const code = made.relay.code;
+
+  const bj = await b.joinRelay(code, 'Partner Pete', 'shooter');
+  ok(bj.ok && bj.role === 'shooter', 'a partner joins as a shooter');
+  ok(bj.slot === 2, '...on firing point 2');
+  ok(b.relayInfo().canShoot === true, '...and is allowed to log shots');
+
+  const cj = await coach.joinRelay(code, 'Coach Ruth', 'coach');
+  ok(cj.slot === null, 'the coach takes no firing point');
+  ok(coach.relayInfo().canShoot === false, '...and may not log shots');
+
+  // both shooters fire a string, both numbered from 1
+  await a.relayPushShot({ shotNo: 1, ring: '10', x: 0.1, y: 0.05, callX: 0, callY: 0 });
+  await b.relayPushShot({ shotNo: 1, ring: '9',  x: -0.4, y: 0.2 });
+  await a.relayPushShot({ shotNo: 2, ring: 'X',  x: 0.02, y: 0.03 });
+  await b.relayPushShot({ shotNo: 2, ring: '10', x: -0.1, y: 0.15,
+                          windCallMoa: 0.75, windCallDir: 'L' });
+
+  const seenByCoach = await coach.pollRelayOnce();
+  ok(seenByCoach.shots.length === 4,
+     `both strings reach the coach, unmerged (${seenByCoach.shots.length})`);
+  ok(new Set(seenByCoach.shots.map(x => x.slot)).size === 2,
+     'the coach can tell the two strings apart by firing point');
+  ok(seenByCoach.shots.every(x => x.shooter),
+     '...and reads names, not numbers');
+  ok(seenByCoach.shots.every(x => x.user_id === undefined),
+     'no auth user id is exposed to co-participants');
+  ok(seenByCoach.shots.some(x => x.call_x_in != null),
+     "the shooter's call travels with the shot");
+  ok(seenByCoach.shots.some(x => x.wind_call_moa != null),
+     '...as does the wind call it was fired on');
+
+  // ordering: grouped by firing point, not interleaved by arrival
+  ok(seenByCoach.shots.map(x => x.slot).join('') === '1122',
+     'shots are ordered by firing point, not by the order they arrived');
+
+  const seenByA = await a.pollRelayOnce();
+  ok(seenByA.shots.filter(x => x.is_self).length === 2,
+     'a shooter can pick out their own two shots');
+  ok(seenByA.shots.filter(x => !x.is_self).length === 2,
+     "...and their partner's two, to draw in another colour");
+
+  // and the write gate is per row, not per relay
+  const forgedByPartner = await b.relayPushShot({ shotNo: 1, ring: 'X', x: 0, y: 0 });
+  ok(forgedByPartner.ok,
+     "a partner re-pushing shot 1 updates THEIR row, not the other shooter's");
+  const afterForge = await coach.pollRelayOnce();
+  ok(afterForge.shots.length === 4 ||
+     (await coach.pollRelayOnce()).shots.length === 4,
+     '...so the relay still holds four shots, not five');
+  const aShot1 = (await coach.pollRelayOnce()).shots.find(x => x.slot === 1 && x.shot_no === 1);
+  ok(aShot1 && aShot1.ring === '10',
+     "the first shooter's shot 1 is untouched by the partner's write");
+
+  const coachForge = await coach.relayPushShot({ shotNo: 1, ring: 'X', x: 0, y: 0 });
+  ok(!coachForge.ok && coachForge.reason === 'not-shooter',
+     'a coach is refused before a request is even sent');
+
+  // only the shooter who started it may end it
+  const bEnd = await b.endRelay();
+  ok(!bEnd.ok, 'a partner cannot end the relay');
+  await a.endRelay();
+  const lateShot = await b.relayPushShot({ shotNo: 3, ring: '9', x: 0, y: 0 });
+  ok(!lateShot.ok, 'an ended relay accepts no further shots');
+}
+
 /* ============================================================ user isolation */
 section('user isolation');
 {

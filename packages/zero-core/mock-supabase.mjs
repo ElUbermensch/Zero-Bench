@@ -151,7 +151,8 @@ export function startMock(opts = {}) {
             created_at: stamp(), updated_at: stamp() };
           state.relays.set(relay.id, relay);
           state.relayParts.set(relay.id, new Map([[a.userId,
-            { user_id: a.userId, name: relay.host_name, role: 'shooter', last_seen_at: stamp() }]]));
+            { user_id: a.userId, name: relay.host_name, role: 'shooter',
+              slot: 1, last_seen_at: stamp() }]]));
           return json(res, 200, relay);
         }
 
@@ -170,10 +171,21 @@ export function startMock(opts = {}) {
               message: 'No live relay with that code.' });
           }
           const parts = state.relayParts.get(relay.id) || new Map();
+          const role = payload.p_role === 'shooter' ? 'shooter' : 'coach';
+          // Keep any slot already held (rejoin), else take the lowest free one.
+          let slot = parts.get(a.userId)?.slot ?? null;
+          if (role === 'shooter' && slot == null) {
+            const taken = new Set([...parts.values()].map(p => p.slot).filter(Boolean));
+            slot = [1, 2, 3, 4].find(g => !taken.has(g)) ?? null;
+            if (slot == null) {
+              return json(res, 200, { ok: false, error: 'full',
+                message: 'This relay already has four shooters. Join as a coach.' });
+            }
+          }
           parts.set(a.userId, { user_id: a.userId, name: payload.p_name || 'Guest',
-            role: payload.p_role === 'shooter' ? 'shooter' : 'coach', last_seen_at: stamp() });
+            role, slot, last_seen_at: stamp() });
           state.relayParts.set(relay.id, parts);
-          return json(res, 200, { ok: true, relay });
+          return json(res, 200, { ok: true, relay, slot, role });
         }
 
         if (fn === 'relay_state') {
@@ -188,11 +200,16 @@ export function startMock(opts = {}) {
           return json(res, 200, {
             relay,
             shots: since([...table('relay_shots').values()]
-              .filter(x => x.relay_id === payload.p_relay), payload.p_since_shot || ''),
+              .filter(x => x.relay_id === payload.p_relay), payload.p_since_shot || '')
+              .map(({ user_id, ...x }) => ({ ...x,
+                slot: parts.get(user_id)?.slot ?? null,
+                shooter: parts.get(user_id)?.name ?? null,
+                is_self: user_id === a.userId })),
             messages: since([...table('relay_messages').values()]
               .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || ''),
             participants: [...parts.values()].map(x => ({ name: x.name, role: x.role,
-              last_seen_at: x.last_seen_at, is_self: x.user_id === a.userId })),
+              slot: x.slot ?? null, last_seen_at: x.last_seen_at,
+              is_self: x.user_id === a.userId })),
             server_time: stamp(),
           });
         }
@@ -214,6 +231,15 @@ export function startMock(opts = {}) {
         const t = p.slice('/rest/v1/'.length);
         const a = auth(req);
         if (!a || a.expired) return json(res, 401, { message: 'JWT expired' });
+
+        /* Leaving a relay is the only DELETE the clients issue. Scoped to the
+         * caller's own participant row, mirroring relay_part_delete_self. */
+        if (req.method === 'DELETE' && t === 'relay_participants') {
+          const rid = (u.searchParams.get('relay_id') || '').replace(/^eq\./, '');
+          const parts = state.relayParts.get(rid);
+          if (parts) parts.delete(a.userId);
+          return json(res, 204, null);
+        }
 
         if (req.method === 'GET') {
           state.hits.pull[t] = (state.hits.pull[t] || 0) + 1;
@@ -268,12 +294,17 @@ export function startMock(opts = {}) {
                 return json(res, 403, { code: '42501', message: 'RLS: not your entry' });
               }
             }
-            // Only the host may write the shot string; a coach must not be
-            // able to fabricate shots.
+            // A shooter writes their OWN string and nobody else's, and only
+            // while the relay is live. Mirrors relay_shots_insert_own.
             if (t === 'relay_shots') {
               const relay = state.relays.get(row.relay_id);
-              if (!relay || relay.host_id !== a.userId) {
-                return json(res, 403, { code: '42501', message: 'only the host logs shots' });
+              const me = state.relayParts.get(row.relay_id)?.get(a.userId);
+              const prior = row.id ? table(t).get(row.id) : null;
+              if (!relay || relay.status !== 'live' || !me || me.role !== 'shooter'
+                  || (row.user_id && row.user_id !== a.userId)
+                  || (prior && prior.user_id !== a.userId)) {
+                return json(res, 403, { code: '42501',
+                  message: 'a shooter may only write their own string, on a live relay' });
               }
             }
             if (t === 'relay_messages') {
@@ -294,6 +325,7 @@ export function startMock(opts = {}) {
             if (!row.id && (t === 'relay_shots' || t === 'relay_messages')) {
               const key = t === 'relay_shots'
                 ? [...table(t).values()].find(x => x.relay_id === row.relay_id
+                    && x.user_id === a.userId
                     && x.shot_no === row.shot_no && !!x.is_sighter === !!row.is_sighter)
                 : null;
               row.id = key ? key.id : randomUUID();

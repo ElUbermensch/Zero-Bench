@@ -648,8 +648,13 @@ const ZeroCore = (() => {
      * That is what killed the previous attempt. A plain request on resume
      * simply works, and there is no connection to have quietly died.
      * ================================================================== */
-    let relay = null;   // { id, code, role, name, isHost, sinceShot, sinceMsg,
-                        //   shots:Map, messages:Map, timer, stopped }
+    let relay = null;   // { id, code, role, slot, name, isHost, sinceShot,
+                        //   sinceMsg, shots:Map, messages:Map, timer, stopped }
+                        //
+                        // role decides whether this device may write shots.
+                        // isHost decides only who may END the relay. They are
+                        // separate on purpose: in a pair, BOTH people are
+                        // shooters but only one started it.
 
     const RELAY_POLL_MS = 2500;
     const RELAY_BACKOFF_MAX_MS = 20000;
@@ -667,9 +672,9 @@ const ZeroCore = (() => {
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'create', error: r.error }); return r; }
       const row = Array.isArray(r.data) ? r.data[0] : r.data;
-      startRelay({ id: row.id, code: row.code, isHost: true,
+      startRelay({ id: row.id, code: row.code, isHost: true, slot: 1,
                    name: o.hostName || 'Shooter', role: 'shooter' });
-      return { ok: true, relay: row };
+      return { ok: true, relay: row, slot: 1, role: 'shooter' };
     }
 
     async function joinRelay(code, name, role) {
@@ -685,9 +690,12 @@ const ZeroCore = (() => {
       // which is how the server-side throttle can record the failed attempt.
       const d = r.data || {};
       if (!d.ok) return { ok: false, reason: d.error, message: d.message };
+      // Trust the SERVER's answer on role and firing point, not the request:
+      // a relay that is already full hands back a coach seat, and rejoining
+      // returns the slot you already held rather than a fresh one.
       startRelay({ id: d.relay.id, code: d.relay.code, isHost: false,
-                   name: name || 'Guest', role: role === 'shooter' ? 'shooter' : 'coach' });
-      return { ok: true, relay: d.relay };
+                   name: name || 'Guest', role: d.role || 'coach', slot: d.slot || null });
+      return { ok: true, relay: d.relay, slot: d.slot || null, role: d.role || 'coach' };
     }
 
     function startRelay(meta) {
@@ -731,9 +739,12 @@ const ZeroCore = (() => {
       relay.sinceShot = maxOf(st.shots || [], relay.sinceShot);
       relay.sinceMsg = maxOf(st.messages || [], relay.sinceMsg);
 
-      const shots = [...relay.shots.values()]
-        .sort((a, b) => (a.is_sighter === b.is_sighter)
-          ? a.shot_no - b.shot_no : (a.is_sighter ? -1 : 1));
+      // Ordered by firing point, then sighters before record, then number.
+      // Two shooters both have a shot 1, so shot_no alone no longer orders.
+      const shots = [...relay.shots.values()].sort((a, b) =>
+        (a.slot || 0) - (b.slot || 0) ||
+        (a.is_sighter === b.is_sighter ? 0 : (a.is_sighter ? -1 : 1)) ||
+        a.shot_no - b.shot_no);
       const messages = [...relay.messages.values()]
         .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
 
@@ -784,18 +795,35 @@ const ZeroCore = (() => {
       relayResumeHandler = null;
     }
 
-    /** Host only: mirror a shot into the relay. Fire and forget -- a failure
-     *  here must never block logging the shot locally. */
+    /** Mirror one of YOUR OWN shots into the relay. Any participant holding
+     *  the shooter role may do this; the server enforces that the row is
+     *  attributed to the caller, so a partner cannot write your string.
+     *
+     *  Fire and forget -- a failure here must never block logging the shot
+     *  locally, because the local session is the system of record. */
     async function relayPushShot(shot) {
-      if (!relay || !relay.isHost) return { ok: false, reason: 'not-host' };
-      const res = await authed('/rest/v1/relay_shots?on_conflict=relay_id,shot_no,is_sighter', {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.role !== 'shooter') return { ok: false, reason: 'not-shooter' };
+      const uid = session && session.user && session.user.id;
+      // The conflict key includes user_id: re-pushing YOUR shot 3 updates your
+      // row and never touches your partner's shot 3.
+      const res = await authed(
+        '/rest/v1/relay_shots?on_conflict=relay_id,user_id,shot_no,is_sighter', {
         method: 'POST',
         headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
         body: JSON.stringify([{
           relay_id: relay.id,
+          user_id: uid || undefined,
           shot_no: shot.shotNo,
           ring: shot.ring == null ? null : String(shot.ring),
           x_in: shot.x, y_in: shot.y,
+          // The call is what a coach reads. Sending it is the difference
+          // between "he shot a 9 at 4 o'clock" and "he called it centre".
+          call_x_in: shot.callX == null ? null : shot.callX,
+          call_y_in: shot.callY == null ? null : shot.callY,
+          wind_call_moa: shot.windCallMoa == null ? null : shot.windCallMoa,
+          wind_call_dir: shot.windCallDir === 'L' || shot.windCallDir === 'R'
+            ? shot.windCallDir : null,
           is_sighter: !!shot.isSighter,
           note: shot.note || null,
         }]),
@@ -845,9 +873,28 @@ const ZeroCore = (() => {
       return r;
     }
 
+    /** Leave without ending it for everyone else. Deletes the participant row
+     *  rather than just stopping the poll, so the firing point is freed and
+     *  the others stop seeing a name that will never come back. Best effort:
+     *  a failed delete must not trap you in a relay you have walked away from. */
+    async function leaveRelay() {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.isHost) return endRelay();
+      const id = relay.id;
+      const uid = session && session.user && session.user.id;
+      stopRelay();
+      if (!uid) return { ok: true };
+      try {
+        await authed('/rest/v1/relay_participants?relay_id=eq.' + encodeURIComponent(id) +
+                     '&user_id=eq.' + encodeURIComponent(uid), { method: 'DELETE' });
+      } catch (_) { /* already gone, or offline -- either way we are out */ }
+      return { ok: true };
+    }
+
     const relayInfo = () => (relay
       ? { id: relay.id, code: relay.code, isHost: relay.isHost,
-          name: relay.name, role: relay.role,
+          name: relay.name, role: relay.role, slot: relay.slot,
+          canShoot: relay.role === 'shooter',
           shotCount: relay.shots.size, participants: relay.participants }
       : null);
 
@@ -864,7 +911,7 @@ const ZeroCore = (() => {
       selectView, rpc, ballisticProfiles, batchPerformance,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
-      createRelay, joinRelay, stopRelay, endRelay, pollRelayOnce,
+      createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
       relayPushShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return online; },

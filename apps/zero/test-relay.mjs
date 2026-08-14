@@ -1,12 +1,13 @@
-/* Pair fire, end to end, across two genuinely separate browser profiles.
+/* Pair fire, end to end, across THREE genuinely separate browser profiles:
+ * two shooters and a coach, all watching each other.
  *
- * The claim under test is the user's own spec: "The shooter taps go live, gets
- * a code; a viewer taps join live, enters the code + name + role, and sees the
- * shooter's shot string, group plot, score and mean radius update as shots are
- * logged, plus a shared text feed."
+ * The claim under test is the user's own description: "two shooters and one
+ * coach all visibly seeing each other's work. The coach would have a screen to
+ * see both calls and shots; both shooters would have their normal things and
+ * then their teammates in a different colour."
  *
- * So the test drives the actual UI on both sides. It never calls the relay API
- * directly to make something appear -- if a button is not wired, this fails.
+ * So the test drives the actual UI on all three devices. It never calls the
+ * relay API to make something appear -- if a button is not wired, this fails.
  */
 import { chromium } from 'playwright';
 import fsx from 'node:fs';
@@ -61,7 +62,7 @@ async function device(label, { seed, email } = {}) {
 }
 
 /** Log one shot through the real ShotEntry screen. Default ring, 12 o'clock:
- *  the point is the mirroring, not the coordinate entry. */
+ *  the point under test is the mirroring, not coordinate entry. */
 async function logShot(page) {
   await page.click('button:has-text("+ shot")');
   await page.waitForTimeout(300);
@@ -69,162 +70,232 @@ async function logShot(page) {
   await page.waitForTimeout(500);
 }
 
-const HOST_SESSION = [{
-  id: 'sHost', name: 'Sunday league', date: '2026-08-14', type: 'Score',
+const mkSession = (id, name, rings) => ([{
+  id, name, date: '2026-08-14', type: 'Score',
   position: 'Standing', targetId: 'any', rangeYards: 100, rangeLocation: 'club',
   rifleId: '', ammoId: '', ts: 1, matchId: null,
-  shots: [
-    { id: 's1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 },
-    { id: 's2', ring: '9', clockH: 3, clockM: 0, xy: { x: 0.4, y: 0 }, elev: 0, wind: 0 },
-  ],
-}];
+  shots: rings.map((r, i) => ({
+    id: id + '-s' + i, ring: String(r), clockH: 12, clockM: 0,
+    xy: { x: i * 0.4, y: 0 },
+    // shot 1 carries a call, so the coach's call-vs-impact line has something
+    // to draw and the assertion below is not vacuous
+    callXY: i === 0 ? { x: 0, y: 0.15 } : undefined,
+    elev: 0, wind: 0,
+  })),
+}]);
 
-/* ══════════════════════════════════════════════════════════ the shooter */
-section('the shooter goes live');
-const host = await device('host', { seed: HOST_SESSION, email: 'host@example.com' });
-await host.page.click('text=Sunday league');
-await host.page.waitForTimeout(400);
+/* ══════════════════════════════════════════════════════ shooter A goes live */
+section('shooter A goes live');
+const A = await device('A', { seed: mkSession('sA', 'Sunday league', [10, 9]), email: 'a@example.com' });
+await A.page.click('text=Sunday league');
+await A.page.waitForTimeout(400);
 
-ok(await host.page.locator('button:has-text("go live")').count() === 1,
+ok(await A.page.locator('button:has-text("go live")').count() === 1,
    'the session offers "go live"');
+ok(await A.page.locator('button:text-is("join")').count() === 1,
+   '...and "join", for the second shooter of a pair');
 
-await host.page.fill('input[placeholder="your name"]', 'Jaxon');
-await host.page.click('button:has-text("go live")');
-await host.page.waitForTimeout(1200);
+await A.page.fill('input[placeholder="your name"]', 'Jaxon');
+await A.page.click('button:has-text("go live")');
+await A.page.waitForTimeout(1200);
 
-const hostBody1 = await host.page.textContent('body');
-const code = (hostBody1.match(/read this out\s*([2-9BCDFGHJKMNPQRSTVWXZ]{4})/) || [])[1]
-  || await host.page.evaluate(() => {
-       const el = [...document.querySelectorAll('div')]
-         .find(d => /^[2-9BCDFGHJKMNPQRSTVWXZ]{4}$/.test(d.textContent.trim())
-                 && d.children.length === 0);
-       return el ? el.textContent.trim() : null;
-     });
-ok(!!code && /^[2-9BCDFGHJKMNPQRSTVWXZ]{4}$/.test(code || ''),
-   `a 4-character code is shown to read aloud (${code})`);
-ok(hostBody1.includes('Nobody has joined yet'), 'the host is told nobody is watching yet');
+const bodyA1 = await A.page.textContent('body');
+const code = await A.page.evaluate(() => {
+  const el = [...document.querySelectorAll('div')]
+    .find(d => /^[2-9BCDFGHJKMNPQRSTVWXZ]{4}$/.test(d.textContent.trim()) && !d.children.length);
+  return el ? el.textContent.trim() : null;
+});
+ok(!!code, `a 4-character code is shown to read aloud (${code})`);
+ok(bodyA1.includes('Jaxon') && bodyA1.includes('pt1'),
+   'the roster shows the shooter on firing point 1');
 
-// the two already-fired shots must be backfilled, or a coach joining mid-string
-// sees an empty target
 const relayId = [...mock.state.relays.values()][0]?.id;
-ok(mock.state.relays.size === 1 && [...mock.state.relays.values()][0].status === 'live',
-   'exactly one live relay exists on the server');
-const backfilled = [...(mock.state.rows.get('relay_shots')?.values() || [])]
+const shotsOn = () => [...(mock.state.rows.get('relay_shots')?.values() || [])]
   .filter(s => s.relay_id === relayId);
-ok(backfilled.length === 2, `the string already fired is backfilled (${backfilled.length})`);
+ok(shotsOn().length === 2, `the string already fired is backfilled (${shotsOn().length})`);
+ok(shotsOn().some(s => s.call_x_in != null),
+   "the shooter's call is mirrored alongside the impact");
 
-await host.page.screenshot({ path: 'shots/relay-host.png', fullPage: true });
+/* ═══════════════════════════════════════ shooter B joins as the second shooter */
+section('shooter B joins as the second shooter, from their own session');
+const B = await device('B', { seed: mkSession('sB', 'Range day B', [9, 9]), email: 'b@example.com' });
+await B.page.click('text=Range day B');
+await B.page.waitForTimeout(400);
+await B.page.click('button:text-is("join")');
+await B.page.waitForTimeout(300);
+ok(await B.page.locator('input[placeholder="CODE"]').count() === 1,
+   'a shooter can join a relay from inside their own session');
+ok(await B.page.locator('select').count() === 0,
+   '...with no role to choose: joining from a session means shooting in it');
 
-/* ══════════════════════════════════════════════════════════════ the coach */
-section('the coach joins with the code and no account');
-const coach = await device('coach');           // note: no email, no password
-await coach.page.click('button:has-text("● join")');
-await coach.page.waitForTimeout(300);
-ok(await coach.page.locator('input[placeholder="CODE"]').count() === 1,
-   'the join form is reachable from the home screen');
+await B.page.fill('input[placeholder="CODE"]', code);
+await B.page.fill('input[placeholder="your name"]', 'Partner Pete');
+await B.page.click('button:has-text("join live")');
+await B.page.waitForTimeout(1500);
+
+const bodyB1 = await B.page.textContent('body');
+ok(bodyB1.includes('pt2'), 'the partner is given firing point 2');
+ok(bodyB1.includes(code), '...and sees the same code');
+ok(bodyB1.includes('leave') && !bodyB1.includes('read this out'),
+   'the partner is offered "leave", not "end" — only the shooter who started it ends a relay');
+
+const bUid = mock.state.users.get('b@example.com').id;
+ok(shotsOn().filter(s => s.user_id === bUid).length === 2,
+   "the partner's own string is backfilled too");
+ok(shotsOn().length === 4, 'four shots on the relay: two strings of two, unmerged');
+
+/* ══════════════════════════════════ each shooter sees the other, in colour */
+section('each shooter sees the other, in a different colour');
+await A.page.waitForTimeout(4000);
+const bodyA2 = await A.page.textContent('body');
+ok(bodyA2.includes('Partner Pete'), "shooter A sees the partner's name");
+ok(bodyA2.includes('Dashed rings are relayed from your partner'),
+   "...and the partner's string is drawn over A's own target, marked as relayed");
+ok(await A.page.locator('svg circle.relayed').count() === 2,
+   "exactly the partner's two impacts are overlaid, hollow so they read as context not as A's own");
+ok(bodyA2.includes('18–0X'), "...with the partner's running score (18–0X)");
+ok(bodyA2.includes('are not part of your group'),
+   'the app says outright that relayed shots are excluded from your own statistics');
+
+await B.page.waitForTimeout(3000);
+ok((await B.page.textContent('body')).includes('Jaxon'), 'shooter B sees shooter A');
+ok(await B.page.locator('svg circle.relayed').count() === 2,
+   "...and A's two impacts drawn over B's own target");
+
+await A.page.screenshot({ path: 'shots/relay-shooter.png', fullPage: true });
+
+/* ═════════════════════════════════════════════ the coach sees both strings */
+section('the coach sees both strings and both calls');
+const C = await device('C');                     // no email, no password
+await C.page.click('button:has-text("● join")');
+await C.page.waitForTimeout(300);
 
 // wrong code first: the door must stay shut
-await coach.page.fill('input[placeholder="CODE"]', 'BBBB');
-await coach.page.fill('input[placeholder="your name"]', 'Coach Dave');
-await coach.page.click('button:has-text("join live")');
-await coach.page.waitForTimeout(700);
-ok((await coach.page.textContent('body')).includes('No live relay with that code'),
+await C.page.fill('input[placeholder="CODE"]', 'BBBB');
+await C.page.fill('input[placeholder="your name"]', 'Coach Ruth');
+await C.page.click('button:has-text("join live")');
+await C.page.waitForTimeout(700);
+ok((await C.page.textContent('body')).includes('No live relay with that code'),
    'a wrong code is refused with a readable reason');
 
-await coach.page.fill('input[placeholder="CODE"]', code);
-await coach.page.selectOption('select', 'coach');
-await coach.page.click('button:has-text("join live")');
-await coach.page.waitForTimeout(1500);
+await C.page.fill('input[placeholder="CODE"]', code);
+await C.page.selectOption('select', 'coach');
+await C.page.click('button:has-text("join live")');
+await C.page.waitForTimeout(1500);
 
-const coachBody1 = await coach.page.textContent('body');
-ok(coachBody1.includes('Jaxon'), "the coach sees the shooter's name");
-ok(coachBody1.includes('Sunday league'), '...and the session title');
-ok(coachBody1.includes('● live'), '...and that the relay is live');
-ok(await coach.page.locator('svg circle').count() > 0,
-   'the group plot renders the backfilled shots');
-// 10 + 9 = 19, mean radius of two points 0.4" apart = 0.20"
-ok(coachBody1.includes('19\u20130X'), 'the score is computed from the relayed rings (19\u20130X)');
-ok(coachBody1.includes('0.20'), 'mean radius is computed from the relayed coordinates (0.20")');
-// 'Coach Dave' can only have come from the participant list -- nothing else
-// on this screen knows the viewer's own name.
-ok(coachBody1.includes('Coach Dave'), 'the participant list names everyone watching');
+const bodyC1 = await C.page.textContent('body');
+ok(bodyC1.includes('Jaxon') && bodyC1.includes('Partner Pete'),
+   'the coach sees both shooters');
+ok(bodyC1.includes('Both strings'),
+   '...on one target first, which is the comparison a coach is actually making');
+ok(bodyC1.includes('19–0X') && bodyC1.includes('18–0X'),
+   '...and both scores, computed independently (19–0X and 18–0X)');
+ok(await C.page.locator('svg circle').count() >= 4, 'both strings are plotted');
+ok(await C.page.locator('svg line[opacity="0.5"]').count() === 2,
+   'a call is drawn joined to its impact, once per called shot');
 
-// the coach signed in anonymously -- "no accounts" is implemented, not implied
-const anon = await coach.page.evaluate(() =>
+const anon = await C.page.evaluate(() =>
   JSON.parse(localStorage.getItem('zerocore.session') || '{}')?.user?.is_anonymous);
 ok(anon === true, 'the coach is on an anonymous identity, having created no account');
+ok(await C.page.locator('input[placeholder="message"]').count() === 1,
+   'the coach can talk to the line');
+ok(await C.page.locator('button:has-text("+ shot")').count() === 0,
+   '...but is offered no way to log a shot');
 
-await coach.page.screenshot({ path: 'shots/relay-coach.png', fullPage: true });
+await C.page.screenshot({ path: 'shots/relay-coach.png', fullPage: true });
 
-/* ═════════════════════════════════════════════════════ shots flow forward */
-section('shots reach the coach as they are logged');
-// RelayPlot draws one circle per impact plus the dashed mean-radius ring, so
-// the count is exact: 2 impacts + 1 ring, then 3 impacts + 1 ring.
-const circlesBefore = await coach.page.locator('svg circle').count();
-ok(circlesBefore === 3, `the plot starts at two impacts (${circlesBefore} circles)`);
-await logShot(host.page);
-await coach.page.waitForTimeout(4000);         // ~2 poll ticks at 2.5s
-const coachBody2 = await coach.page.textContent('body');
-const circlesAfter = await coach.page.locator('svg circle').count();
-ok(circlesAfter === circlesBefore + 1,
-   `one shot logged on the shooter's phone draws exactly one more impact on the coach's (${circlesAfter})`);
-ok(await coach.page.locator('svg text').count() === 4,
-   'the plot numbers three impacts');
+/* ══════════════════════════════════════════ shots flow forward, both ways */
+section('shots flow forward from both shooters');
+const cCircles = await C.page.locator('svg circle').count();
+await logShot(A.page);
+await logShot(B.page);
+await C.page.waitForTimeout(5000);
+ok(await C.page.locator('svg circle').count() >= cCircles + 2,
+   'a shot from each shooter reaches the coach');
+ok(shotsOn().length === 6, `six shots on the relay, three each (${shotsOn().length})`);
 
-/* ═══════════════════════════════════════════════════════ the feed is two-way */
-section('the feed carries wind calls both ways');
-await coach.page.fill('input[placeholder="message"]', 'half value from 4, hold 0.5L');
-await coach.page.click('button:has-text("wind")');
-await coach.page.waitForTimeout(4000);
-const hostBody2 = await host.page.textContent('body');
-ok(hostBody2.includes('half value from 4'), "the coach's wind call reaches the shooter");
-ok(hostBody2.includes('Coach Dave'), '...attributed to the coach');
-ok(!hostBody2.includes('Nobody has joined yet'), 'the host now shows a watcher');
+await A.page.waitForTimeout(3000);
+ok(await A.page.locator('svg circle.relayed').count() === 3,
+   "B's third shot appears on A's target");
 
-await host.page.fill('input[placeholder="message"]', 'seen, dialling');
-await host.page.click('button:has-text("send")');
-await host.page.waitForTimeout(4000);
-ok((await coach.page.textContent('body')).includes('seen, dialling'),
-   "the shooter's reply reaches the coach");
-
-/* ═══════════════════════════════════════════════════ only the host writes */
-section('the coach cannot fabricate the string');
-const forged = await coach.page.evaluate(async ({ base, rid }) => {
+/* ═══════════════════════════════════ nobody writes anybody else's string */
+section('each shooter owns exactly one string');
+const aUid = mock.state.users.get('a@example.com').id;
+const forged = await B.page.evaluate(async ({ base, rid, victim }) => {
   const s = JSON.parse(localStorage.getItem('zerocore.session'));
   const r = await fetch(base + '/rest/v1/relay_shots', {
     method: 'POST',
     headers: { apikey: 'anon-key', Authorization: 'Bearer ' + s.access_token,
                'Content-Type': 'application/json' },
-    body: JSON.stringify([{ relay_id: rid, shot_no: 99, ring: 'X', x_in: 0, y_in: 0 }]),
+    body: JSON.stringify([{ relay_id: rid, user_id: victim, shot_no: 9, ring: 'X', x_in: 0, y_in: 0 }]),
+  });
+  return r.status;
+}, { base: mock.url, rid: relayId, victim: aUid });
+ok(forged === 403, `a shooter's own token is refused when writing their partner's string (${forged})`);
+
+const coachForged = await C.page.evaluate(async ({ base, rid }) => {
+  const s = JSON.parse(localStorage.getItem('zerocore.session'));
+  const r = await fetch(base + '/rest/v1/relay_shots', {
+    method: 'POST',
+    headers: { apikey: 'anon-key', Authorization: 'Bearer ' + s.access_token,
+               'Content-Type': 'application/json' },
+    body: JSON.stringify([{ relay_id: rid, shot_no: 9, ring: 'X', x_in: 0, y_in: 0 }]),
   });
   return r.status;
 }, { base: mock.url, rid: relayId });
-ok(forged === 403, `a viewer's own token is refused when writing shots (${forged})`);
+ok(coachForged === 403, `a coach's token is refused when writing any string (${coachForged})`);
+ok(shotsOn().length === 6, 'neither forgery landed');
 
-/* ══════════════════════════════════════════════════════════ ending it */
-section('ending the relay');
-await host.page.click('button:text-is("end")');   // not "send", in the feed
-await host.page.waitForTimeout(4000);
-const coachBody3 = await coach.page.textContent('body');
-ok(coachBody3.includes('ended'), 'the coach is told the relay ended rather than silently stalling');
-ok(coachBody3.includes('final state'), '...and that what they are looking at is final');
-ok((await host.page.locator('button:has-text("go live")').count()) === 1,
+/* ═════════════════════════════════════════════════ the feed carries calls */
+section('one feed, three people');
+await C.page.fill('input[placeholder="message"]', 'picking up from 3, both of you hold 0.75L');
+await C.page.click('button:has-text("wind")');
+await C.page.waitForTimeout(4500);
+ok((await A.page.textContent('body')).includes('picking up from 3'),
+   "the coach's wind call reaches shooter A");
+ok((await B.page.textContent('body')).includes('picking up from 3'),
+   '...and shooter B, in the same breath');
+
+await A.page.fill('input[placeholder="message"]', 'seen, dialling');
+await A.page.click('button:has-text("send")');
+await A.page.waitForTimeout(4500);
+ok((await C.page.textContent('body')).includes('seen, dialling'),
+   "the shooter's reply reaches the coach");
+ok((await B.page.textContent('body')).includes('seen, dialling'),
+   '...and their partner');
+
+/* ══════════════════════════════════════════════ leaving versus ending it */
+section('leaving versus ending');
+await B.page.click('button:text-is("leave")');
+await B.page.waitForTimeout(3500);
+ok(await B.page.locator('button:has-text("go live")').count() === 1,
+   'the partner who leaves is back to an ordinary session');
+ok(mock.state.relays.get(relayId).status === 'live',
+   '...and the relay survives their leaving');
+ok((await C.page.textContent('body')).includes('Jaxon'),
+   "...and the coach still has the remaining shooter's string");
+
+await A.page.click('button:text-is("end")');       // not "send", in the feed
+await A.page.waitForTimeout(4000);
+const bodyC2 = await C.page.textContent('body');
+ok(bodyC2.includes('ended'), 'the coach is told the relay ended rather than silently stalling');
+ok(bodyC2.includes('final state'), '...and that what they are looking at is final');
+ok(await A.page.locator('button:has-text("go live")').count() === 1,
    'the shooter can go live again');
 
-// the code is dead the moment the relay ends
-const stranger = await device('stranger');
-await stranger.page.click('button:has-text("● join")');
-await stranger.page.waitForTimeout(300);
-await stranger.page.fill('input[placeholder="CODE"]', code);
-await stranger.page.fill('input[placeholder="your name"]', 'late');
-await stranger.page.click('button:has-text("join live")');
-await stranger.page.waitForTimeout(800);
-ok((await stranger.page.textContent('body')).includes('No live relay with that code'),
+const D = await device('D');
+await D.page.click('button:has-text("● join")');
+await D.page.waitForTimeout(300);
+await D.page.fill('input[placeholder="CODE"]', code);
+await D.page.fill('input[placeholder="your name"]', 'late');
+await D.page.click('button:has-text("join live")');
+await D.page.waitForTimeout(800);
+ok((await D.page.textContent('body')).includes('No live relay with that code'),
    'the code stops working once the relay ends');
 
 /* ══════════════════════════════════════════════════════════════ hygiene */
 section('hygiene');
-ok(errs.length === 0, errs.length ? 'JS errors: ' + errs.join(' | ') : 'no JavaScript errors on either device');
+ok(errs.length === 0, errs.length ? 'JS errors: ' + errs.join(' | ') : 'no JavaScript errors on any device');
 
 await browser.close(); server.close(); await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);

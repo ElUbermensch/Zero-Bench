@@ -102,8 +102,21 @@ for (const t of ['rls_test.sql', 'rls_test2.sql', 'rls_test3.sql', 'rls_test4.sq
   ok(wf.includes(t), `CI runs supabase/test/${t}`, 'a suite that CI does not run is a suite that rots');
 }
 const deploy = read('.github/workflows/deploy.yml');
-ok(deploy.includes('apps/bench/dist') && deploy.includes('apps/zero/dist'),
-   'the deploy workflow publishes both apps');
+const site = read('tools/build-site.mjs');
+ok(deploy.includes('build:site'),
+   'the Pages workflow assembles the site through the shared script',
+   'inlining the copy here means Pages and Vercel can drift apart silently');
+ok(site.includes('apps/bench/dist') && site.includes('apps/zero/dist'),
+   'that script publishes both apps');
+if (has('vercel.json')) {
+  const v = JSON.parse(read('vercel.json'));
+  ok(v.buildCommand === 'npm run build:site' && v.outputDirectory === 'site',
+     'vercel.json builds and publishes the same thing',
+     'Vercel and Pages must serve identical output or a bug reproduces on only one');
+  ok(JSON.stringify(v.headers || []).includes('must-revalidate'),
+     'vercel.json stops service workers being served stale',
+     'a cached sw.js can pin a returning user to an old build indefinitely');
+}
 
 const pkg = JSON.parse(read('package.json'));
 ok(/embed-core\.mjs --check/.test(pkg.scripts.test),

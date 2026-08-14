@@ -14,7 +14,8 @@
     "test:sql": "bash supabase/run_tests.sh",
     "embed": "node tools/embed-core.mjs",
     "preflight": "node tools/preflight.mjs",
-    "verify": "node tools/verify-live.mjs"
+    "verify": "node tools/verify-live.mjs",
+    "build:site": "node tools/build-site.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.23.0",

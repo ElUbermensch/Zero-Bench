@@ -27,24 +27,65 @@ Two ways in. Pick one:
    as-is.
 4. **Publish repository** → name it, choose public or private → Publish.
 
-**B — Terminal, if you have one**
+**B — Windows PowerShell**
 
-```bash
-cd zero-suite
+```powershell
+# Prerequisites, if you do not already have them.
+winget install --id Git.Git -e
+winget install --id OpenJS.NodeJS.LTS -e
+# then CLOSE and REOPEN PowerShell so the new PATH takes effect
+
+Expand-Archive .\zero-suite.zip -DestinationPath .
+cd .\zero-suite
+
+git --version        # both should print a version.
+node --version       # if not, the PATH has not refreshed — reopen PowerShell.
+
+npm install
+npm run preflight
+```
+
+`preflight` reports the backend as unconfigured. That is expected — it is step 4.
+
+Then publish. `gh` is optional; without it, create the empty repo on github.com first
+(no README, no .gitignore — this folder already has both) and use the remote it shows you:
+
+```powershell
 git remote add origin https://github.com/YOU/zero-suite.git
 git push -u origin main
 ```
 
-Optionally, before pushing:
+> **If `npm` fails with "running scripts is disabled on this system"** — that is
+> PowerShell's execution policy blocking `npm.ps1`, not anything to do with this repo.
+> It catches almost everyone once:
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> Answer `Y`. It applies to your user only and needs no administrator rights.
+
+**What does and does not run on Windows**
+
+| | |
+|---|---|
+| `npm run preflight` | works |
+| `npm run build` | works |
+| `npm test` | works — add `npx playwright install chromium` first, it downloads a browser |
+| `npm run verify` | works, and is the one worth running |
+| `npm run test:sql` | **no** — it needs bash and a local PostgreSQL. GitHub Actions runs it on every push instead, which is enough. |
+
+**C — macOS or Linux terminal**
 
 ```bash
+cd zero-suite
 npm install
 npx playwright install chromium
-npm run preflight        # a second; catches the silent mistakes
-npm test                 # a few minutes; the real suites
+npm run preflight
+npm test
+git remote add origin https://github.com/YOU/zero-suite.git
+git push -u origin main
 ```
-
-`preflight` will report the backend as unconfigured. That is expected — it is step 4.
 
 > **Avoid GitHub's drag-and-drop web uploader for the initial import.** Browsers have
 > long excluded folders beginning with a dot from directory uploads, and `.github/` is
@@ -131,9 +172,9 @@ control, which is why there are 123 SQL assertions on it.
 anything a browser can load. It bypasses RLS entirely. `npm run preflight` scans for it
 and refuses.
 
-If you have a terminal:
+Then, if you have a terminal:
 
-```bash
+```
 npm run preflight        # should now be clean
 npm run build
 ```
@@ -191,8 +232,8 @@ Run it once by hand now: **Actions → supabase keepalive → Run workflow**.
 npm run verify
 ```
 
-**No terminal?** Skip to the manual check below — it covers the same ground by hand,
-just less thoroughly. The script is worth borrowing a laptop for once.
+Works in PowerShell. **No terminal at all?** Skip to the manual check below — it covers
+the same ground by hand, just less thoroughly.
 
 **This is the test that counts.** Every other suite in this repo runs against a mock of
 Supabase's endpoints, and that mock encodes an understanding that could itself be wrong.

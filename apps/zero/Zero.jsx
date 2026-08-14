@@ -1795,25 +1795,32 @@ const ZeroCore = (() => {
       return { ok: true, relay: row, slot: 1, role: 'shooter' };
     }
 
-    async function joinRelay(code, name, role) {
+    /** opts.distanceYd: YOUR firing distance, not the relay starter's. It is
+     *  what turns your inches into minutes on the coach's screen, and a pair is
+     *  not always on the same line. */
+    async function joinRelay(code, name, role, opts) {
       const id = await ensureIdentity();
       if (!id.ok) return { ok: false, error: id.error };
+      const d = Number((opts || {}).distanceYd);
       const r = await rpc('join_relay', {
         p_code: String(code || '').trim(),
         p_name: name || 'Guest',
         p_role: role === 'shooter' ? 'shooter' : 'coach',
+        p_distance_yd: Number.isFinite(d) && d > 0 ? d : null,
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
       // join_relay returns a RESULT, not an exception: a bad code is ok:false,
       // which is how the server-side throttle can record the failed attempt.
-      const d = r.data || {};
-      if (!d.ok) return { ok: false, reason: d.error, message: d.message };
+      const res = r.data || {};
+      if (!res.ok) return { ok: false, reason: res.error, message: res.message };
       // Trust the SERVER's answer on role and firing point, not the request:
       // a relay that is already full hands back a coach seat, and rejoining
       // returns the slot you already held rather than a fresh one.
-      startRelay({ id: d.relay.id, code: d.relay.code, isHost: false,
-                   name: name || 'Guest', role: d.role || 'coach', slot: d.slot || null });
-      return { ok: true, relay: d.relay, slot: d.slot || null, role: d.role || 'coach' };
+      startRelay({ id: res.relay.id, code: res.relay.code, isHost: false,
+                   name: name || 'Guest', role: res.role || 'coach',
+                   slot: res.slot || null });
+      return { ok: true, relay: res.relay, slot: res.slot || null,
+               role: res.role || 'coach' };
     }
 
     function startRelay(meta) {
@@ -2183,6 +2190,155 @@ function leaderboardEntryFor(session, target, existingId) {
 const SLOT_COLORS = ['#e8943a', '#4a9eff', '#3db87a', '#b57cff'];
 const slotColor = s => SLOT_COLORS[((+s || 1) - 1) % SLOT_COLORS.length];
 
+/* ── Call error, in minutes ───────────────────────────────────────────────
+ *
+ * A shooter calls where the sights were when the shot broke; the target says
+ * where the bullet went. The difference is the one correction a coach can act
+ * on WITHOUT knowing the shooter's aim, and that is why it beats the group
+ * centroid for this purpose:
+ *
+ *   group centroid vs point of aim  =  aiming error + zero error + conditions
+ *   impact vs call                  =  zero error + conditions
+ *
+ * A shooter who calls "low left" and hits low left has a correctly zeroed
+ * rifle and made a bad shot. Dialling for that makes the next good shot wrong.
+ * Only the SYSTEMATIC part of impact-minus-call is a sight correction.
+ *
+ * So the number reported is the MEAN error vector, not the mean absolute
+ * error. Mean absolute error never approaches zero however well the rifle is
+ * zeroed -- it measures how well the shooter calls, which is a separate and
+ * also useful thing, reported separately.
+ *
+ * And a mean over few shots is mostly noise. Each axis carries a 90% interval
+ * on the mean (Student t, se = s/sqrt(n)); when that interval spans zero the
+ * card says HOLD instead of giving a number, because "dial 0.3 left" computed
+ * from four shots with a 0.9 minute spread is an instruction to chase noise.
+ */
+
+/* Two-sided 90% t critical values by degrees of freedom. Small n is exactly
+ * where this matters -- at df=2 the multiplier is 2.9, not the 1.645 a normal
+ * approximation would use, and using 1.645 there would call a correction
+ * significant when it is not. */
+const T90 = [null, 6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860,
+             1.833, 1.812, 1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740,
+             1.734, 1.729, 1.725, 1.721, 1.717, 1.714, 1.711, 1.708, 1.706,
+             1.703, 1.701, 1.699];
+const t90 = df => (df < 1 ? null : T90[Math.min(df, T90.length - 1)] ?? 1.645);
+
+/* shots: relayed rows. yards: THIS shooter's distance, not the relay's. */
+function relayCallError(shots, yards) {
+  const yd = +yards;
+  const called = (shots || []).filter(s =>
+    !s.is_sighter && s.call_x_in != null && s.call_y_in != null);
+  const n = called.length;
+  if (!n || !Number.isFinite(yd) || yd <= 0) return null;
+
+  // Error vector, impact minus call, in target inches. +x right, +y up.
+  const ex = called.map(s => (+s.x_in || 0) - (+s.call_x_in || 0));
+  const ey = called.map(s => (+s.y_in || 0) - (+s.call_y_in || 0));
+  const mean = a => a.reduce((p, c) => p + c, 0) / a.length;
+  const mx = mean(ex), my = mean(ey);
+
+  // Sample sd, then the standard error of the mean. n-1: with n=1 there is no
+  // spread estimate at all and the interval is honestly undefined.
+  const sd = (a, m) => (a.length < 2 ? null
+    : Math.sqrt(a.reduce((p, c) => p + (c - m) * (c - m), 0) / (a.length - 1)));
+  const sx = sd(ex, mx), sy = sd(ey, my);
+  const t = t90(n - 1);
+  const ciX = sx == null || t == null ? null : t * sx / Math.sqrt(n);
+  const ciY = sy == null || t == null ? null : t * sy / Math.sqrt(n);
+
+  const moa = v => inchesToMoa(v, yd);
+  const absMean = mean(called.map((_, i) => Math.hypot(ex[i], ey[i])));
+
+  return {
+    n, yards: yd,
+    // signed offsets: + = impact right of / above the call
+    windMoa: moa(mx), elevMoa: moa(my),
+    ciWindMoa: ciX == null ? null : moa(ciX),
+    ciElevMoa: ciY == null ? null : moa(ciY),
+    // significant = the interval does not span zero
+    windSig: ciX != null && Math.abs(mx) > ciX,
+    elevSig: ciY != null && Math.abs(my) > ciY,
+    // how well the shooter is calling at all, independent of any zero error
+    absMeanMoa: moa(absMean),
+    items: called.map((s, i) => ({
+      shot: s, moa: moa(Math.hypot(ex[i], ey[i])),
+      windMoa: moa(ex[i]), elevMoa: moa(ey[i]),
+    })),
+  };
+}
+
+/* One axis, phrased as an instruction rather than a measurement. The scope
+ * moves the way you want the group to move, so an impact ABOVE the call is
+ * corrected DOWN -- the sign flip is the whole reason this is a component and
+ * not an inline template string. */
+function CorrectionAxis({ moa, ci, sig, pos, neg, color }) {
+  const dial = -moa;                                  // move the group back
+  const word = dial >= 0 ? pos : neg;
+  const mag = Math.abs(dial);
+  return (
+    <div style={{ flex: 1, textAlign: 'center' }}>
+      <div style={{ fontFamily: 'var(--fm)', fontSize: 17, fontWeight: 700,
+        color: sig ? color : 'var(--dim)' }}>
+        {sig ? `${mag.toFixed(2)}` : '—'}
+        {sig && <span style={{ fontSize: 10, marginLeft: 3 }}>{word}</span>}
+      </div>
+      <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
+        textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 }}>
+        {sig
+          ? `MOA ±${ci.toFixed(2)}`
+          : (ci != null ? `${mag.toFixed(2)} ±${ci.toFixed(2)} · hold` : `${mag.toFixed(2)} · n too small`)}
+      </div>
+    </div>
+  );
+}
+
+/* The coach's card. Deliberately refuses to give a number it cannot defend. */
+function CallErrorCard({ ce, color, name }) {
+  if (!ce) return null;
+  const any = ce.windSig || ce.elevSig;
+  return (
+    <div style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--bdr)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 7 }}>
+        <div className="lbl">Call vs impact</div>
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)' }}>
+          {ce.n} called · {ce.yards}yd
+        </div>
+      </div>
+      <div style={{ display: 'flex' }}>
+        <CorrectionAxis moa={ce.elevMoa} ci={ce.ciElevMoa} sig={ce.elevSig}
+          pos="UP" neg="DOWN" color={color}/>
+        <CorrectionAxis moa={ce.windMoa} ci={ce.ciWindMoa} sig={ce.windSig}
+          pos="RIGHT" neg="LEFT" color={color}/>
+        <div style={{ flex: 1, textAlign: 'center' }}>
+          <div style={{ fontFamily: 'var(--fm)', fontSize: 17, fontWeight: 700, color: 'var(--ink)' }}>
+            {ce.absMeanMoa.toFixed(2)}
+          </div>
+          <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
+            textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 }}>
+            MOA call miss
+          </div>
+        </div>
+      </div>
+      <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
+        lineHeight: 1.5, marginTop: 7 }}>
+        {any
+          ? <>Dial <b>{[
+              ce.elevSig ? `${Math.abs(ce.elevMoa).toFixed(2)} ${ce.elevMoa > 0 ? 'down' : 'up'}` : null,
+              ce.windSig ? `${Math.abs(ce.windMoa).toFixed(2)} ${ce.windMoa > 0 ? 'left' : 'right'}` : null,
+            ].filter(Boolean).join(' and ')}</b> — {name || 'this shooter'} is
+            landing that far from their own call, consistently enough that it is not
+            chance. The third number is how tightly they are calling at all; it does
+            not go to zero however well the rifle is zeroed.</>
+          : <>No correction yet. The offset so far is inside its own 90% interval,
+            which means it is scatter, not a zero error. Dialling on it would move a
+            correct rifle. The third number is how tightly they are calling.</>}
+      </div>
+    </div>
+  );
+}
+
 /* Statistics from relayed points alone. No target geometry required -- ES and
  * mean radius are pure point geometry, and score is the sum of ring labels. */
 function relayStats(shots) {
@@ -2216,6 +2372,7 @@ function relaySeries(shots, participants) {
     .forEach(p => { if (!by.has(+p.slot)) by.set(+p.slot, []); });
   return [...by.entries()].sort((a, b) => a[0] - b[0]).map(([slot, ss]) => {
     const who = (participants || []).find(p => +p.slot === slot);
+    const yards = who?.distance_yd != null ? +who.distance_yd : null;
     return {
       slot,
       name: ss[0]?.shooter || who?.name || (slot ? `Point ${slot}` : 'Left the relay'),
@@ -2223,7 +2380,11 @@ function relaySeries(shots, participants) {
       away: who ? undefined : true,
       color: slotColor(slot || 1),
       shots: ss,
+      yards,
       stats: relayStats(ss),
+      // Minutes are inches over THIS shooter's distance. A pair is not always
+      // on the same line, so it is never taken from the relay.
+      callError: relayCallError(ss, yards),
     };
   });
 }
@@ -2302,25 +2463,33 @@ function RelayScoreRow({ stats, color }) {
 
 /* The string as chips. Called shots get a mark, because "did he call it" is
  * the first question a coach asks about a dropped point. */
-function RelayShotStrip({ shots, color }) {
+function RelayShotStrip({ shots, color, yards }) {
   if (!shots.length) return null;
+  const yd = +yards;
+  const usable = Number.isFinite(yd) && yd > 0;
   let n = 0;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
       {shots.map(s => {
         const label = s.is_sighter ? 'S' : String(++n);
         const called = s.call_x_in != null;
-        const miss = called
+        // Minutes, not inches: a coach dials minutes, and 0.4" means nothing
+        // without the distance attached to it.
+        const missIn = called
           ? Math.hypot((+s.x_in || 0) - (+s.call_x_in || 0), (+s.y_in || 0) - (+s.call_y_in || 0))
           : null;
+        const miss = called && usable ? inchesToMoa(missIn, yd) : missIn;
+        const unit = usable ? '′' : '\u2033';
         return (
-          <div key={s.id} title={called ? `called ${miss.toFixed(2)}" off` : undefined}
+          <div key={s.id} title={called
+            ? `called ${miss.toFixed(2)}${usable ? ' MOA' : ' in'} off`
+            : undefined}
             style={{ fontFamily: 'var(--fm)', fontSize: 11, padding: '3px 7px', borderRadius: 4,
               background: s.is_sighter ? 'transparent' : 'var(--surf2)',
               border: `1px ${s.is_sighter ? 'dashed' : 'solid'} ${s.is_sighter ? 'var(--bdr)' : color + '66'}`,
               color: s.ring === 'X' ? color : 'var(--ink)' }}>
             {label}<span style={{ color: 'var(--dim)' }}>·</span>{s.ring}
-            {called && <span style={{ color: 'var(--dim)', fontSize: 8 }}> ◦{miss.toFixed(1)}</span>}
+            {called && <span style={{ color: 'var(--dim)', fontSize: 8 }}> ◦{miss.toFixed(1)}{unit}</span>}
           </div>
         );
       })}
@@ -2332,6 +2501,7 @@ function RelayShotStrip({ shots, color }) {
  * side because a coach is holding a phone, and two 190px plots on a 430px
  * screen makes both of them useless. */
 function RelayShooterCard({ s, yards, dense }) {
+  const yd = s.yards || yards;
   return (
     <div className="tcard" style={{ padding: '11px 13px', borderColor: s.color + '55' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8 }}>
@@ -2345,10 +2515,12 @@ function RelayShooterCard({ s, yards, dense }) {
         <div style={{ marginTop: 9 }}><RelayPlot series={[s]} yards={yards}/></div>
       )}
       {s.shots.length > 0
-        ? <div style={{ marginTop: 9 }}><RelayShotStrip shots={s.shots} color={s.color}/></div>
+        ? <div style={{ marginTop: 9 }}>
+            <RelayShotStrip shots={s.shots} color={s.color} yards={yd}/></div>
         : <div style={{ marginTop: 9, fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)' }}>
             Waiting for the first shot…
           </div>}
+      <CallErrorCard ce={s.callError} color={s.color} name={s.name}/>
     </div>
   );
 }
@@ -2522,7 +2694,7 @@ function RelayViewer({ core, onExit }) {
   );
 }
 
-function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note }) {
+function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note, distanceYd }) {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [role, setRole] = useState(fixedRole || 'coach');
@@ -2531,7 +2703,7 @@ function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note }) {
 
   async function go() {
     setBusy(true); setErr(null);
-    const r = await core.joinRelay(code, name || 'Guest', role);
+    const r = await core.joinRelay(code, name || 'Guest', role, { distanceYd });
     setBusy(false);
     if (!r.ok) { setErr(relayErrText(r)); return; }
     onJoined(r);
@@ -2590,7 +2762,7 @@ function relayErrText(r) {
  * Deliberately compact: the shooter is on the line, and this must not push
  * the shot list off the screen. Three states — idle, live, and the join form
  * for the second shooter of a pair. */
-function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
+function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive, distanceYd }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -2613,7 +2785,7 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
     if (joining) {
       return (
         <div style={{ margin: '8px 0 0' }}>
-          <JoinLiveForm core={core} fixedRole="shooter"
+          <JoinLiveForm core={core} fixedRole="shooter" distanceYd={distanceYd}
             note="Your shots mirror to this relay from this session. Your partner's string is drawn over your target in their colour."
             onCancel={() => setJoining(false)}
             onJoined={r => { setJoining(false); onJoinLive(r); }}/>
@@ -4345,7 +4517,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
 
           <RelayCard core={core} live={live} hostName={hostName}
             onHostName={onHostName} onGoLive={onGoLive} onJoinLive={onJoinLive}
-            onEndLive={onEndLive}/>
+            onEndLive={onEndLive} distanceYd={+session.rangeYards || null}/>
 
           {a && a.n >= 2 && <>
             <div className="shdr">Group analytics</div>

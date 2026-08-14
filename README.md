@@ -87,12 +87,12 @@ The tracker's service worker is cache-first, so **bump `CACHE` in
 
 | Suite | Assertions | What it actually proves |
 |---|---|---|
-| `supabase/test/` | 120 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing; a relay code grants nothing on its own; each shooter in a pair owns exactly one string |
+| `supabase/test/` | 123 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing; a relay code grants nothing on its own; each shooter in a pair owns exactly one string |
 | `packages/zero-core` | 98 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
 | `apps/tracker` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
 | `apps/zero` integration | 21 | A tracker batch becomes a Zero load; group size flows back in inches; idempotent across reloads |
 | `apps/zero` leaderboard | 16 | Two separate browser profiles, one backend: A publishes, B sees it, B cannot alter it, private tables stay private |
-| `apps/zero` relay | 47 | **Three** browser profiles driving the real buttons: two shooters and a coach on one code. Each shooter's shots reach the other two; neither can write the other's string (attempted with their own real token); the coach sees both and can log nothing; the code dies with the relay |
+| `apps/zero` relay | 59 | **Three** browser profiles driving the real buttons: two shooters and a coach on one code. Each shooter's shots reach the other two; neither can write the other's string (attempted with their own real token); the coach sees both and can log nothing; the call-vs-impact correction is exact minutes at each shooter's own distance, and reads "hold" when the offset is inside its own noise; the code dies with the relay |
 
 Everything runs against a mock of GoTrue and PostgREST (`packages/zero-core/mock-supabase.mjs`).
 That mock encodes an understanding of Supabase's endpoints, which is exactly the thing

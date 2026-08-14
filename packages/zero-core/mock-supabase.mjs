@@ -152,7 +152,8 @@ export function startMock(opts = {}) {
           state.relays.set(relay.id, relay);
           state.relayParts.set(relay.id, new Map([[a.userId,
             { user_id: a.userId, name: relay.host_name, role: 'shooter',
-              slot: 1, last_seen_at: stamp() }]]));
+              slot: 1, last_seen_at: stamp(),
+              distance_yd: payload.p_distance_yd ?? null }]]));
           return json(res, 200, relay);
         }
 
@@ -183,7 +184,8 @@ export function startMock(opts = {}) {
             }
           }
           parts.set(a.userId, { user_id: a.userId, name: payload.p_name || 'Guest',
-            role, slot, last_seen_at: stamp() });
+            role, slot, last_seen_at: stamp(),
+            distance_yd: payload.p_distance_yd ?? parts.get(a.userId)?.distance_yd ?? null });
           state.relayParts.set(relay.id, parts);
           return json(res, 200, { ok: true, relay, slot, role });
         }
@@ -208,8 +210,8 @@ export function startMock(opts = {}) {
             messages: since([...table('relay_messages').values()]
               .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || ''),
             participants: [...parts.values()].map(x => ({ name: x.name, role: x.role,
-              slot: x.slot ?? null, last_seen_at: x.last_seen_at,
-              is_self: x.user_id === a.userId })),
+              slot: x.slot ?? null, distance_yd: x.distance_yd ?? relay.distance_yd ?? null,
+              last_seen_at: x.last_seen_at, is_self: x.user_id === a.userId })),
             server_time: stamp(),
           });
         }

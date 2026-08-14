@@ -78,6 +78,11 @@ create table public.relay_participants (
   -- slot, not of join order as each client happens to observe it. Coaches have
   -- no slot.
   slot          smallint check (slot between 1 and 4),
+  -- Each shooter's OWN firing distance. The relay carries the starter's, and
+  -- a pair is not always on the same line -- converting a partner's inches to
+  -- minutes at somebody else's yardage yields a confidently wrong sight
+  -- correction, which is worse than none.
+  distance_yd   numeric(7,1) check (distance_yd > 0),
   joined_at     timestamptz not null default now(),
   last_seen_at  timestamptz not null default now(),
   created_at    timestamptz not null default now(),
@@ -235,8 +240,8 @@ begin
 
   -- The creator is a participant too, so one set of policies covers everyone.
   -- They take firing point 1; a partner joining later takes 2.
-  insert into public.relay_participants (relay_id, user_id, name, role, slot)
-  values (r.id, auth.uid(), r.host_name, 'shooter', 1);
+  insert into public.relay_participants (relay_id, user_id, name, role, slot, distance_yd)
+  values (r.id, auth.uid(), r.host_name, 'shooter', 1, p_distance_yd);
 
   return r;
 end $$;
@@ -252,7 +257,8 @@ end $$;
 create or replace function public.join_relay(
   p_code text,
   p_name text default 'Guest',
-  p_role text default 'coach'
+  p_role text default 'coach',
+  p_distance_yd numeric default null
 ) returns jsonb
 language plpgsql
 security definer
@@ -312,11 +318,13 @@ begin
     end if;
   end if;
 
-  insert into public.relay_participants (relay_id, user_id, name, role, slot)
+  insert into public.relay_participants (relay_id, user_id, name, role, slot, distance_yd)
   values (r.id, auth.uid(),
-          coalesce(nullif(btrim(p_name), ''), 'Guest'), v_role, v_slot)
+          coalesce(nullif(btrim(p_name), ''), 'Guest'), v_role, v_slot, p_distance_yd)
   on conflict (relay_id, user_id) do update
     set name = excluded.name, role = excluded.role, slot = excluded.slot,
+        -- keep a known distance if a later join omits it
+        distance_yd = coalesce(excluded.distance_yd, relay_participants.distance_yd),
         last_seen_at = now(), updated_at = now();
 
   return jsonb_build_object('ok', true, 'slot', v_slot, 'role', v_role,
@@ -377,6 +385,9 @@ begin
                           where m.relay_id = p_relay and m.created_at >= p_since_msg), '[]'::jsonb),
     'participants', coalesce((select jsonb_agg(jsonb_build_object(
                           'name', p.name, 'role', p.role, 'slot', p.slot,
+                          'distance_yd', coalesce(p.distance_yd,
+                                                  (select r2.distance_yd from public.relays r2
+                                                    where r2.id = p_relay)),
                           'last_seen_at', p.last_seen_at,
                           'is_self', p.user_id = auth.uid())
                           order by p.slot nulls last, p.joined_at)
@@ -484,7 +495,7 @@ grant select, insert, update, delete on
   to authenticated;
 grant execute on function
   public.create_relay(text, text, text, jsonb, numeric),
-  public.join_relay(text, text, text),
+  public.join_relay(text, text, text, numeric),
   public.relay_state(uuid, timestamptz, timestamptz),
   public.end_relay(uuid),
   public.is_relay_participant(uuid)

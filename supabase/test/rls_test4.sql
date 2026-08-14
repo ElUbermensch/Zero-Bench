@@ -39,7 +39,9 @@ declare code text; rid uuid; res jsonb; n integer;
 begin
   select _pair.code, _pair.id into code, rid from _pair;
 
-  res := public.join_relay(code, 'Partner Pete', 'shooter');
+  -- 300yd, deliberately NOT the relay starter's 200: a pair is not always on
+  -- the same line, and the coach's minutes must follow each shooter's own.
+  res := public.join_relay(code, 'Partner Pete', 'shooter', 300);
   perform test.check((res ->> 'ok') = 'true', 'a partner can join as a shooter');
   perform test.check((res ->> 'slot')::int = 2, '...and is given firing point 2');
   perform test.check((res ->> 'role') = 'shooter', '...with the shooter role');
@@ -99,6 +101,22 @@ begin
   res := public.join_relay(code, 'Coach Ruth', 'coach');
   perform test.check((res ->> 'ok') = 'true', 'the coach joins with the same code');
   perform test.check(res ->> 'slot' is null, '...and takes no firing point');
+
+  st := public.relay_state(rid);
+  -- Minutes are inches over distance. Each shooter reports their own, or the
+  -- coach's correction is right for one of them and wrong for the other.
+  perform test.check(
+    (select (x->>'distance_yd')::numeric from jsonb_array_elements(st->'participants') x
+      where (x->>'slot')::int = 1) = 200,
+    'firing point 1 carries its own distance');
+  perform test.check(
+    (select (x->>'distance_yd')::numeric from jsonb_array_elements(st->'participants') x
+      where (x->>'slot')::int = 2) = 300,
+    '...and firing point 2 carries a different one');
+  perform test.check(
+    (select (x->>'distance_yd')::numeric from jsonb_array_elements(st->'participants') x
+      where x->>'role' = 'coach') = 200,
+    'a coach, who fires nothing, falls back to the relay distance');
 
   st := public.relay_state(rid);
   perform test.check(jsonb_array_length(st->'shots') = 4,

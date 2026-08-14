@@ -70,23 +70,41 @@ async function logShot(page) {
   await page.waitForTimeout(500);
 }
 
-const mkSession = (id, name, rings) => ([{
+/* 1 MOA is 1.0472 inches at 100 yards, so an impact exactly that far above
+ * its call is exactly 1.00 minute — the coach's card is asserted against an
+ * arithmetic answer rather than against whatever it happens to print. */
+const MOA_IN = 1.0472;
+
+const mkSession = (id, name, shots, yards) => ([{
   id, name, date: '2026-08-14', type: 'Score',
-  position: 'Standing', targetId: 'any', rangeYards: 100, rangeLocation: 'club',
-  rifleId: '', ammoId: '', ts: 1, matchId: null,
-  shots: rings.map((r, i) => ({
-    id: id + '-s' + i, ring: String(r), clockH: 12, clockM: 0,
-    xy: { x: i * 0.4, y: 0 },
-    // shot 1 carries a call, so the coach's call-vs-impact line has something
-    // to draw and the assertion below is not vacuous
-    callXY: i === 0 ? { x: 0, y: 0.15 } : undefined,
-    elev: 0, wind: 0,
+  position: 'Standing', targetId: 'any', rangeYards: yards || 100,
+  rangeLocation: 'club', rifleId: '', ammoId: '', ts: 1, matchId: null,
+  shots: shots.map((sh, i) => ({
+    id: id + '-s' + i, ring: String(sh.ring), clockH: 12, clockM: 0,
+    xy: sh.xy, callXY: sh.call, elev: 0, wind: 0,
   })),
 }]);
 
+/* Shooter A: every impact exactly 1 MOA above and 0.5 MOA right of its own
+ * call. Correction is unambiguous — dial 1.00 down and 0.50 left — and the
+ * radial call miss is hypot(1, 0.5) = 1.12 MOA, a third distinct number, so
+ * no assertion below can pass by matching the wrong cell. */
+const A_SHOTS = [0, 1, 2, 3].map(i => ({
+  ring: 10,
+  xy:   { x: i * 0.1 + MOA_IN / 2, y: MOA_IN },
+  call: { x: i * 0.1,              y: 0 },
+}));
+
+/* Shooter B: calls missed by half an inch, alternating high and low. The mean
+ * is zero and the spread is not, which is the case a naive implementation
+ * reports as "dial 0.00" and a correct one reports as nothing to dial. */
+const B_SHOTS = [0, 1, 2, 3].map(i => ({
+  ring: 9, xy: { x: 0, y: i % 2 ? 0.5 : -0.5 }, call: { x: 0, y: 0 },
+}));
+
 /* ══════════════════════════════════════════════════════ shooter A goes live */
 section('shooter A goes live');
-const A = await device('A', { seed: mkSession('sA', 'Sunday league', [10, 9]), email: 'a@example.com' });
+const A = await device('A', { seed: mkSession('sA', 'Sunday league', A_SHOTS, 100), email: 'a@example.com' });
 await A.page.click('text=Sunday league');
 await A.page.waitForTimeout(400);
 
@@ -112,13 +130,13 @@ ok(bodyA1.includes('Jaxon') && bodyA1.includes('pt1'),
 const relayId = [...mock.state.relays.values()][0]?.id;
 const shotsOn = () => [...(mock.state.rows.get('relay_shots')?.values() || [])]
   .filter(s => s.relay_id === relayId);
-ok(shotsOn().length === 2, `the string already fired is backfilled (${shotsOn().length})`);
-ok(shotsOn().some(s => s.call_x_in != null),
-   "the shooter's call is mirrored alongside the impact");
+ok(shotsOn().length === 4, `the string already fired is backfilled (${shotsOn().length})`);
+ok(shotsOn().every(s => s.call_x_in != null),
+   "every shooter's call is mirrored alongside its impact");
 
 /* ═══════════════════════════════════════ shooter B joins as the second shooter */
 section('shooter B joins as the second shooter, from their own session');
-const B = await device('B', { seed: mkSession('sB', 'Range day B', [9, 9]), email: 'b@example.com' });
+const B = await device('B', { seed: mkSession('sB', 'Range day B', B_SHOTS, 200), email: 'b@example.com' });
 await B.page.click('text=Range day B');
 await B.page.waitForTimeout(400);
 await B.page.click('button:text-is("join")');
@@ -140,9 +158,9 @@ ok(bodyB1.includes('leave') && !bodyB1.includes('read this out'),
    'the partner is offered "leave", not "end" — only the shooter who started it ends a relay');
 
 const bUid = mock.state.users.get('b@example.com').id;
-ok(shotsOn().filter(s => s.user_id === bUid).length === 2,
+ok(shotsOn().filter(s => s.user_id === bUid).length === 4,
    "the partner's own string is backfilled too");
-ok(shotsOn().length === 4, 'four shots on the relay: two strings of two, unmerged');
+ok(shotsOn().length === 8, 'eight shots on the relay: two strings of four, unmerged');
 
 /* ══════════════════════════════════ each shooter sees the other, in colour */
 section('each shooter sees the other, in a different colour');
@@ -151,16 +169,16 @@ const bodyA2 = await A.page.textContent('body');
 ok(bodyA2.includes('Partner Pete'), "shooter A sees the partner's name");
 ok(bodyA2.includes('Dashed rings are relayed from your partner'),
    "...and the partner's string is drawn over A's own target, marked as relayed");
-ok(await A.page.locator('svg circle.relayed').count() === 2,
-   "exactly the partner's two impacts are overlaid, hollow so they read as context not as A's own");
-ok(bodyA2.includes('18–0X'), "...with the partner's running score (18–0X)");
+ok(await A.page.locator('svg circle.relayed').count() === 4,
+   "exactly the partner's four impacts are overlaid, hollow so they read as context not as A's own");
+ok(bodyA2.includes('36–0X'), "...with the partner's running score (36–0X)");
 ok(bodyA2.includes('are not part of your group'),
    'the app says outright that relayed shots are excluded from your own statistics');
 
 await B.page.waitForTimeout(3000);
 ok((await B.page.textContent('body')).includes('Jaxon'), 'shooter B sees shooter A');
-ok(await B.page.locator('svg circle.relayed').count() === 2,
-   "...and A's two impacts drawn over B's own target");
+ok(await B.page.locator('svg circle.relayed').count() === 4,
+   "...and A's four impacts drawn over B's own target");
 
 await A.page.screenshot({ path: 'shots/relay-shooter.png', fullPage: true });
 
@@ -188,11 +206,46 @@ ok(bodyC1.includes('Jaxon') && bodyC1.includes('Partner Pete'),
    'the coach sees both shooters');
 ok(bodyC1.includes('Both strings'),
    '...on one target first, which is the comparison a coach is actually making');
-ok(bodyC1.includes('19–0X') && bodyC1.includes('18–0X'),
-   '...and both scores, computed independently (19–0X and 18–0X)');
-ok(await C.page.locator('svg circle').count() >= 4, 'both strings are plotted');
-ok(await C.page.locator('svg line[opacity="0.5"]').count() === 2,
+ok(bodyC1.includes('40–0X') && bodyC1.includes('36–0X'),
+   '...and both scores, computed independently (40–0X and 36–0X)');
+ok(await C.page.locator('svg circle').count() >= 8, 'both strings are plotted');
+ok(await C.page.locator('svg line[opacity="0.5"]').count() === 8,
    'a call is drawn joined to its impact, once per called shot');
+
+/* ══════════════════════════════ the correction, in minutes, or none at all */
+section('call error in minutes — the number the coach dials on');
+const cardA = C.page.locator('.tcard', { hasText: 'Jaxon' }).last();
+const cardB = C.page.locator('.tcard', { hasText: 'Partner Pete' }).last();
+const textA = await cardA.textContent();
+const textB = await cardB.textContent();
+
+ok(textA.includes('Call vs impact'), 'the coach gets a call-vs-impact panel per shooter');
+ok(textA.includes('4 called · 100yd'),
+   '...stating how many calls it is built on, and at what distance');
+// impacts are exactly 1.0472" above their calls at 100yd = exactly 1.00 MOA
+ok(/1\.00\s*DOWN/.test(textA),
+   'A lands 1 MOA above his own call, so the card reads 1.00 DOWN');
+ok(/0\.50\s*LEFT/.test(textA),
+   '...and 0.5 MOA right of it, so 0.50 LEFT — the sign is flipped into an instruction');
+ok(textA.includes('Dial 1.00 down and 0.50 left'),
+   '...spelled out as a sentence a coach can say out loud');
+ok(/±0\.00/.test(textA), '...with the interval on that mean beside it');
+ok(/1\.12[\s\S]{0,40}MOA call miss/.test(textA),
+   'the radial call miss (1.12 MOA) is a separate number from either correction');
+
+// B: half an inch either way. The mean is zero and the spread is not.
+ok(!/\d\.\d\d\s*(UP|DOWN|LEFT|RIGHT)/.test(textB),
+   "B's alternating call errors produce no correction at all");
+ok(textB.includes('No correction yet'),
+   '...and the card says so outright rather than printing a mean of nothing');
+ok(textB.includes('hold'), '...marking each axis as hold rather than as 0.00');
+// B is on the 200yd line, A on the 100. Half an inch is 0.48 MOA at 100 and
+// 0.24 at 200 -- if minutes came from the relay rather than from each
+// shooter, this reads 0.48 and the coach corrects the wrong man.
+ok(textB.includes('4 called · 200yd'),
+   "B's card is computed at B's own distance, not the relay starter's");
+ok(/0\.24[\s\S]{0,40}MOA call miss/.test(textB),
+   '...so the same half inch is 0.24 MOA for B where it is 0.48 for A');
 
 const anon = await C.page.evaluate(() =>
   JSON.parse(localStorage.getItem('zerocore.session') || '{}')?.user?.is_anonymous);
@@ -212,11 +265,11 @@ await logShot(B.page);
 await C.page.waitForTimeout(5000);
 ok(await C.page.locator('svg circle').count() >= cCircles + 2,
    'a shot from each shooter reaches the coach');
-ok(shotsOn().length === 6, `six shots on the relay, three each (${shotsOn().length})`);
+ok(shotsOn().length === 10, `ten shots on the relay, five each (${shotsOn().length})`);
 
 await A.page.waitForTimeout(3000);
-ok(await A.page.locator('svg circle.relayed').count() === 3,
-   "B's third shot appears on A's target");
+ok(await A.page.locator('svg circle.relayed').count() === 5,
+   "B's fifth shot appears on A's target");
 
 /* ═══════════════════════════════════ nobody writes anybody else's string */
 section('each shooter owns exactly one string');
@@ -244,7 +297,7 @@ const coachForged = await C.page.evaluate(async ({ base, rid }) => {
   return r.status;
 }, { base: mock.url, rid: relayId });
 ok(coachForged === 403, `a coach's token is refused when writing any string (${coachForged})`);
-ok(shotsOn().length === 6, 'neither forgery landed');
+ok(shotsOn().length === 10, 'neither forgery landed');
 
 /* ═════════════════════════════════════════════════ the feed carries calls */
 section('one feed, three people');

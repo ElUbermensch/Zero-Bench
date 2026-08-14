@@ -677,25 +677,32 @@ const ZeroCore = (() => {
       return { ok: true, relay: row, slot: 1, role: 'shooter' };
     }
 
-    async function joinRelay(code, name, role) {
+    /** opts.distanceYd: YOUR firing distance, not the relay starter's. It is
+     *  what turns your inches into minutes on the coach's screen, and a pair is
+     *  not always on the same line. */
+    async function joinRelay(code, name, role, opts) {
       const id = await ensureIdentity();
       if (!id.ok) return { ok: false, error: id.error };
+      const d = Number((opts || {}).distanceYd);
       const r = await rpc('join_relay', {
         p_code: String(code || '').trim(),
         p_name: name || 'Guest',
         p_role: role === 'shooter' ? 'shooter' : 'coach',
+        p_distance_yd: Number.isFinite(d) && d > 0 ? d : null,
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
       // join_relay returns a RESULT, not an exception: a bad code is ok:false,
       // which is how the server-side throttle can record the failed attempt.
-      const d = r.data || {};
-      if (!d.ok) return { ok: false, reason: d.error, message: d.message };
+      const res = r.data || {};
+      if (!res.ok) return { ok: false, reason: res.error, message: res.message };
       // Trust the SERVER's answer on role and firing point, not the request:
       // a relay that is already full hands back a coach seat, and rejoining
       // returns the slot you already held rather than a fresh one.
-      startRelay({ id: d.relay.id, code: d.relay.code, isHost: false,
-                   name: name || 'Guest', role: d.role || 'coach', slot: d.slot || null });
-      return { ok: true, relay: d.relay, slot: d.slot || null, role: d.role || 'coach' };
+      startRelay({ id: res.relay.id, code: res.relay.code, isHost: false,
+                   name: name || 'Guest', role: res.role || 'coach',
+                   slot: res.slot || null });
+      return { ok: true, relay: res.relay, slot: res.slot || null,
+               role: res.role || 'coach' };
     }
 
     function startRelay(meta) {

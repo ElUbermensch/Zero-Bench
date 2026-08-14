@@ -1,7 +1,7 @@
 # Pair fire — the live relay
 
 **Status: built.** Migration `0004_relay.sql`, the relay client in `zero-core`, the
-UI in `Zero.jsx`. 58 SQL assertions across two suites and a 47-assertion three-device
+UI in `Zero.jsx`. 61 SQL assertions across two suites and a 59-assertion three-device
 browser test (`apps/zero/test-relay.mjs`) cover it.
 
 ---
@@ -17,7 +17,7 @@ from the home screen. From then on:
 | | sees | writes |
 |---|---|---|
 | **shooter** | their own target as normal, with the partner's shots drawn over it as dashed rings in the partner's colour | their own string only |
-| **coach** | both strings — on one target together, then a card each with score, mean radius, ES and the shot list; calls as well as impacts | nothing but the feed |
+| **coach** | both strings — on one target together, then a card each with score, mean radius, ES, the shot list, and **the correction in minutes** | nothing but the feed |
 | **everyone** | one shared feed for wind calls and chatter | their own lines |
 
 Two decisions carry the design, and both are contrarian:
@@ -156,6 +156,60 @@ hollow ring joined to the impact by a line. The gap between them is the whole po
 called flyer is a technique problem, an uncalled one is wind or ammunition, and that
 distinction is what a coach is on the line to make.
 
+---
+
+## 3a. The correction, in minutes
+
+The coach's card turns that gap into the number they dial. Three decisions in it are
+worth defending, because the obvious version of each is wrong.
+
+**Why call error and not the group centroid.** The centroid tells you where the group
+sits relative to the point of aim, which mixes three things together:
+
+```
+centroid − point of aim  =  aiming error + zero error + conditions
+impact   − call          =              zero error + conditions
+```
+
+A shooter who calls "low left" and hits low left has a correctly zeroed rifle and made a
+bad shot. Dial for that and you have just moved a rifle that was right. Subtracting the
+call removes the shooter's own aiming error from the measurement, which is exactly why
+coaches work off calls in the first place.
+
+**Why the mean and not the mean absolute error.** Mean absolute error never approaches
+zero however perfectly the rifle is zeroed — it measures how *tightly* the shooter is
+calling. That is a real and useful number, so it is shown, in its own cell, clearly
+labelled **MOA call miss**. But it is not a correction. The correction is the mean
+*signed* error vector, decomposed into elevation and windage.
+
+**Why it sometimes refuses to give one.** A mean over four shots is mostly noise. Each
+axis carries a 90% interval on the mean (Student *t*, `se = s/√n`), and when that
+interval spans zero the card prints **hold** rather than a number:
+
+> No correction yet. The offset so far is inside its own 90% interval, which means it is
+> scatter, not a zero error. Dialling on it would move a correct rifle.
+
+Small *n* is exactly where this matters, which is why it is a *t* table and not 1.645 —
+at 3 shots the multiplier is 2.35, and a normal approximation would call a correction
+significant when it is not.
+
+The sign is flipped into an instruction, since the sight moves the way you want the group
+to move: impacts **above** the call give **DOWN**, impacts **right** of it give **LEFT**.
+The card says it as a sentence — *"Dial 1.00 down and 0.50 left"* — because that is what
+gets shouted down a firing line.
+
+**Minutes come from each shooter's own distance**, carried on
+`relay_participants.distance_yd`, never from the relay. A pair is not always on the same
+line, and half an inch is 0.48 MOA at 100 yards and 0.24 at 200. Converting a partner's
+inches at the starter's yardage would hand the coach a confidently wrong correction — the
+browser suite puts the two shooters on different lines specifically to catch that.
+
+The per-shot chips show each call miss in minutes too (`◦1.1′`), so a coach can see
+whether one shot is dragging the mean.
+
+This is on the **coach's** screen only. Both ends acting on the same correction
+independently is how a rifle gets dialled twice.
+
 ### Anonymity, honestly
 
 "No accounts" is implemented as **anonymous sign-in**, not unauthenticated access. The
@@ -254,9 +308,9 @@ Relays expire on their own; nothing needs pruning by hand.
 | | |
 |---|---|
 | `supabase/test/rls_test3.sql` | 27 assertions. A stranger cannot list relays, read one by id, read the shot string, enumerate participants, or self-insert a participant row. Wrong codes trip the throttle *and the attempt rows survive*. The `>=` cursor returns two shots sharing one timestamp. The code dies when the relay ends or expires. |
-| `supabase/test/rls_test4.sql` | 31 assertions, two shooters and a coach. Both shooters number from 1 without colliding; neither can write, rewrite or delete the other's rows; the coach can write none; everyone reads everything; slots stick across a rejoin and are reused after someone leaves; no auth id is exposed; an ended relay accepts nothing. |
+| `supabase/test/rls_test4.sql` | 34 assertions, two shooters and a coach. Both shooters number from 1 without colliding; neither can write, rewrite or delete the other's rows; the coach can write none; everyone reads everything; slots stick across a rejoin and are reused after someone leaves; each shooter carries their own firing distance; no auth id is exposed; an ended relay accepts nothing. |
 | `packages/zero-core` | 98 assertions, 21 of them pair fire: role and slot come from the server, shots sort by firing point, `is_self` separates your string from your partner's, a coach is refused client-side before a request is even sent. |
-| `apps/zero/test-relay.mjs` | 47 assertions across **three real browser profiles**, driving the actual buttons — nothing calls the relay API to make something appear. Verified by negative control: dropping the one prop that overlays the partner's string makes five assertions fail. |
+| `apps/zero/test-relay.mjs` | 59 assertions across **three real browser profiles**, driving the actual buttons — nothing calls the relay API to make something appear. The call-error seeds are chosen so the answer is exact arithmetic (impacts 1.0472in above their calls at 100yd is 1.00 MOA), and the two shooters are put on different lines so a relay-wide conversion would be caught. Two negative controls: dropping the prop that overlays the partner's string fails five assertions, and removing the significance gate fails three. |
 
 The browser suites run against `packages/zero-core/mock-supabase.mjs`, a mock of GoTrue
 and PostgREST. That mock encodes an understanding of Supabase's endpoints, which is

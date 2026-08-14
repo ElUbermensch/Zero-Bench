@@ -6,12 +6,13 @@
   "scripts": {
     "build": "npm run build:tracker && npm run build:zero",
     "build:tracker": "node apps/tracker/build.mjs",
-    "build:zero": "esbuild apps/zero/entry.jsx --bundle --loader:.jsx=jsx --jsx=automatic --outfile=apps/zero/dist/bundle.js && node -e \"require('fs').mkdirSync('apps/zero/dist',{recursive:true});require('fs').copyFileSync('apps/zero/index.html','apps/zero/dist/index.html')\"",
-    "test": "npm run test:core && npm run test:tracker && npm run test:zero",
+    "build:zero": "npm run embed && esbuild apps/zero/entry.jsx --bundle --loader:.jsx=jsx --jsx=automatic --outfile=apps/zero/dist/bundle.js && node -e \"require('fs').mkdirSync('apps/zero/dist',{recursive:true});require('fs').copyFileSync('apps/zero/index.html','apps/zero/dist/index.html')\"",
+    "test": "node tools/embed-core.mjs --check && npm run test:core && npm run test:tracker && npm run test:zero",
     "test:core": "node packages/zero-core/test-zero-core.mjs",
     "test:tracker": "cd apps/tracker && node test.mjs",
     "test:zero": "cd apps/zero && node test-integration.mjs && node test-leaderboard.mjs && node test-relay.mjs",
-    "test:sql": "bash supabase/run_tests.sh"
+    "test:sql": "bash supabase/run_tests.sh",
+    "embed": "node tools/embed-core.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.23.0",

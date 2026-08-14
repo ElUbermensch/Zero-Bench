@@ -218,13 +218,13 @@ declare g record;
 begin
   select * into g from public.v_batch_performance
    where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
-  perform test.check(g.group_count = 1,        'view: tracker sees Zero''s group');
-  perform test.check(g.best_group_in = 0.42,   'view: group ES in inches reaches the tracker');
+  perform test.check(g.group_count = 1,        'view: Bench sees Zero''s group');
+  perform test.check(g.best_group_in = 0.42,   'view: group ES in inches reaches Bench');
   -- 0.42 in at 100 yd = 0.42 / 1.047 = 0.4012 MOA
   perform test.check(round(g.best_group_moa, 3) = 0.401, 'view: MOA uses 1.047 in/100 yd');
 end $$;
 
--- quarantining in the tracker must be visible to Zero immediately
+-- quarantining in Bench must be visible to Zero immediately
 update public.batches set quarantined = true, quarantine_reason = 'pulled'
  where id = 'aa000000-0000-0000-0000-00000000ba01';
 do $$
@@ -232,7 +232,7 @@ declare q boolean;
 begin
   select quarantined into q from public.v_ballistic_profiles
    where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
-  perform test.check(q, 'cross-app: a tracker quarantine is visible to Zero');
+  perform test.check(q, 'cross-app: a Bench quarantine is visible to Zero');
 end $$;
 
 -- soft delete must hide the row from both apps without losing history

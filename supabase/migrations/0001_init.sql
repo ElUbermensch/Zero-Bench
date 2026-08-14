@@ -1,5 +1,5 @@
 -- ============================================================================
--- Shared backend for the Reloading Batch Tracker and Zero (ballistics PWA).
+-- Shared backend for Bench and Zero (ballistics PWA).
 --
 -- Both apps are browser PWAs talking to PostgREST with the PUBLIC anon key.
 -- That key is visible to anyone who opens devtools, so row level security is
@@ -70,7 +70,7 @@ create table public.profiles (
   id            uuid primary key references auth.users(id) on delete cascade,
   display_name  text,
   units         text not null default 'imperial' check (units in ('imperial','metric')),
-  marking_scheme jsonb not null default '{}'::jsonb,   -- tracker's colour scheme
+  marking_scheme jsonb not null default '{}'::jsonb,   -- Bench's colour scheme
   overhead_per_round numeric(10,4) not null default 0,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
@@ -290,7 +290,7 @@ create table public.batches (
 );
 
 -- ============================================================================
--- Results. These tables are the shared surface: the tracker writes loading
+-- Results. These tables are the shared surface: Bench writes loading
 -- data, Zero writes what happened downrange, and both read the other's.
 -- ============================================================================
 
@@ -319,7 +319,7 @@ create table public.range_sessions (
   pressure_signs text not null default 'none' check (pressure_signs in
                   ('none','flattened primers','cratered primers','ejector mark',
                    'stiff bolt lift','case head expansion')),
-  source_app    text not null default 'tracker' check (source_app in ('tracker','zero')),
+  source_app    text not null default 'Bench' check (source_app in ('Bench','zero')),
   notes         text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
@@ -343,7 +343,7 @@ create table public.shots (
   unique (session_id, shot_no)
 );
 
--- GROUP dispersion, in inches. Zero owns this: it is what the tracker reads
+-- GROUP dispersion, in inches. Zero owns this: it is what Bench reads
 -- back to answer "which load actually shot best".
 create table public.groups (
   id            uuid primary key default gen_random_uuid(),
@@ -358,7 +358,7 @@ create table public.groups (
   mean_radius_in numeric(7,3) check (mean_radius_in >= 0),
   vertical_in   numeric(7,3),
   horizontal_in numeric(7,3),
-  source_app    text not null default 'zero' check (source_app in ('tracker','zero')),
+  source_app    text not null default 'zero' check (source_app in ('Bench','zero')),
   notes         text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
@@ -509,7 +509,7 @@ create index ix_sessions_batch  on public.range_sessions (batch_id);
 /*
  * What Zero reads when the user is choosing a bullet/load: one row per live
  * batch, carrying everything a trajectory solution needs plus the safety state
- * the tracker owns.
+ * Bench owns.
  */
 create view public.v_ballistic_profiles
 with (security_invoker = true) as
@@ -528,7 +528,28 @@ select
   bp.bc_g7,
   b.coal_mean_in,
   r.cbto_in,
+  -- The recipe as a shooter says it out loud. Zero was importing a batch and
+  -- leaving powder and charge blank, which meant the load it listed could not
+  -- be told apart from any other load of the same bullet.
+  pw.id                         as powder_id,
+  concat_ws(' ', pw.maker, pw.name)   as powder_name,
+  pw.temp_stable                as powder_temp_stable,
+  r.charge_gr,
+  b.charge_actual_gr,
+  b.charge_sd_gr,
+  pr.id                         as primer_id,
+  concat_ws(' ', pr.maker, pr.model)  as primer_name,
+  r.id                          as recipe_id,
+  -- Safety citation travels with the load. A number without its source is not
+  -- something to hand to a ballistic solver.
+  r.source_name,
+  r.source_edition,
+  r.source_page,
+  r.source_max_gr,
+  r.self_developed,
+  b.quarantine_reason,
   b.qty_remaining,
+  b.qty_loaded,
   b.loaded_on,
   -- velocity, taken from the most recent session that actually has a number
   v.velocity_avg_fps            as muzzle_velocity_fps,
@@ -552,6 +573,8 @@ select
 from public.batches b
 join public.recipes r          on r.id = b.recipe_id and r.deleted_at is null
 left join public.bullet_products bp on bp.id = r.bullet_id and bp.deleted_at is null
+left join public.powder_products pw on pw.id = r.powder_id and pw.deleted_at is null
+left join public.primer_products pr on pr.id = r.primer_id and pr.deleted_at is null
 left join public.firearms f    on f.id = r.firearm_id and f.deleted_at is null
 left join lateral (
   select s.* from public.range_sessions s
@@ -563,10 +586,10 @@ where b.deleted_at is null;
 
 comment on view public.v_ballistic_profiles is
   'Zero reads this to list selectable loads. One row per batch, with bullet BC, '
-  'muzzle velocity and its spread, firearm geometry, and tracker safety flags.';
+  'muzzle velocity and its spread, firearm geometry, and Bench safety flags.';
 
 /*
- * What the tracker reads back from Zero: how each batch actually shot.
+ * What Bench reads back from Zero: how each batch actually shot.
  * group_es_in is group size in inches -- not the velocity ES above.
  */
 create view public.v_batch_performance
@@ -590,7 +613,7 @@ where b.deleted_at is null
 group by b.id, b.user_id, b.serial;
 
 comment on view public.v_batch_performance is
-  'Group dispersion per batch, written by Zero, read by the tracker. '
+  'Group dispersion per batch, written by Zero, read by Bench. '
   'MOA uses the true minute of angle (1.047 in per 100 yd), not the shooter shorthand of 1 in.';
 
 -- ============================================================================

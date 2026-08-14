@@ -37,7 +37,7 @@ create table public.leaderboard_entries (
   x_count       integer not null default 0 check (x_count >= 0),
   mr_moa        numeric(7,3) check (mr_moa >= 0),
   es_moa        numeric(7,3) check (es_moa >= 0),
-  source_app    text not null default 'zero' check (source_app in ('zero','tracker')),
+  source_app    text not null default 'zero' check (source_app in ('zero','Bench')),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
   deleted_at    timestamptz,

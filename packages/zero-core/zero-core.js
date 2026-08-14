@@ -2,7 +2,7 @@
  * zero-core — shared auth + sync layer for the Zero PWA family
  *
  * One module, embedded byte-identically in every app (Zero, the reloading
- * tracker, anything later). No SDK, no build step, no dependencies: it talks to
+ * Bench, anything later). No SDK, no build step, no dependencies: it talks to
  * Supabase's GoTrue and PostgREST endpoints with fetch, so each app stays a
  * single self-contained file and still works with no signal.
  *
@@ -96,7 +96,7 @@ const ZeroCore = (() => {
     const cfg = Object.assign({
       url: null,              // https://<ref>.supabase.co
       anonKey: null,
-      appId: 'unknown',       // 'zero' | 'tracker' — lands in source_app
+      appId: 'unknown',       // 'zero' | 'Bench' — lands in source_app
       tables: TABLES,
       storage: null,          // injectable; defaults to localStorage or memory
       fetch: (globalThis.fetch ? globalThis.fetch.bind(globalThis) : null),

@@ -12,7 +12,7 @@ self-contained and degrades cleanly with no signal.
 const core = ZeroCore.create({
   url: 'https://<ref>.supabase.co',
   anonKey: '<public anon key>',
-  appId: 'zero',            // or 'tracker' — lands in source_app
+  appId: 'zero',            // or 'Bench' — lands in source_app
   autoSyncMs: 60_000,       // 0 disables
 });
 ```
@@ -85,7 +85,7 @@ indicates a session that died on its own.
 | `reconcile(table, rows, apply)` | applies pulled rows, skipping ones with pending local edits |
 | `selectView(view, query)` | read-only PostgREST query |
 | `ballisticProfiles(query)` | `v_ballistic_profiles` — **what Zero calls to list loads** |
-| `batchPerformance(query)` | `v_batch_performance` — what the tracker calls for group data |
+| `batchPerformance(query)` | `v_batch_performance` — what Bench calls for group data |
 | `setOnline(bool, opts)` / `attachBrowserListeners(apply)` | connectivity |
 | `startAutoSync(apply)` / `stopAutoSync()` | periodic sync |
 | `resetCursors()` | forces a full re-pull |

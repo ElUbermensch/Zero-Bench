@@ -1,5 +1,5 @@
 {
-  "name": "Reloading Batch Tracker",
+  "name": "Bench",
   "short_name": "Reloading",
   "description": "Brass lots, load recipes, serialised batches and printable QR labels. Works offline.",
   "start_url": "./",

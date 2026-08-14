@@ -21,7 +21,7 @@ const memStore = () => {
 
 const mock = await startMock({ ttlSec: 3600 });
 const mkClient = (store, extra = {}) => ZeroCore.create(Object.assign({
-  url: mock.url, anonKey: 'anon-key-public', appId: 'tracker',
+  url: mock.url, anonKey: 'anon-key-public', appId: 'Bench',
   storage: store || memStore(), pageSize: 2,
 }, extra));
 

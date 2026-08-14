@@ -1,4 +1,4 @@
-# Reloading Batch Tracker — PWA
+# Bench — PWA
 
 Deploy `dist/` to any static host. That's the whole deployment.
 

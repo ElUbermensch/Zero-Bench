@@ -1,4 +1,4 @@
-# Reloading Batch Tracker — Design Concept
+# Bench — Design Concept
 
 **Status:** rev 3 — prototype built, awaiting feedback.
 **Date:** 2026-08-13

@@ -5,15 +5,15 @@ Two offline-first shooting PWAs over one shared Supabase backend.
 - **Zero** — precision shooting log: sessions, shot plotting, DOPE, analytics, leaderboard,
   and pair fire: two shooters and a coach on one 4-character code, each seeing the
   others' shots live.
-- **Reloading Batch Tracker** — brass lots by colour code, load recipes, serialised
+- **Bench** — the reloading log: brass lots by colour code, load recipes, serialised
   batches, printable QR labels.
 
-They are not two copies of one app. Zero records what happened downrange; the tracker
-records what you loaded. The interesting part is the seam: a batch loaded in the tracker
+They are not two copies of one app. Zero records what happened downrange; Bench
+records what you loaded. The interesting part is the seam: a batch loaded in Bench
 becomes a selectable load in Zero, and the group it shoots flows back to that batch.
 
 ```
-apps/tracker      the reloading PWA (vanilla, single-file build)
+apps/bench      the reloading PWA (vanilla, single-file build)
 apps/zero         Zero (React, bundled with esbuild)
 packages/zero-core   shared auth + offline sync, embedded byte-identically in both
 supabase/         migrations and the RLS test suites
@@ -27,7 +27,7 @@ Every install points at **one** Supabase project. Set it in two places:
 | File | Constant |
 |---|---|
 | `apps/zero/Zero.jsx` | `SHARED_SUPABASE` (near the top) |
-| `apps/tracker/src/app.js` | not yet wired — see *Status* |
+| `apps/bench/src/app.js` | not yet wired — see *Status* |
 
 ```js
 const SHARED_SUPABASE = {
@@ -65,7 +65,7 @@ real thing.
 npm install
 npx playwright install chromium
 npm run build          # both apps -> apps/*/dist
-npm test               # zero-core, tracker, Zero, leaderboard, relay
+npm test               # zero-core, Bench, Zero, leaderboard, relay
 npm run test:sql       # needs a local PostgreSQL 16
 ```
 
@@ -77,11 +77,11 @@ never the copy. `npm test` fails if the two have drifted.
 ## Deploy
 
 `.github/workflows/deploy.yml` builds both apps and publishes to GitHub Pages on every
-push to `main` — tracker at `/`, Zero at `/zero/`. Enable it under
+push to `main` — Bench at `/`, Zero at `/zero/`. Enable it under
 **Settings → Pages → Source: GitHub Actions**.
 
-The tracker's service worker is cache-first, so **bump `CACHE` in
-`apps/tracker/src/sw.js` on every deploy** or returning users keep the old build.
+Bench's service worker is cache-first, so **bump `CACHE` in
+`apps/bench/src/sw.js` on every deploy** or returning users keep the old build.
 
 ## What is verified
 
@@ -89,8 +89,8 @@ The tracker's service worker is cache-first, so **bump `CACHE` in
 |---|---|---|
 | `supabase/test/` | 123 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing; a relay code grants nothing on its own; each shooter in a pair owns exactly one string |
 | `packages/zero-core` | 98 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
-| `apps/tracker` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
-| `apps/zero` integration | 21 | A tracker batch becomes a Zero load; group size flows back in inches; idempotent across reloads |
+| `apps/bench` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
+| `apps/zero` integration | 41 | A Bench batch becomes a Zero load carrying BC, muzzle velocity and its SD, firearm geometry and the load citation; group size flows back in inches; a batch quarantined on the bench after import reaches Zero on the next refresh and is blocked from starting a new session, without touching sessions already shot |
 | `apps/zero` leaderboard | 16 | Two separate browser profiles, one backend: A publishes, B sees it, B cannot alter it, private tables stay private |
 | `apps/zero` relay | 62 | **Three** browser profiles driving the real buttons: two shooters and a coach on one code. Each shooter's shots reach the other two; neither can write the other's string (attempted with their own real token); the coach sees both and can log nothing; the call-vs-impact correction is exact minutes at each shooter's own distance, always printed but marked unconfirmed while the offset is inside its own noise; the code dies with the relay |
 
@@ -118,8 +118,8 @@ mid-session — the relay solves that by not holding a connection at all. See
 
 ## Status
 
-- Zero: synced, tracker-linked, leaderboard, live relay — done.
-- Tracker: fully working standalone; **not yet wired to zero-core.** It still stores
+- Zero: synced, Bench-linked, leaderboard, live relay — done.
+- Bench: fully working standalone; **not yet wired to zero-core.** It still stores
   locally only. That is the next piece of work.
 - Pair fire: **built** — two shooters and a coach, mutually visible, partner's shots
   overlaid on your own target in their colour. Polling, not WebSockets, on purpose;

@@ -1,12 +1,12 @@
 /* ============================================================================
- * Reloading Batch Tracker
+ * Bench
  *
  * Navigation rule: every creation form has exactly ONE entry point. Empty
  * states link to that page rather than duplicating the form, so there is never
  * a second route to the same destination.
  *
- * Starts empty. There is no demo data -- a tracker that arrives pre-populated
- * with someone else's loads is a tracker you have to clean out before you can
+ * Starts empty. There is no demo data -- a Bench that arrives pre-populated
+ * with someone else's loads is a Bench you have to clean out before you can
  * trust it.
  * ==========================================================================*/
 'use strict';
@@ -74,7 +74,7 @@ const Serial = (() => {
  * back, because a quota failure in Safari private mode throws on set().
  * ------------------------------------------------------------------------*/
 const Store = (() => {
-  const KEY = 'reloading.tracker';
+  const KEY = 'reloading.Bench';
   let mem = null, persistent = false;
   try {
     localStorage.setItem(KEY + '.probe', '1');
@@ -1265,7 +1265,7 @@ document.addEventListener('change', (e) => {
           throw new Error('shape');
         }
         Store.save(parsed); DB = loadDb(); toast('Imported.'); reset('lookup');
-      } catch (err) { toast('That file is not a tracker export.'); render(); }
+      } catch (err) { toast('That file is not a Bench export.'); render(); }
     };
     fr.readAsText(el.files[0]);
     el.value = '';

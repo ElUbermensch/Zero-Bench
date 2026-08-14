@@ -1,5 +1,5 @@
 # Publishes both PWAs to GitHub Pages:
-#   /            -> the reloading tracker
+#   /            -> Bench
 #   /zero/       -> Zero
 name: deploy
 
@@ -29,7 +29,7 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir -p site/zero
-          cp -r apps/tracker/dist/* site/
+          cp -r apps/bench/dist/* site/
           cp -r apps/zero/dist/* site/zero/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

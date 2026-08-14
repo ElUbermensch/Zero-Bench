@@ -1,8 +1,8 @@
-# Zero ↔ Reloading Tracker — shared Supabase backend
+# Zero ↔ Bench — shared Supabase backend
 
 **Status:** schema + leaderboard executed against PostgreSQL 16. **54 SQL assertions**
 pass, including an adversarial two-user isolation suite and a negative control proving
-the view guard is load-bearing. Clients wired: zero-core 60, tracker 53, Zero↔tracker
+the view guard is load-bearing. Clients wired: zero-core 60, Bench 53, Zero↔Bench
 21, leaderboard two-user 16.
 
 ---
@@ -15,9 +15,9 @@ same tables.
 
 - **Zero reads `v_ballistic_profiles`** to list selectable loads when you're picking a
   bullet. One row per live batch, carrying bullet BC, muzzle velocity and its spread,
-  firearm geometry, and the tracker's safety flags.
+  firearm geometry, and Bench's safety flags.
 - **Zero writes `range_sessions`, `shots`, `groups`, `dope_entries`.**
-- **The tracker reads `v_batch_performance`** to answer "which load actually shot best",
+- **Bench reads `v_batch_performance`** to answer "which load actually shot best",
   and reads the same `range_sessions` rows to clear its untested flag.
 
 Files: `migrations/0001_init.sql` (the migration), `test/harness.sql` (local stand-in
@@ -65,10 +65,15 @@ One row per live batch. Zero should list these when the user picks a load.
 | `firearm_id`, `firearm_name`, `barrel_in`, `twist` | | |
 | `sight_height_in`, `zero_range_yd` | numeric | Zero needs both for a solution |
 | `qty_remaining` | int | don't offer a load you're out of |
-| `quarantined` | bool | **refuse to build a solution; the tracker pulled this ammo** |
+| `quarantined` | bool | **refuse to build a solution; Bench pulled this ammo** |
 | `untested` | bool | no chronograph data — velocity is null or assumed |
 | `over_published_max` | bool | charge exceeds the cited manual maximum |
 | `recipe_status` | text | `workup` / `proven` / `retired` |
+| `powder_name`, `charge_gr`, `charge_actual_gr`, `charge_sd_gr` | | the recipe target and what was **actually weighed** — prefer the actual |
+| `primer_name`, `powder_temp_stable` | | |
+| `source_name`, `source_edition`, `source_page`, `source_max_gr`, `self_developed` | | the load-data citation; a charge without its source is not something to hand a solver |
+| `quarantine_reason` | text | why it was pulled, so Zero can say so rather than just refusing |
+| `qty_loaded`, `recipe_id` | | |
 
 ```js
 const { data } = await supabase
@@ -86,10 +91,23 @@ const { data } = await supabase
   .from('v_ballistic_profiles').select('*').eq('serial', scanned).single();
 ```
 
-**Zero should hard-refuse on `quarantined`.** That flag exists because the tracker
-decided the ammunition shouldn't be fired; a ballistic solution for it is worse than
-useless. `untested` and `over_published_max` warrant a visible warning rather than a
-refusal.
+**Zero should hard-refuse on `quarantined`.** That flag exists because Bench decided the
+ammunition shouldn't be fired; a ballistic solution for it is worse than useless.
+
+Zero's implementation of that is worth stating precisely, because the obvious version is
+wrong in two directions:
+
+- A linked load keeps a **structured snapshot** of this view, refreshed on every sync and
+  on demand — not a copy frozen at import. A batch quarantined on the bench three weeks
+  after Zero imported it must stop being selectable, and it cannot if Zero is reading a
+  boolean it cached once.
+- Quarantining **does not delete or hide the load**, and does not touch sessions already
+  shot with it. Quarantining after the fact is exactly how you discover a batch was bad;
+  removing it from the record destroys the evidence that would tell you. The load stays
+  visible, marked, with its reason — and is refused only as the ammunition for *new*
+  work.
+
+`untested` and `over_published_max` warrant a visible warning rather than a refusal.
 
 ---
 
@@ -155,7 +173,7 @@ the 1.000 shorthand. At 1000 yd that shorthand is a 4.7% error.
 
 ---
 
-## 5. What the tracker reads back: `v_batch_performance`
+## 5. What Bench reads back: `v_batch_performance`
 
 | Column | Note |
 |---|---|

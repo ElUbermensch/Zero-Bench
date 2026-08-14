@@ -1103,13 +1103,13 @@ select.inp{cursor:pointer}
 
 
 /* ════════════════════════════════════════════════════════════════════════
- * CLOUD SYNC — shared Supabase backend with the Reloading Batch Tracker.
+ * CLOUD SYNC — shared Supabase backend with Bench.
  *
  * zero-core is the shared auth+sync module (embedded verbatim in both apps;
  * 47-assertion suite lives beside it). Zero's local model stays the source
  * of truth for the UI; sync adds three things:
  *   1. an account (email/password) with offline-queued writes,
- *   2. ammo loads LINKED to tracker batches (imported from
+ *   2. ammo loads LINKED to Bench batches (imported from
  *      v_ballistic_profiles, carrying the batch serial + safety flags),
  *   3. results flowing back: for every session shot with a linked load,
  *      a range_sessions row + a groups row (ES/MR converted to INCHES —
@@ -1120,7 +1120,7 @@ select.inp{cursor:pointer}
  * zero-core — shared auth + sync layer for the Zero PWA family
  *
  * One module, embedded byte-identically in every app (Zero, the reloading
- * tracker, anything later). No SDK, no build step, no dependencies: it talks to
+ * Bench, anything later). No SDK, no build step, no dependencies: it talks to
  * Supabase's GoTrue and PostgREST endpoints with fetch, so each app stays a
  * single self-contained file and still works with no signal.
  *
@@ -1214,7 +1214,7 @@ const ZeroCore = (() => {
     const cfg = Object.assign({
       url: null,              // https://<ref>.supabase.co
       anonKey: null,
-      appId: 'unknown',       // 'zero' | 'tracker' — lands in source_app
+      appId: 'unknown',       // 'zero' | 'Bench' — lands in source_app
       tables: TABLES,
       storage: null,          // injectable; defaults to localStorage or memory
       fetch: (globalThis.fetch ? globalThis.fetch.bind(globalThis) : null),
@@ -2091,7 +2091,220 @@ const SYNC_CFG_KEY = 'sync_cfg_v1';
 const POSITIONS = ['Prone', 'Sitting', 'Kneeling', 'Standing', 'Supported', 'Unspecified'];
 const round3 = (n) => (Number.isFinite(n) ? Math.round(n * 1000) / 1000 : null);
 
-/* Map every session that used a tracker-linked load onto the shared schema
+/* ══════════════════════════════════════════════════════════════════════════
+ * BENCH → ZERO: what a linked batch actually carries.
+ *
+ * Zero used to import a batch as a name, a bullet and an OAL, flattening the
+ * safety flags into a notes STRING. Three things were wrong with that:
+ *
+ *   1. Powder and charge were dropped, so two loads of the same bullet were
+ *      indistinguishable in the picker -- which is most of a load workup.
+ *   2. Everything was frozen at import. A batch quarantined on the bench
+ *      stayed selectable in Zero forever, because Zero had kept a copy of a
+ *      boolean from weeks ago.
+ *   3. Flags in prose cannot be enforced. "UNTESTED" inside a notes field is
+ *      a thing a human might notice; it is not a thing the app can refuse on.
+ *
+ * So a linked load now keeps a structured `batch` snapshot, refreshed on every
+ * sync, and the flags are booleans the UI acts on. The user's own fields --
+ * the load's name, which firearm it is bound to -- are never overwritten by a
+ * refresh; those are theirs.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+const num = v => (v == null || v === '' || !Number.isFinite(+v) ? null : +v);
+
+/* One row of v_ballistic_profiles → the snapshot Zero stores. Field names are
+ * camel-cased at the boundary so the rest of the app never sees snake_case. */
+function batchSnapshot(p, atMs) {
+  return {
+    cartridge: p.cartridge || null,
+    loadName: p.load_name || null,
+    recipeId: p.recipe_id || null,
+    // bullet
+    bulletName: p.bullet_name || null,
+    bulletWeightGr: num(p.bullet_weight_gr),
+    diameterIn: num(p.diameter_in),
+    bulletLengthIn: num(p.bullet_length_in),
+    bcG1: num(p.bc_g1), bcG7: num(p.bc_g7),
+    // the recipe as a shooter says it out loud
+    powderName: p.powder_name || null,
+    powderTempStable: p.powder_temp_stable ?? null,
+    chargeGr: num(p.charge_gr),
+    chargeActualGr: num(p.charge_actual_gr),
+    chargeSdGr: num(p.charge_sd_gr),
+    primerName: p.primer_name || null,
+    coalIn: num(p.coal_mean_in), cbtoIn: num(p.cbto_in),
+    // velocity, and the spread that actually drives vertical dispersion
+    mvFps: num(p.muzzle_velocity_fps),
+    sdFps: num(p.velocity_sd_fps),
+    esFps: num(p.velocity_es_fps),
+    esSigmaFps: num(p.velocity_es_sigma_fps),
+    velN: num(p.velocity_n),
+    velTempF: num(p.velocity_temp_f),
+    velOn: p.velocity_measured_on || null,
+    // firearm geometry, which a solver needs and Zero was discarding
+    firearmId: p.firearm_id || null,
+    firearmName: p.firearm_name || null,
+    barrelIn: num(p.barrel_in), twist: p.twist ?? null,
+    sightHeightIn: num(p.sight_height_in),
+    zeroRangeYd: num(p.zero_range_yd),
+    // inventory
+    qtyRemaining: num(p.qty_remaining),
+    qtyLoaded: num(p.qty_loaded),
+    loadedOn: p.loaded_on || null,
+    // safety state, as booleans the app can refuse on
+    quarantined: !!p.quarantined,
+    quarantineReason: p.quarantine_reason || null,
+    untested: !!p.untested,
+    overPublishedMax: !!p.over_published_max,
+    recipeStatus: p.recipe_status || null,
+    selfDeveloped: !!p.self_developed,
+    source: [p.source_name, p.source_edition, p.source_page && `p.${p.source_page}`]
+      .filter(Boolean).join(' ') || null,
+    sourceMaxGr: num(p.source_max_gr),
+    syncedAt: atMs,
+  };
+}
+
+/* A load imported from Bench. The flat fields stay populated because the rest
+ * of Zero (session chips, DOPE cells, the edit form) reads them. */
+function ammoFromProfile(p, atMs) {
+  const b = batchSnapshot(p, atMs);
+  return {
+    id: uid(),
+    name: [p.load_name, p.serial].filter(Boolean).join(' · ') || p.serial,
+    rifleId: '',
+    bullet: [b.bulletName, b.bulletWeightGr ? `${b.bulletWeightGr}gr` : null]
+      .filter(Boolean).join(' '),
+    powder: b.powderName || '',
+    charge: b.chargeActualGr ?? b.chargeGr ?? '',
+    oal: b.coalIn ?? '',
+    notes: [b.cartridge, b.primerName, b.source].filter(Boolean).join(' · '),
+    batchId: p.batch_id,
+    batchSerial: p.serial,
+    batch: b,
+    ts: atMs,
+  };
+}
+
+/* Re-pull every linked batch and refresh its snapshot in place.
+ *
+ * Returns a NEW ammo array, or null when nothing changed -- callers persist
+ * only on a real change, so a sync that found nothing new does not rewrite
+ * storage and re-render the world.
+ *
+ * A batch that has vanished from the view (deleted on the bench, or shot out)
+ * is NOT dropped: it is marked `gone`, because sessions already reference it
+ * and silently deleting the load would orphan them. */
+async function refreshLinkedBatches(core, ammo, atMs) {
+  const linked = (ammo || []).filter(a => a.batchId);
+  if (!core || !core.isSignedIn() || !linked.length) return null;
+  // No quarantined=eq.false filter here, deliberately: the whole point is to
+  // learn that a batch we already hold has BEEN quarantined since.
+  const r = await core.ballisticProfiles('order=loaded_on.desc');
+  if (!r.ok) return null;
+  const by = new Map((r.data || []).map(p => [p.batch_id, p]));
+  let changed = false;
+  const next = (ammo || []).map(a => {
+    if (!a.batchId) return a;
+    const p = by.get(a.batchId);
+    if (!p) {
+      if (a.batch?.gone) return a;
+      changed = true;
+      return { ...a, batch: { ...(a.batch || {}), gone: true, syncedAt: atMs } };
+    }
+    const b = batchSnapshot(p, atMs);
+    // Compare everything except the timestamp, or every sync looks like a change.
+    const same = a.batch && Object.keys(b).every(k =>
+      k === 'syncedAt' || JSON.stringify(a.batch[k]) === JSON.stringify(b[k]));
+    if (same) return a;
+    changed = true;
+    // The user's own fields survive. Only Bench's facts are replaced.
+    return { ...a, batch: b,
+             bullet: a.bullet || [b.bulletName, b.bulletWeightGr && `${b.bulletWeightGr}gr`].filter(Boolean).join(' '),
+             powder: a.powder || b.powderName || '',
+             charge: a.charge === '' || a.charge == null ? (b.chargeActualGr ?? b.chargeGr ?? '') : a.charge };
+  });
+  return changed ? next : null;
+}
+
+/* Is this load safe to start a new session on? Quarantined ammunition should
+ * not be selectable for new work -- but it stays visible and stays attached to
+ * sessions already shot, because "we quarantined it after the fact" is exactly
+ * how you find out a batch was bad, and deleting that history destroys the
+ * evidence. */
+const batchBlocked = a => !!(a.batch && a.batch.quarantined);
+const batchWarnings = (a) => {
+  const b = a && a.batch;
+  if (!b) return [];
+  const w = [];
+  if (b.quarantined) w.push({ kind: 'stop', text: b.quarantineReason
+    ? `Quarantined on the bench — ${b.quarantineReason}` : 'Quarantined on the bench' });
+  if (b.gone) w.push({ kind: 'warn', text: 'This batch is no longer in Bench' });
+  if (b.overPublishedMax) w.push({ kind: 'stop',
+    text: `Charge exceeds the cited maximum${b.sourceMaxGr ? ` of ${b.sourceMaxGr}gr` : ''}` });
+  if (b.untested) w.push({ kind: 'warn', text: 'No chronograph data — velocity is assumed' });
+  if (b.selfDeveloped && !b.source) w.push({ kind: 'warn', text: 'Self-developed load, no published source cited' });
+  if (b.qtyRemaining === 0) w.push({ kind: 'warn', text: 'No rounds remaining' });
+  if (b.recipeStatus === 'retired') w.push({ kind: 'warn', text: 'Recipe is retired' });
+  return w;
+};
+
+/* The facts panel on a linked load. Only renders numbers that exist -- a
+ * blank cell is worse than an absent one, because it reads as a zero. */
+function BatchFacts({ a }) {
+  const b = a.batch;
+  if (!b) return null;
+  const warn = batchWarnings(a);
+  const cells = [
+    b.mvFps != null && ['MV', `${Math.round(b.mvFps)}`, 'fps'],
+    b.sdFps != null && ['SD', b.sdFps.toFixed(1), 'fps'],
+    // ES normalised to a comparable sigma: raw ES grows with shot count, so
+    // comparing it between a 5-shot and a 20-shot string is meaningless.
+    b.esSigmaFps != null && ['ES→σ', b.esSigmaFps.toFixed(1), 'fps'],
+    (b.bcG7 ?? b.bcG1) != null && [b.bcG7 != null ? 'G7' : 'G1',
+      (b.bcG7 ?? b.bcG1).toFixed(3), 'BC'],
+    b.qtyRemaining != null && ['Left', String(b.qtyRemaining), 'rds'],
+  ].filter(Boolean);
+
+  return (
+    <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid var(--bdr)' }}>
+      <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)', marginBottom: 6 }}>
+        {[b.powderName && `${b.chargeActualGr ?? b.chargeGr ?? '?'}gr ${b.powderName}`,
+          b.primerName, b.coalIn && `COAL ${b.coalIn}"`, b.cbtoIn && `CBTO ${b.cbtoIn}"`]
+          .filter(Boolean).join(' · ') || 'No recipe detail on this batch.'}
+      </div>
+      {cells.length > 0 && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {cells.map(([lab, v, u]) => (
+            <div key={lab}>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 12, fontWeight: 700, color: 'var(--acc)' }}>
+                {v}<span style={{ fontSize: 8, color: 'var(--dim)', fontWeight: 400 }}> {u}</span>
+              </div>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 7.5, color: 'var(--dim)',
+                letterSpacing: '.08em', textTransform: 'uppercase' }}>{lab}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {b.velN != null && b.velN > 0 && (
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 7.5, color: 'var(--dim)', marginTop: 5 }}>
+          velocity from {b.velN} shot{b.velN === 1 ? '' : 's'}
+          {b.velOn ? ` on ${b.velOn}` : ''}{b.velTempF != null ? ` at ${b.velTempF}°F` : ''}
+          {b.sdFps != null ? ' · SD drives vertical dispersion; ES is shown because shooters quote it' : ''}
+        </div>
+      )}
+      {warn.map((w, i) => (
+        <div key={i} style={{ fontFamily: 'var(--fm)', fontSize: 8.5, marginTop: 5,
+          color: w.kind === 'stop' ? 'var(--red)' : 'var(--acc)' }}>
+          {w.kind === 'stop' ? '■ ' : '▲ '}{w.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Map every session that used a Bench-linked load onto the shared schema
  * and queue it. Remote UUIDs are assigned once and SAVED BACK onto the
  * session (via the returned array) so every later push upserts the same rows
  * instead of duplicating them. Sessions with <2 record shots are skipped —
@@ -2892,7 +3105,7 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
   );
 }
 
-function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated }) {
+function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated, onAmmoUpdated }) {
   const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
   const [handle, setHandle] = useState('');
   const [handleSaved, setHandleSaved] = useState(false);
@@ -2920,6 +3133,17 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
                 borderRadius:5, padding:'8px 10px', color:'var(--ink)',
                 fontFamily:'var(--fm)', fontSize:11, marginBottom:7 };
 
+  /* A sync is the natural moment to re-read Bench: it is when the user
+   * already expects the two apps to agree. Doing it here rather than on a
+   * timer means a batch quarantined this morning is blocked before the first
+   * session of the afternoon, without Zero polling all day. */
+  async function refreshBatchesOnSync() {
+    try {
+      const next = await refreshLinkedBatches(core, ammo, Date.now());
+      if (next && onAmmoUpdated) onAmmoUpdated(next);
+    } catch (_) { /* never let a batch refresh fail a sync */ }
+  }
+
   async function doSync() {
     if (!core || !core.isSignedIn()) return;
     setBusy(true); setMsg(null);
@@ -2929,6 +3153,7 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
       const out = zeroSyncOutbound(core, sessions, ammo, getTarget);
       if (out.changed) await onSessionsUpdated(out.updated);
       const r = await core.sync({ trigger: 'manual' });
+      await refreshBatchesOnSync();
       setMsg(r.ok
         ? { kind:'ok', text:`Synced — ${out.queued} linked session${out.queued===1?'':'s'} pushed, ${r.stats.pulled} row${r.stats.pulled===1?'':'s'} pulled.` }
         : { kind:'err', text:'Sync failed: ' + r.reason });
@@ -2950,7 +3175,7 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
   return (
     <div style={{margin:'8px 13px', background:'var(--surf)', border:'1px solid var(--bdr)', borderRadius:9, padding:'11px 13px'}}>
       <div style={{...lbl, display:'flex', justifyContent:'space-between'}}>
-        <span>Cloud sync · tracker · leaderboard</span>
+        <span>Cloud sync · Bench · leaderboard</span>
         {!HAS_SHARED && cfg && <button onClick={()=>setEdit(e=>!e)} style={{background:'none',border:'none',color:'var(--dim)',fontFamily:'var(--fm)',fontSize:9,cursor:'pointer',padding:0}}>{edit?'close':'server'}</button>}
       </div>
 
@@ -2961,7 +3186,7 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
           <button className="badd" style={{width:'100%', opacity:(url.trim()&&key.trim())?1:0.4}}
             onClick={()=>{ if(url.trim()&&key.trim()){ onSaveCfg({url:url.trim().replace(/\/+$/,''), anonKey:key.trim()}); setEdit(false);} }}>
             save server</button>
-          <div style={note}>The same Supabase project the Reloading Tracker uses. The anon key is the public one — never the service_role key.</div>
+          <div style={note}>The same Supabase project Bench uses. The anon key is the public one — never the service_role key.</div>
         </div>
       )}
 
@@ -3010,8 +3235,8 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
           )}
           <div style={note}>
             {linkedLoads
-              ? `${linkedLoads} load${linkedLoads===1?'':'s'} linked to tracker batches. Sessions shot with them push group size (inches) back to the batch record.`
-              : 'No loads linked yet — Firearms › Ammunition › “⇣ tracker” imports batches from the reloading log.'}
+              ? `${linkedLoads} load${linkedLoads===1?'':'s'} linked to Bench batches. Sessions shot with them push group size (inches) back to the batch record.`
+              : 'No loads linked yet — Firearms › Ammunition › “⇣ Bench” imports batches from the reloading log.'}
           </div>
         </div>
       )}
@@ -3378,7 +3603,7 @@ export default function App() {
               />
               <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
                 sessions={sessions} ammo={ammo} getTarget={getTarget}
-                onSessionsUpdated={saveSessions} />
+                onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo} />
               <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup</div>
                 <div style={{display:'flex',gap:8}}>
@@ -3900,18 +4125,34 @@ function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave
             {ammo && ammo.length > 0 && (() => {
               const avail = ammo.filter(a => !a.rifleId || a.rifleId === f.rifleId);
               if (!avail.length) return null;
+              // Ammunition Bench has quarantined is not something to start a
+              // new session on. It stays listed and stays attached to sessions
+              // already shot -- quarantining after the fact is exactly how you
+              // find out a batch was bad, and hiding it destroys the evidence.
+              const picked = ammo.find(a => a.id === f.ammoId);
+              const warns = picked ? batchWarnings(picked) : [];
               return (
                 <div className="field"><div className="lbl">Ammo load</div>
                   <select className="inp" value={f.ammoId||''} onChange={e=>{
                     const id = e.target.value;
                     const load = ammo.find(a=>a.id===id);
+                    if (load && batchBlocked(load)) return;      // belt and braces
                     setF(p=>({ ...p, ammoId: id, ammoDesc: load ? load.name : p.ammoDesc }));
                   }}>
                     <option value="">— none / entered manually —</option>
                     {avail.map(a=>(
-                      <option key={a.id} value={a.id}>{a.name}{a.charge?` · ${a.charge}gr${a.powder?' '+a.powder:''}`:''}</option>
+                      <option key={a.id} value={a.id} disabled={batchBlocked(a)}>
+                        {batchBlocked(a) ? '⛔ ' : ''}{a.name}
+                        {a.charge?` · ${a.charge}gr${a.powder?' '+a.powder:''}`:''}
+                        {batchBlocked(a) ? ' — quarantined' : ''}</option>
                     ))}
                   </select>
+                  {warns.map((w, i) => (
+                    <div key={i} style={{fontFamily:'var(--fm)',fontSize:8.5,marginTop:5,
+                      color: w.kind === 'stop' ? 'var(--red)' : 'var(--acc)'}}>
+                      {w.kind === 'stop' ? '■ ' : '▲ '}{w.text}
+                    </div>
+                  ))}
                 </div>
               );
             })()}
@@ -7548,30 +7789,29 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
   const [pickOpen, setPickOpen] = useState(false);
   const [profiles, setProfiles] = useState(null);   // null=loading, []=empty, [rows]
   const [pickErr, setPickErr] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshed, setRefreshed] = useState(null);
+  const linkedCount = ammo.filter(a => a.batchId).length;
 
   async function openPicker() {
     setPickOpen(true); setProfiles(null); setPickErr(null);
     const r = await core.ballisticProfiles('quarantined=eq.false&order=loaded_on.desc');
-    if (!r.ok) { setPickErr('Could not reach the tracker backend.'); setProfiles([]); return; }
+    if (!r.ok) { setPickErr('Could not reach the Bench backend.'); setProfiles([]); return; }
     setProfiles(r.data || []);
   }
 
   function importBatch(p) {
     if (ammo.some(a => a.batchId === p.batch_id)) return;
-    onSaveAmmo([...ammo, {
-      id: uid(),
-      name: [p.load_name, p.serial].filter(Boolean).join(' · ') || p.serial,
-      rifleId: '',
-      bullet: p.bullet_name || '',
-      powder: '',
-      charge: '',
-      oal: p.coal_mean_in || '',
-      notes: [p.cartridge, p.untested ? 'UNTESTED' : null,
-              p.over_published_max ? 'OVER PUBLISHED MAX' : null].filter(Boolean).join(' · '),
-      batchId: p.batch_id,
-      batchSerial: p.serial,
-      ts: Date.now(),
-    }]);
+    onSaveAmmo([...ammo, ammoFromProfile(p, Date.now())]);
+  }
+
+  async function refreshNow() {
+    setRefreshing(true);
+    const next = await refreshLinkedBatches(core, ammo, Date.now());
+    setRefreshing(false);
+    if (next) onSaveAmmo(next);
+    setRefreshed(next ? 'updated' : 'current');
+    setTimeout(() => setRefreshed(null), 2500);
   }
   const blank = { name:'', rifleId:'', bullet:'', powder:'', charge:'', oal:'', notes:'' };
   const fname = id => firearms.find(f=>f.id===id)?.name || '';
@@ -7595,9 +7835,15 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
         <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.14em',textTransform:'uppercase'}}>Ammunition</div>
         {!form && (
           <div style={{display:'flex',gap:6}}>
+            {core && core.isSignedIn() && linkedCount > 0 && (
+              <button className="badd" onClick={refreshNow} disabled={refreshing}
+                title="Re-read every linked batch from Bench"
+                style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1}}>
+                {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
+            )}
             {core && core.isSignedIn() && (
               <button className="badd" onClick={openPicker}
-                style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ tracker</button>
+                style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ Bench</button>
             )}
             <button className="badd" onClick={()=>setForm({...blank})} style={{fontSize:11,padding:'5px 11px'}}>+ load</button>
           </div>
@@ -7607,13 +7853,13 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
       {pickOpen && (
         <div className="tcard" style={{padding:'11px 13px'}}>
           <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
-            <div className="lbl">Batches from the reloading tracker</div>
+            <div className="lbl">Batches from Bench</div>
             <button onClick={()=>setPickOpen(false)} style={{background:'none',border:'none',color:'var(--dim)',cursor:'pointer',fontSize:14,padding:0}}>×</button>
           </div>
           {profiles === null && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>loading…</div>}
           {pickErr && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)'}}>{pickErr}</div>}
           {profiles && !pickErr && profiles.length === 0 && (
-            <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>No live batches in the tracker.</div>)}
+            <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>No live batches in Bench.</div>)}
           {profiles && profiles.map(p => {
             const linkedAlready = ammo.some(a => a.batchId === p.batch_id);
             return (
@@ -7624,7 +7870,10 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
                     {p.over_published_max && <span style={{color:'var(--red)',fontSize:8,marginLeft:6}}>OVER MAX</span>}
                   </div>
                   <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {[p.load_name, p.cartridge, p.qty_remaining!=null?`${p.qty_remaining} rds`:null].filter(Boolean).join(' · ')}
+                    {[p.load_name, p.cartridge,
+                      p.powder_name && `${p.charge_actual_gr ?? p.charge_gr ?? '?'}gr ${p.powder_name}`,
+                      p.muzzle_velocity_fps && `${Math.round(p.muzzle_velocity_fps)}fps`,
+                      p.qty_remaining!=null?`${p.qty_remaining} rds`:null].filter(Boolean).join(' · ')}
                   </div>
                 </div>
                 <button className="badd" disabled={linkedAlready} onClick={()=>importBatch(p)}
@@ -7696,6 +7945,7 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
               )}
             </div>
           </div>
+          <BatchFacts a={a}/>
         </div>
       ))}
 

@@ -7,14 +7,25 @@ import fsx from 'node:fs';
 const CHROME = '/opt/pw-browsers/chromium';
 const LAUNCH_OPTS = fsx.existsSync(CHROME) ? { executablePath: CHROME } : {};
 import { startMock } from '../../packages/zero-core/mock-supabase.mjs';
+import { buildZero } from './build.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 
 const mock = await startMock({ ttlSec: 3600 });
 
+/* Build the way a deploy builds: backend baked in at build time.
+ *
+ * With a backend configured the app correctly hides the manual server-address
+ * fields, so the suites used to fail the moment supabase.config.json was
+ * filled in -- they had only ever passed against an unconfigured build. Point
+ * the bundle at this run's mock instead and the shipped path is what is under
+ * test. */
+const OUT = 'dist-test';
+await buildZero({ url: mock.url, anonKey: 'anon-key', outdir: OUT, single: false });
+
 const server = http.createServer((req, res) => {
   const p = req.url.split('?')[0];
-  const f = 'dist/' + (p === '/' ? 'index.html' : p.slice(1));
+  const f = OUT + '/' + (p === '/' ? 'index.html' : p.slice(1));
   if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { 'Content-Type': f.endsWith('.js') ? 'text/javascript' : 'text/html' });
   res.end(fs.readFileSync(f));
@@ -57,9 +68,6 @@ ok((await page.textContent('body')).includes('league night'), 'the seeded sessio
 ok((await page.textContent('body')).includes('Cloud sync'), 'the sync card is present on the home screen');
 
 console.log('\nserver config + account');
-await page.fill('input[placeholder="https://YOUR-PROJECT.supabase.co"]', mock.url);
-await page.fill('input[placeholder="anon public key"]', 'anon-key');
-await page.click('button:has-text("save server")');
 await page.waitForTimeout(300);
 await page.fill('input[placeholder="email"]', 'jaxon@example.com');
 await page.fill('input[placeholder="password"]', 'hunter2');

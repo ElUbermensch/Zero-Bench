@@ -308,6 +308,96 @@ section('loading a batch draws down the components');
   ok(before === 440, '...having genuinely been drawn down beforehand');
 }
 
+/* ============================================== brass wears out fractionally */
+section('brass life counts partial firings');
+{
+  await page.evaluate(() => {
+    // 100 cases, nothing fired yet, no prior life.
+    DB.brassLots[0].qty = 100; DB.brassLots[0].initialQty = 100;
+    DB.brassLots[0].firings = 0; DB.brassLots[0].expectedFirings = 6;
+    DB.batches = []; DB.sessions = []; save();
+  });
+  const life0 = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(life0.mean === 0, 'a fresh lot is at zero firings');
+
+  // Load 50, fire none: the cases are committed but unworn.
+  await page.evaluate(() => {
+    DB.batches = [{ id: 'bx', serial: 'BX', recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
+      bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
+      powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
+      primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
+      date: '2026-08-01', qty: 50, remaining: 50, chargeActual: 41.5, quarantine: false }];
+    save();
+  });
+  ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 0,
+     'loading brass does not wear it — only firing does');
+
+  // Fire all 50 of the 100-case lot: half a firing, exactly.
+  await page.evaluate(() => { DB.batches[0].remaining = 0; save(); });
+  const half = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(half.mean === 0.5, `firing 50 of 100 puts the lot at 0.5 firings (${half.mean})`);
+  ok(half.fired === 50, '...from 50 rounds fired');
+  // partial draw => the cases are NOT all equal
+  ok(Math.abs(half.sd - 0.5) < 1e-9,
+     'a half-lot draw leaves a real spread: some cases went twice as often as the mean');
+  ok(Math.abs(half.hi - (0.5 + 1.96 * 0.5)) < 1e-9,
+     '...so the most-fired case is estimated well above the mean');
+
+  // Fire the other 50 and the lot reaches exactly one firing.
+  await page.evaluate(() => {
+    DB.batches.push({ ...DB.batches[0], id: 'by', serial: 'BY', qty: 50, remaining: 0 });
+    save();
+  });
+  ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 1,
+     'firing the other 50 brings the lot to exactly 1.0 — they were mixed back together');
+
+  // A full-lot draw adds no uncertainty at all.
+  await page.evaluate(() => {
+    DB.batches = [{ ...DB.batches[0], id: 'bz', serial: 'BZ', qty: 100, remaining: 0 }];
+    save();
+  });
+  const full = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(full.mean === 1 && full.sd === 0,
+     'a whole-lot firing is 1.0 with no spread — every case went exactly once');
+
+  // Prior life is a baseline the batches add to, not a total they replace.
+  await page.evaluate(() => { DB.brassLots[0].firings = 2; save(); });
+  ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 3,
+     'firings recorded before the lot was tracked are a baseline, added to');
+
+  const detail = await page.evaluate(() => {
+    reset('brassDetail'); go('brassDetail', DB.brassLots[0].id);
+    return document.getElementById('view').textContent;
+  });
+  await page.waitForTimeout(200);
+  const d = await page.textContent('#view');
+  ok(d.includes('3.00 of 6 expected firings'), 'the detail screen shows the fractional count');
+  ok(d.includes('mean per case'), '...and says outright that it is a mean, because the cases are mixed');
+  ok(/\d+ loaded · \d+ free/.test(d),
+     '...alongside how many cases are committed versus free');
+
+  // and the life warning fires off the tail, not the average
+  await page.evaluate(() => {
+    DB.brassLots[0].firings = 0; DB.brassLots[0].expectedFirings = 6;
+    DB.batches = [];
+    for (let i = 0; i < 9; i++) DB.batches.push({ id: 'q'+i, serial: 'Q'+i,
+      recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
+      bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
+      powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
+      primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
+      date: '2026-08-01', qty: 50, remaining: 0, chargeActual: 41.5, quarantine: false });
+    save(); reset('brass');
+  });
+  await page.waitForTimeout(200);
+  const lifeN = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(lifeN.mean === 4.5 && lifeN.hi > 6,
+     `mean ${lifeN.mean} is under the 6-firing limit but the worst case is over it`);
+  ok((await page.textContent('#view')).includes('Some cases at limit'),
+     'the lot is flagged on the worst case rather than on the average — brass failure is a safety event');
+
+  await page.evaluate(() => { DB.batches = []; DB.brassLots[0].firings = 0; save(); });
+}
+
 /* ================================= the form says so before you commit to it */
 section('the batch form shows the draw while you type');
 {

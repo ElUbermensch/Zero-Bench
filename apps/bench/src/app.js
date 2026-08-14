@@ -290,6 +290,52 @@ const batchesUsing = (lot) => DB.batches.filter(b =>
   (lot.kind === 'primer' && b.primerLot === lot.id))
   .slice().sort((a, b) => (a.date < b.date ? 1 : -1));
 
+/* ── Brass life, counted as partial firings ───────────────────────────────
+ *
+ * Cases from one lot get fired, tumbled back together and reloaded as a pool.
+ * Once they are mixed there is no way to know which individual case has been
+ * fired how many times, so the only honest unit is the MEAN firings per case:
+ *
+ *     mean = firings before the lot was recorded  +  Σ (rounds fired / lot size)
+ *
+ * Fire 50 of 100 and the lot is at 0.5 firings, not 1 and not 0. Fire the
+ * other 50 and it reaches 1.0.
+ *
+ * But the mean is not the whole story, and for brass the tail is the part that
+ * matters -- a case head separation is a safety event, not a tidiness one. If
+ * each cycle draws n of N at random, a given case's count is a sum of
+ * Bernoulli(n/N) trials, so:
+ *
+ *     variance = Σ (n/N)(1 − n/N)
+ *
+ * which is exactly zero when every batch used the whole lot (n = N) and grows
+ * only when partial draws actually mixed things up. `hi` is the ~97.5th
+ * percentile: the most-fired case in the lot is probably around there. The UI
+ * warns off `hi` and reports `mean`, because retiring on the average means
+ * throwing the worst cases one cycle past where they should have gone.
+ */
+function brassLife(lot) {
+  const N = (+lot.qty || +lot.initialQty || 0);
+  const base = +lot.firings || 0;
+  let cycles = 0, varr = 0, fired = 0;
+  if (N > 0) {
+    for (const b of DB.batches) {
+      if (b.brassLot !== lot.id) continue;
+      // A loaded but unfired batch has put no wear on anything.
+      const n = Math.max(0, (+b.qty || 0) - Math.max(0, +b.remaining || 0));
+      if (!n) continue;
+      fired += n;
+      const p = Math.min(1, n / N);
+      cycles += p;
+      varr += p * (1 - p);
+    }
+  }
+  const sd = Math.sqrt(varr);
+  return { base, N, fired, cycles, sd,
+           mean: base + cycles,
+           hi: base + cycles + 1.96 * sd };
+}
+
 /** Cases sitting in loaded, unfired rounds. They are not gone — firing a
  *  batch returns them to the pool as once-more-fired brass. */
 const brassCommitted = (lot, exceptBatch) => DB.batches
@@ -360,10 +406,12 @@ function drawPreview(d, exceptBatch) {
 
 function brassChips(l) {
   const out = [];
+  const life = brassLife(l);
   if (l.retired) out.push(['bad', 'Retired']);
-  else if (l.firings >= l.expectedFirings) out.push(['bad', 'At life limit']);
-  else if (l.firings >= l.expectedFirings - 1) out.push(['warn', 'Near limit']);
-  if (!l.lastAnneal && l.firings >= 3) out.push(['warn', 'Never annealed']);
+  else if (life.mean >= l.expectedFirings) out.push(['bad', 'At life limit']);
+  else if (life.hi >= l.expectedFirings) out.push(['warn', 'Some cases at limit']);
+  else if (life.mean >= l.expectedFirings - 1) out.push(['warn', 'Near limit']);
+  if (!l.lastAnneal && life.mean >= 3) out.push(['warn', 'Never annealed']);
   return out;
 }
 
@@ -490,7 +538,8 @@ const FORMS = {
     { k: 'headstamp', l: 'Headstamp', t: 'text', req: true, ph: 'LC 21' },
     { k: 'maker', l: 'Maker', t: 'text' },
     { k: 'initialQty', l: 'Cases', t: 'num', req: true, def: 100 },
-    { k: 'firings', l: 'Firings so far', t: 'num', def: 0 },
+    { k: 'firings', l: 'Firings before now', t: 'num', def: 0,
+      hint: 'Only what happened before this lot was recorded. Batches loaded here count themselves.' },
     { k: 'expectedFirings', l: 'Expected firings', t: 'num', def: 6 },
     { k: 'cost', l: 'Lot cost ($)', t: 'num', step: '0.01', def: 0 },
     { k: 'origin', l: 'Origin', t: 'select',
@@ -506,7 +555,7 @@ const FORMS = {
     // silently produced zero-cost, untraceable batches.
     { k: 'brassLot', l: 'Brass lot', t: 'ref', req: true,
       ref: () => DB.brassLots.filter(l => !l.retired),
-      label: l => `${l.serial} — ${l.headstamp} (${l.firings}f)` },
+      label: l => `${l.serial} — ${l.headstamp} (${brassLife(l).mean.toFixed(1)}f, ${brassAvailable(l)} free)` },
     { k: 'bulletLot', l: 'Bullet lot', t: 'ref', req: true, ref: () => lotsOf('bullet'),
       label: l => l.name + (l.lot ? ` — ${l.lot}` : '') },
     { k: 'powderLot', l: 'Powder lot', t: 'ref', req: true, ref: () => lotsOf('powder'),
@@ -907,7 +956,7 @@ function brassRow(l) {
     <span class="grow">
       <span class="ttl">${esc(l.headstamp)} · ${esc(cartName(l.cartridge))}</span>
       <span class="sub mono">${esc(l.serial)} · ${esc(codeOf(l.marks))}</span>
-      <span class="sub">${l.qty} cases · ${l.firings} of ${l.expectedFirings} firings</span>
+      <span class="sub">${l.qty} cases · ${brassLife(l).mean.toFixed(1)} of ${l.expectedFirings} firings</span>
       ${brassChips(l).length ? `<span class="sub mt5">${chips(brassChips(l))}</span>` : ''}
     </span><span class="chev">›</span></button>`;
 }
@@ -929,8 +978,10 @@ VIEWS.brassDetail = (id) => {
   const l = byId(DB.brassLots, id);
   if (!l) return `<div class="empty">This lot no longer exists.</div>`;
   const used = DB.batches.filter(b => b.brassLot === l.id);
-  const pct = Math.min(100, l.expectedFirings ? l.firings / l.expectedFirings * 100 : 0);
-  const bar = pct >= 100 ? 'var(--bad)' : pct > 80 ? 'var(--warn)' : 'var(--ok)';
+  const life = brassLife(l);
+  const pct = Math.min(100, l.expectedFirings ? life.mean / l.expectedFirings * 100 : 0);
+  const hiPct = Math.min(100, l.expectedFirings ? life.hi / l.expectedFirings * 100 : 0);
+  const bar = pct >= 100 ? 'var(--bad)' : hiPct >= 100 ? 'var(--warn)' : 'var(--ok)';
   return `<div class="card">
       <div class="spread mb8">
         <div><h2 class="m0">${esc(l.headstamp)}</h2>
@@ -939,15 +990,24 @@ VIEWS.brassDetail = (id) => {
       </div>
       ${brassChips(l).length ? `<div>${chips(brassChips(l))}</div>` : ''}
       <div class="casewrap mt12">${caseSvg(l.marks)}</div>
-      <div class="small muted center mt8">Marked <b class="mono">${esc(codeOf(l.marks))}</b></div>
+      <div class="small muted center mt8">Marked&nbsp;<b class="mono">${esc(codeOf(l.marks))}</b></div>
     </div>
     <div class="card">
-      <div class="spread small"><span>${l.firings} of ${l.expectedFirings} expected firings</span>
+      <div class="spread small"><span>${life.mean.toFixed(2)} of ${l.expectedFirings} expected firings</span>
         <span class="mono">${pct.toFixed(0)}%</span></div>
       <div class="capbar"><i style="width:${pct}%;background:${bar}"></i></div>
+      <div class="tiny dim mt4">
+        ${life.fired} round${life.fired === 1 ? '' : 's'} fired from ${life.N} case${life.N === 1 ? '' : 's'}${life.base ? `, on top of ${life.base} before this lot was recorded` : ''}.
+        Cases are mixed back together between loadings, so this is the mean per case.
+      </div>
+      ${life.sd > 0.05 ? `<div class="tiny mt4" style="color:${hiPct >= 100 ? 'var(--warn)' : 'var(--dim)'}">
+        Partial draws mean they are not all equal — the most-fired case is probably near
+        <b>${life.hi.toFixed(1)}</b>. Retire on that, not on the average.
+      </div>` : ''}
       <hr>
       <dl class="kv">
         <dt>Cases on hand</dt><dd class="mono">${l.qty} of ${l.initialQty}</dd>
+        <dt>Committed</dt><dd class="mono">${brassCommitted(l)} loaded · ${brassAvailable(l)} free</dd>
         <dt>Origin</dt><dd>${esc(l.origin || '—')}</dd>
         <dt>Acquired</dt><dd>${fmtDate(l.acquired)}</dd>
         <dt>Last anneal</dt><dd>${l.lastAnneal ? fmtDate(l.lastAnneal) : '<span class="chip warn">never</span>'}</dd>
@@ -964,7 +1024,8 @@ VIEWS.brassDetail = (id) => {
           <span class="chev">›</span></button>`).join('')
       : '<div class="empty"><p>Not loaded into any batch yet.</p></div>'}</div>
     <div class="btnrow noprint">
-      <button class="btn" data-act="logfire" data-arg="${l.id}">Log a firing</button>
+      <button class="btn" data-act="logfire" data-arg="${l.id}"
+        title="For firings this app did not see — batches count themselves">+1 outside firing</button>
       <button class="btn" data-act="loganneal" data-arg="${l.id}">Log anneal</button>
       <button class="btn danger" data-act="delBrass" data-arg="${l.id}">Delete</button>
     </div>`;
@@ -1445,8 +1506,12 @@ const ACTIONS = {
 
   toggleQ: (a) => { const b = byId(DB.batches, a); b.quarantine = !b.quarantine;
     save(); toast(b.quarantine ? 'Quarantined.' : 'Released.'); render(); },
-  logfire: (a) => { const l = byId(DB.brassLots, a); l.firings += 1;
-    save(); toast(`${l.serial} now at ${l.firings} firings.`); render(); },
+  /* Firings from batches are derived. This button is for wear this app did
+   * not see -- factory ammo through the same cases, or a lot recorded partway
+   * through its life -- so it adjusts the BASELINE, and says so. */
+  logfire: (a) => { const l = byId(DB.brassLots, a); l.firings = (+l.firings || 0) + 1;
+    save(); toast(`Baseline +1 — ${l.serial} now at ${brassLife(l).mean.toFixed(2)} firings.`);
+    render(); },
   loganneal: (a) => { const l = byId(DB.brassLots, a); l.lastAnneal = today();
     save(); toast('Anneal logged.'); render(); },
 

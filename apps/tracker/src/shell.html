@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16181c">
+<meta name="description" content="Offline reloading batch tracker: brass lots, load recipes, serialised batches and printable QR labels.">
+<title>Reloading Tracker</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+:root{
+  --bg:#16181c; --panel:#1e2127; --panel2:#252932; --line:#333944;
+  --ink:#e8eaed; --ink2:#9aa3b0; --ink3:#6c7480;
+  --brass:#c9a227; --ok:#2f9e44; --warn:#e8a317; --bad:#e03131;
+  --r:12px; --tap:44px; --safe-b:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  padding-bottom:calc(66px + var(--safe-b));-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0 0 .4em;line-height:1.25;font-weight:650}
+h2{font-size:16px}
+p{margin:0 0 .7em}
+button,input,select,textarea{font:inherit;color:inherit}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+header{position:sticky;top:0;z-index:30;background:rgba(22,24,28,.94);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
+  padding:10px 14px;display:flex;align-items:center;gap:10px;min-height:52px}
+header .title{font-weight:650;font-size:16px;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+header .sub{font-size:12px;color:var(--ink3);font-weight:400}
+.backbtn{background:none;border:0;color:var(--brass);font-size:15px;padding:6px 4px;
+  margin-left:-4px;cursor:pointer;min-height:var(--tap);display:flex;align-items:center}
+main{padding:14px;max-width:820px;margin:0 auto}
+
+nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:40;display:flex;
+  background:rgba(30,33,39,.97);backdrop-filter:blur(10px);
+  border-top:1px solid var(--line);padding-bottom:var(--safe-b)}
+nav.tabs button{flex:1;background:none;border:0;color:var(--ink3);padding:8px 2px 9px;
+  display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;
+  cursor:pointer;min-height:58px;justify-content:center}
+nav.tabs button.on{color:var(--brass)}
+nav.tabs svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.7}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px;margin-bottom:12px}
+.card.tight{padding:11px 12px}
+.card h2{margin-bottom:10px}
+.muted{color:var(--ink2)}.dim{color:var(--ink3)}
+.small{font-size:13px}.tiny{font-size:11.5px}
+.big{font-size:17px;font-weight:700}.huge{font-size:22px;font-weight:700;letter-spacing:.02em}
+.center{text-align:center;display:flex;justify-content:center}
+.m0{margin:0}.mt3{margin-top:3px}.mt4{margin-top:4px}.mt5{margin-top:5px;display:block}
+.mt6{margin-top:6px}.mt7{margin-top:7px}.mt8{margin-top:8px}.mt10{margin-top:10px}
+.mt12{margin-top:12px}.mb8{margin-bottom:8px}.mb12{margin-bottom:12px}
+.grow1{flex:1;min-width:0}
+hr{border:0;border-top:1px solid var(--line);margin:12px 0}
+.row{display:flex;align-items:center;gap:10px}
+.row.wrap{flex-wrap:wrap}
+.g6{gap:6px}.g8{gap:8px}.g10{gap:10px}
+.spread{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.rowline{padding:8px 0;border-bottom:1px solid var(--line)}
+.rowline:last-child{border-bottom:0}
+.pointer{cursor:pointer}
+.hidden{display:none!important}
+
+dl.kv{margin:0;display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:14px}
+dl.kv dt{color:var(--ink3);white-space:nowrap}
+dl.kv dd{margin:0;text-align:right}
+dl.kv dd.mono{font-variant-numeric:tabular-nums}
+
+.listitem{display:flex;gap:12px;align-items:center;width:100%;text-align:left;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:11px 12px;margin-bottom:9px;cursor:pointer;min-height:var(--tap);color:inherit}
+.listitem.static{cursor:default}
+.listitem:not(.static):active{background:var(--panel2)}
+.listitem .grow{flex:1;min-width:0}
+.listitem .ttl{font-weight:600;font-size:14.5px;display:block}
+.listitem .sub{font-size:12.5px;color:var(--ink3);margin-top:1px;display:block}
+.chev{color:var(--ink3);flex:none}
+
+.chip{display:inline-flex;align-items:center;font-size:11px;font-weight:650;
+  letter-spacing:.03em;padding:3px 8px;border-radius:999px;border:1px solid;
+  text-transform:uppercase;white-space:nowrap}
+.chip.ok{color:#8ce99a;border-color:#2b6b38;background:#14301c}
+.chip.warn{color:#ffd866;border-color:#7a5c14;background:#332711}
+.chip.bad{color:#ffa8a8;border-color:#8a2b2b;background:#3a1414}
+.chip.neutral{color:var(--ink2);border-color:var(--line);background:var(--panel2)}
+
+label.f{display:block;margin-bottom:11px}
+label.f>span{display:block;font-size:12.5px;color:var(--ink2);margin-bottom:4px}
+.fhint{display:block;font-size:11.5px;color:var(--ink3);margin-top:4px}
+input[type=text],input[type=number],input[type=date],select,textarea{
+  width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+  padding:10px 11px;min-height:var(--tap);outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--brass)}
+textarea{min-height:70px;resize:vertical}
+input.cb{width:20px;height:20px;min-height:0;flex:none}
+input[type=range]{min-height:0;padding:0;background:none;border:0}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:11px 15px;min-height:var(--tap);cursor:pointer;font-weight:600;font-size:14px}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--brass);border-color:var(--brass);color:#20180a}
+.btn.danger{color:#ffa8a8;border-color:#8a2b2b;background:transparent}
+.btn.wide{width:100%}
+.btn.sm{padding:7px 11px;min-height:36px;font-size:13px}
+.btnrow{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}
+
+.serialbox{display:flex;gap:9px}
+.serialbox input{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:19px;
+  letter-spacing:.10em;text-transform:uppercase;text-align:center}
+.serialbox input.bad{border-color:var(--bad)}
+.serialbox input.good{border-color:var(--ok)}
+.err{color:#ffa8a8}.warnt{color:#ffd866}
+
+.pos{margin-bottom:14px}
+.pos .poshdr{display:flex;justify-content:space-between;align-items:baseline;
+  margin-bottom:7px;gap:10px}
+.pos .poshdr b{font-size:14px}
+.pos .poshdr span{font-size:12px;color:var(--ink3)}
+.swatches{display:flex;gap:7px;flex-wrap:wrap}
+.sw{width:46px;height:46px;border-radius:12px;border:2px solid var(--line);cursor:pointer;
+  display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px;
+  font-size:10px;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.6);color:#fff}
+.sw.on{border-color:var(--brass);box-shadow:0 0 0 3px rgba(201,162,39,.28)}
+.sw.none{background:repeating-linear-gradient(45deg,#2a2e36,#2a2e36 5px,#20232a 5px,#20232a 10px);
+  color:var(--ink2);text-shadow:none}
+.sw.any{background:var(--panel2);color:var(--ink2);text-shadow:none}
+
+.casewrap{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:10px;display:flex;justify-content:center}
+svg.case{width:100%;height:auto;max-width:340px;display:block}
+svg.casemini{width:76px;height:auto;flex:none}
+
+.capbar{height:7px;border-radius:99px;background:var(--panel2);overflow:hidden;margin-top:6px}
+.capbar i{display:block;height:100%;background:var(--brass)}
+
+.banner{border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13.5px;
+  border:1px solid;display:flex;gap:9px;align-items:flex-start}
+.banner.bad{color:#ffc9c9;border-color:#8a2b2b;background:#2e1212}
+.banner.warn{color:#ffe8a3;border-color:#7a5c14;background:#2b2210}
+.banner.info{color:#c5dcf0;border-color:#1b4a72;background:#0f2231}
+.banner .small{display:block;margin-top:3px}
+
+.empty{text-align:center;color:var(--ink3);padding:26px 14px;font-size:14px}
+.empty p{margin:0 0 12px}
+.toast{position:fixed;left:12px;right:12px;bottom:calc(76px + var(--safe-b));z-index:60;
+  background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  padding:11px 13px;font-size:13.5px;box-shadow:0 6px 20px rgba(0,0,0,.45)}
+
+/* -------------------------------------------------------------- labels */
+.label-preview{background:#fff;border-radius:8px;display:inline-block;
+  box-shadow:0 3px 14px rgba(0,0,0,.4)}
+.lbl{width:2.5in;height:1.5in;padding:.07in .09in;box-sizing:border-box;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+  color:#000;background:#fff;display:flex;flex-direction:column;
+  border:1px dashed #bbb;position:relative;overflow:hidden}
+.lbl .cart{font-size:11pt;font-weight:800;line-height:1.02}
+.lbl .load{font-size:7.2pt;line-height:1.18;margin-top:1px}
+.lbl .btm{margin-top:auto;display:flex;align-items:flex-end;gap:5px}
+.lbl .ser{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10pt;
+  font-weight:700;letter-spacing:.03em;line-height:1.15}
+.lbl .meta{font-size:6.4pt;color:#333;line-height:1.25}
+.lbl .qr{width:.55in;height:.55in;flex:none}
+.lbl .qr svg{width:100%;height:100%;display:block}
+.lbl .band{position:absolute;left:0;right:0;top:0;background:#c00;color:#fff;
+  font-size:6.8pt;font-weight:800;text-align:center;letter-spacing:.05em;padding:1px 0}
+.lbl.hasband{padding-top:.17in}
+.lbl .marks{display:flex;gap:3px;align-items:center;margin-top:2px}
+.lbl .marks i{width:8px;height:8px;border-radius:50%;border:1px solid #444;display:block;flex:none}
+.lbl .marks .ms{font-size:6.5pt;color:#444;margin-left:3px}
+
+@media print{
+  body{background:#fff;color:#000;padding:0}
+  header,nav.tabs,.noprint{display:none!important}
+  main{padding:0;max-width:none}
+  .label-preview{box-shadow:none}
+  .lbl{page-break-inside:avoid}
+  .sheet{display:grid;grid-template-columns:repeat(2,2.5in);gap:.18in;
+    justify-content:center;padding:.3in}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <button class="backbtn hidden" id="back" aria-label="Back">‹ Back</button>
+  <div class="title" id="title">Reloading Tracker</div>
+</header>
+<main id="view"></main>
+<nav class="tabs noprint" id="tabs" aria-label="Sections"></nav>
+<!--APP-->
+</body>
+</html>

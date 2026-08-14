@@ -1,0 +1,22 @@
+{
+  "name": "zero-suite",
+  "private": true,
+  "type": "module",
+  "description": "Zero (precision shooting log) and the Reloading Batch Tracker, over one shared Supabase backend.",
+  "scripts": {
+    "build": "npm run build:tracker && npm run build:zero",
+    "build:tracker": "node apps/tracker/build.mjs",
+    "build:zero": "esbuild apps/zero/entry.jsx --bundle --loader:.jsx=jsx --jsx=automatic --outfile=apps/zero/dist/bundle.js && node -e \"require('fs').mkdirSync('apps/zero/dist',{recursive:true});require('fs').copyFileSync('apps/zero/index.html','apps/zero/dist/index.html')\"",
+    "test": "npm run test:core && npm run test:tracker && npm run test:zero",
+    "test:core": "node packages/zero-core/test-zero-core.mjs",
+    "test:tracker": "cd apps/tracker && node test.mjs",
+    "test:zero": "cd apps/zero && node test-integration.mjs && node test-leaderboard.mjs",
+    "test:sql": "bash supabase/run_tests.sh"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0",
+    "playwright": "^1.47.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

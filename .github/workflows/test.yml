@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  sql:
+    name: schema + RLS (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations and run the RLS suites
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGUSER: postgres
+        run: |
+          psql -c 'create database shooting'
+          for m in supabase/migrations/*.sql; do
+            psql -d shooting -v ON_ERROR_STOP=1 -f supabase/test/harness.sql -f "$m" || \
+            psql -d shooting -v ON_ERROR_STOP=1 -f "$m"
+          done
+          psql -d shooting -c 'create schema if not exists test; grant usage on schema test to authenticated;'
+          for t in supabase/test/rls_test.sql supabase/test/rls_test2.sql; do
+            psql -d shooting -v ON_ERROR_STOP=1 -f "$t" 2>&1 | tee out.txt
+            grep -q FAIL out.txt && exit 1
+          done
+          echo "SQL suites passed"
+
+  js:
+    name: zero-core + both apps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm test

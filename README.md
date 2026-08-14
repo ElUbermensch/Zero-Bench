@@ -1,0 +1,100 @@
+# Zero Suite
+
+Two offline-first shooting PWAs over one shared Supabase backend.
+
+- **Zero** — precision shooting log: sessions, shot plotting, DOPE, analytics, leaderboard.
+- **Reloading Batch Tracker** — brass lots by colour code, load recipes, serialised
+  batches, printable QR labels.
+
+They are not two copies of one app. Zero records what happened downrange; the tracker
+records what you loaded. The interesting part is the seam: a batch loaded in the tracker
+becomes a selectable load in Zero, and the group it shoots flows back to that batch.
+
+```
+apps/tracker      the reloading PWA (vanilla, single-file build)
+apps/zero         Zero (React, bundled with esbuild)
+packages/zero-core   shared auth + offline sync, embedded byte-identically in both
+supabase/         migrations and the RLS test suites
+docs/             integration contract and design notes
+```
+
+## Before anything works: fill in the shared backend
+
+Every install points at **one** Supabase project. Set it in two places:
+
+| File | Constant |
+|---|---|
+| `apps/zero/Zero.jsx` | `SHARED_SUPABASE` (near the top) |
+| `apps/tracker/src/app.js` | not yet wired — see *Status* |
+
+```js
+const SHARED_SUPABASE = {
+  url: 'https://YOUR-PROJECT.supabase.co',
+  anonKey: 'sb_publishable_...',   // publishable key; legacy anon JWT also works
+};
+```
+
+**Committing this key is correct.** The publishable/anon key is public by design — it
+identifies the project and grants nothing on its own. Row Level Security is the access
+control. What must *never* appear in this repo is the **secret / `service_role`** key,
+which bypasses RLS entirely.
+
+## Setting up the database
+
+```bash
+supabase link --project-ref YOUR-PROJECT-REF
+supabase db push
+```
+
+Or paste `supabase/migrations/0001_init.sql` then `0002_leaderboard.sql` into the
+dashboard SQL editor, in that order.
+
+Do **not** run `supabase/test/harness.sql` against a real project — it stubs the `auth`
+schema so the migrations can be tested in vanilla Postgres, and Supabase provides the
+real thing.
+
+## Develop
+
+```bash
+npm install
+npx playwright install chromium
+npm run build          # both apps -> apps/*/dist
+npm test               # zero-core, tracker, Zero, leaderboard
+npm run test:sql       # needs a local PostgreSQL 16
+```
+
+## Deploy
+
+`.github/workflows/deploy.yml` builds both apps and publishes to GitHub Pages on every
+push to `main` — tracker at `/`, Zero at `/zero/`. Enable it under
+**Settings → Pages → Source: GitHub Actions**.
+
+The tracker's service worker is cache-first, so **bump `CACHE` in
+`apps/tracker/src/sw.js` on every deploy** or returning users keep the old build.
+
+## What is verified
+
+| Suite | Assertions | What it actually proves |
+|---|---|---|
+| `supabase/test/` | 54 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing |
+| `packages/zero-core` | 60 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
+| `apps/tracker` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
+| `apps/zero` integration | 21 | A tracker batch becomes a Zero load; group size flows back in inches; idempotent across reloads |
+| `apps/zero` leaderboard | 16 | Two separate browser profiles, one backend: A publishes, B sees it, B cannot alter it, private tables stay private |
+
+Everything runs against a mock of GoTrue and PostgREST (`packages/zero-core/mock-supabase.mjs`).
+That mock encodes an understanding of Supabase's endpoints, which is exactly the thing
+that could be wrong — **the first run against a real project is the test that counts.**
+
+## Status
+
+- Zero: synced, tracker-linked, leaderboard — done.
+- Tracker: fully working standalone; **not yet wired to zero-core.** It still stores
+  locally only. That is the next piece of work.
+- Scores on the leaderboard are self-reported. Constraints reject the implausible
+  (a 10-shot 700); nothing makes a score *true*. It is a scoreboard among people who
+  know each other, and the app says so rather than implying verification.
+
+## Licence
+
+MIT.

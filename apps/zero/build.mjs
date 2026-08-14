@@ -7,6 +7,12 @@
  *   3. the manifest, icons and service worker get copied at all — Zero was
  *      served as a bare index.html and could not be installed to a home
  *      screen, which is the one place a range app needs to be
+ *
+ * Exported rather than script-only because the browser suites build their own
+ * copy pointed at the mock. That is deliberate: with a backend configured, the
+ * app correctly HIDES the manual server-address fields, and tests that typed
+ * into those fields only ever passed because the config was empty. Building
+ * the way a deploy builds means the suites exercise the shipped path.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -16,40 +22,55 @@ import * as esbuild from 'esbuild';
 import { loadConfig } from '../../tools/config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-process.chdir(HERE);
+const at = (...p) => path.join(HERE, ...p);
 
-const cfg = loadConfig();
-const shared = JSON.stringify({ url: cfg.url, anonKey: cfg.anonKey });
+/** @param {{url:string, anonKey:string, outdir?:string, single?:boolean}} o */
+export async function buildZero(o) {
+  const outdir = o.outdir ? at(o.outdir) : at('dist');
+  const shared = JSON.stringify({ url: o.url || '', anonKey: o.anonKey || '' });
 
-await esbuild.build({
-  absWorkingDir: HERE,
-  entryPoints: ['entry.jsx'],
-  bundle: true,
-  loader: { '.jsx': 'jsx' },
-  jsx: 'automatic',
-  define: { __SUPABASE_CONFIG__: shared },
-  outfile: 'dist/bundle.js',
-});
+  await esbuild.build({
+    absWorkingDir: HERE,
+    entryPoints: ['entry.jsx'],
+    bundle: true,
+    loader: { '.jsx': 'jsx' },
+    jsx: 'automatic',
+    define: { __SUPABASE_CONFIG__: shared },
+    outfile: path.join(outdir, 'bundle.js'),
+  });
 
-const bundle = fs.readFileSync('dist/bundle.js');
-const hash = crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 12);
+  const bundle = fs.readFileSync(path.join(outdir, 'bundle.js'));
+  const hash = crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 12);
 
-fs.mkdirSync('dist/icons', { recursive: true });
-fs.writeFileSync('dist/index.html', fs.readFileSync('src/shell.html', 'utf8'));
-fs.writeFileSync('dist/sw.js',
-  fs.readFileSync('src/sw.js', 'utf8').replace('__CACHE_VERSION__', `zero-${hash}`));
-fs.copyFileSync('src/manifest.webmanifest', 'dist/manifest.webmanifest');
-for (const f of fs.readdirSync('src/icons')) fs.copyFileSync('src/icons/' + f, 'dist/icons/' + f);
+  fs.mkdirSync(path.join(outdir, 'icons'), { recursive: true });
+  fs.writeFileSync(path.join(outdir, 'index.html'), fs.readFileSync(at('src/shell.html')));
+  fs.writeFileSync(path.join(outdir, 'sw.js'),
+    fs.readFileSync(at('src/sw.js'), 'utf8').replace('__CACHE_VERSION__', `zero-${hash}`));
+  fs.copyFileSync(at('src/manifest.webmanifest'), path.join(outdir, 'manifest.webmanifest'));
+  for (const f of fs.readdirSync(at('src/icons'))) {
+    fs.copyFileSync(at('src/icons', f), path.join(outdir, 'icons', f));
+  }
 
-/* A single self-contained file, for opening straight off disk or sending to a
- * phone without deploying. No service worker: an inlined page has nothing to
- * fetch, and registering one from a file:// origin fails anyway. */
-const single = fs.readFileSync('src/shell.html', 'utf8')
-  .replace('<script src="bundle.js"></script>', () => '<script>\n' + bundle.toString('utf8') + '\n</script>')
-  .replace(/<link rel="manifest"[^>]*>\n?/, '')
-  .replace(/<script>\n\/\* Registered from the page[\s\S]*?<\/script>\n?/, '');
-if (/<\/script/i.test(bundle.toString('utf8'))) throw new Error('bundle would close its own script tag');
-fs.writeFileSync('dist/zero-single.html', single);
+  /* A single self-contained file, for opening straight off disk or sending to
+   * a phone without deploying. No service worker: an inlined page has nothing
+   * to fetch, and registering one from a file:// origin fails anyway. */
+  if (o.single !== false) {
+    const text = bundle.toString('utf8');
+    if (/<\/script/i.test(text)) throw new Error('bundle would close its own script tag');
+    fs.writeFileSync(path.join(outdir, 'zero-single.html'),
+      fs.readFileSync(at('src/shell.html'), 'utf8')
+        .replace('<script src="bundle.js"></script>', () => '<script>\n' + text + '\n</script>')
+        .replace(/<link rel="manifest"[^>]*>\n?/, '')
+        .replace(/<script>\n\/\* Registered from the page[\s\S]*?<\/script>\n?/, ''));
+  }
 
-console.log(`dist/bundle.js ${(bundle.length / 1024 / 1024).toFixed(2)} MB · cache zero-${hash}` +
-            (cfg.ok ? '' : `\n  ⚠ backend not configured (${cfg.reason}) — the app will ask for it on first run`));
+  return { bytes: bundle.length, cache: `zero-${hash}` };
+}
+
+/* CLI: build for deployment, from supabase.config.json. */
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const cfg = loadConfig();
+  const r = await buildZero({ url: cfg.url, anonKey: cfg.anonKey });
+  console.log(`dist/bundle.js ${(r.bytes / 1024 / 1024).toFixed(2)} MB · cache ${r.cache}` +
+              (cfg.ok ? '' : `\n  ⚠ backend not configured (${cfg.reason}) — the app will ask for it on first run`));
+}

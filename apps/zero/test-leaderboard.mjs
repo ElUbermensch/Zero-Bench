@@ -8,10 +8,21 @@ import fsx from 'node:fs';
 const CHROME = '/opt/pw-browsers/chromium';
 const LAUNCH_OPTS = fsx.existsSync(CHROME) ? { executablePath: CHROME } : {};
 import { startMock } from '../../packages/zero-core/mock-supabase.mjs';
+import { buildZero } from './build.mjs';
 import http from 'node:http'; import fs from 'node:fs';
 
 const mock = await startMock({ ttlSec: 3600 });
-const server = http.createServer((req,res)=>{ const f='dist/'+(req.url.split('?')[0]==='/'?'index.html':req.url.slice(1));
+
+/* Build the way a deploy builds: backend baked in at build time.
+ *
+ * With a backend configured the app correctly hides the manual server-address
+ * fields, so the suites used to fail the moment supabase.config.json was
+ * filled in -- they had only ever passed against an unconfigured build. Point
+ * the bundle at this run's mock instead and the shipped path is what is under
+ * test. */
+const OUT = 'dist-test';
+await buildZero({ url: mock.url, anonKey: 'anon-key', outdir: OUT, single: false });
+const server = http.createServer((req,res)=>{ const f=OUT+'/'+(req.url.split('?')[0]==='/'?'index.html':req.url.slice(1));
   if(!fs.existsSync(f)){res.writeHead(404);return res.end();}
   res.writeHead(200,{'Content-Type':f.endsWith('.js')?'text/javascript':'text/html'}); res.end(fs.readFileSync(f)); });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
@@ -33,10 +44,6 @@ async function shooter(email, seed) {
   await page.evaluate(({seed})=>{ localStorage.clear();
     localStorage.setItem('zs_sessions_v1', JSON.stringify(seed)); }, {seed});
   await page.reload(); await page.waitForTimeout(600);
-  // shared deployment is blank in source, so each profile enters the server once
-  await page.fill('input[placeholder="https://YOUR-PROJECT.supabase.co"]', mock.url);
-  await page.fill('input[placeholder="anon public key"]', 'anon-key');
-  await page.click('button:has-text("save server")'); await page.waitForTimeout(300);
   await page.fill('input[placeholder="email"]', email);
   await page.fill('input[placeholder="password"]', 'pw12345');
   await page.click('button:has-text("create account")'); await page.waitForTimeout(600);

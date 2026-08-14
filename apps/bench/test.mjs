@@ -664,6 +664,28 @@ section('installable and offline');
   const offlineOk = (await page.innerHTML('#view')).length > 50;
   ok(offlineOk, 'the app loads from cache with the network off');
   ok((await page.evaluate(() => DB.batches.length)) === 1, '...with data intact');
+
+  // Both apps are served from one origin -- Bench at /, Zero at /zero/ -- so
+  // this worker's scope contains Zero's. Its offline fallback must not answer
+  // for Zero, or a phone with no signal shows Bench when you opened Zero.
+  const errsBefore = errors.length;
+  const strayed = await page.evaluate(async () => {
+    try {
+      const r = await fetch('zero/index.html');
+      return r.ok ? (await r.text()).slice(0, 400) : `status:${r.status}`;
+    } catch (e) { return 'network-error'; }
+  });
+  // 'network-error' means this worker declined to handle it at all, which is
+  // the invariant that matters. Without the scope guard the worker intercepts
+  // and answers ('status:404' here, and Bench's own cached page on a real
+  // deploy where /zero/ is a sibling directory rather than a missing file).
+  ok(strayed === 'network-error',
+     `Bench's worker declines requests under /zero/ entirely (${strayed})`);
+  // That probe deliberately fetches with the network off, and the browser logs
+  // the failed load. Drop exactly those entries rather than muting the hygiene
+  // check, which would then miss a real error raised anywhere else.
+  errors.splice(errsBefore, errors.length - errsBefore,
+    ...errors.slice(errsBefore).filter(e => !/ERR_INTERNET_DISCONNECTED/.test(e)));
   await shot('08-offline');
   await ctx.setOffline(false);
 }

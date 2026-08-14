@@ -24,6 +24,12 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  // Zero is served from /zero/ on the SAME origin, inside this worker's scope,
+  // and has a worker of its own. Zero's narrower scope wins once it registers,
+  // but not before -- and until then the fallback below would answer a request
+  // for Zero with BENCH'S page. Offline, on a phone, that looks like Zero has
+  // been replaced by the wrong app. Leave anything under /zero/ alone.
+  if (/(^|\/)zero\//.test(new URL(req.url).pathname)) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
       // Only cache real, complete same-origin responses.

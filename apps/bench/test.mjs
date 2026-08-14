@@ -398,6 +398,90 @@ section('brass life counts partial firings');
   await page.evaluate(() => { DB.batches = []; DB.brassLots[0].firings = 0; save(); });
 }
 
+/* ======================================================= cases leave the lot */
+section('removing cases changes the count and nothing else');
+{
+  await page.evaluate(() => {
+    DB.brassLots[0].qty = 100; DB.brassLots[0].initialQty = 100;
+    DB.brassLots[0].firings = 0; DB.brassLots[0].expectedFirings = 6;
+    DB.brassLots[0].culls = [];
+    DB.batches = [{ id: 'bx', serial: 'BX', recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
+      bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
+      powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
+      primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
+      date: '2026-08-01', qty: 50, remaining: 0, chargeActual: 41.5, quarantine: false }];
+    DB.sessions = []; save(); go('brassDetail', DB.brassLots[0].id);
+  });
+  await page.waitForTimeout(200);
+  const before = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(before.mean === 0.5, 'lot starts at 0.5 firings from 50 of 100 fired');
+
+  await tapText('Remove cases');
+  await page.waitForTimeout(250);
+  ok((await page.textContent('#view')).includes('Cases removed'), 'the remove-cases form opens');
+  const reasons = await page.locator('[name="reason"] option').allTextContents();
+  ok(reasons.join('|') === 'Case separation|Lost|Other — see note|No reason given',
+     `the reason list is exactly the four options (${reasons.join(', ')})`);
+
+  await fill('n', '3');
+  await page.selectOption('[name="reason"]', 'sep');
+  await fill('note', 'bright rings above the web');
+  await submit();
+
+  const after = await page.evaluate(() => ({
+    onHand: brassOnHand(DB.brassLots[0]),
+    life: brassLife(DB.brassLots[0]),
+    culls: DB.brassLots[0].culls,
+    qty: DB.brassLots[0].qty,
+  }));
+  ok(after.onHand === 97, `three cases leave the count (${after.onHand} on hand)`);
+  ok(after.culls.length === 1 && after.culls[0].reason === 'sep' && after.culls[0].n === 3,
+     'the removal is recorded with its reason');
+  ok(after.qty === 97, 'the stored quantity is kept in step for exports');
+
+  // THE point of the change: the survivors are no more worn than they were.
+  ok(after.life.mean === 0.5,
+     `the firing average is untouched — still ${after.life.mean}, not 50/97`);
+  ok(after.life.sd === before.sd, '...including its spread');
+
+  const dv = await page.textContent('#view');
+  ok(dv.includes('97 of 100') && dv.includes('3 removed'), 'the detail shows both counts');
+  ok(dv.includes('Case separation') && dv.includes('bright rings above the web'),
+     'the reason and note are listed');
+  ok(dv.includes('fired exactly as often as they had been'),
+     'and the screen says outright that removal did not age the survivors');
+
+  // A later firing measures against the smaller lot, because that is the lot
+  // that was actually in circulation.
+  await page.evaluate(() => {
+    DB.batches.push({ ...DB.batches[0], id: 'bx2', serial: 'BX2',
+      date: '2026-09-01', qty: 97, remaining: 0 });
+    save();
+  });
+  const later = await page.evaluate(() => brassLife(DB.brassLots[0]));
+  ok(Math.abs(later.mean - 1.5) < 1e-9,
+     `a firing after the cull counts against the 97 that were left (${later.mean.toFixed(2)})`);
+
+  // Cases inside loaded rounds are not on the bench to be culled.
+  await page.evaluate(() => {
+    DB.batches = [{ ...DB.batches[0], id: 'bl2', serial: 'BL2', qty: 90, remaining: 90 }];
+    save(); go('brassDetail', DB.brassLots[0].id);
+  });
+  await page.waitForTimeout(200);
+  await tapText('Remove cases');
+  await page.waitForTimeout(200);
+  await fill('n', '20');
+  await submit();
+  const err = await page.textContent('#view');
+  ok(err.includes('are free') && err.includes('inside loaded rounds'),
+     'culling cases that are sitting in loaded rounds is refused, and says why');
+  ok((await page.evaluate(() => brassOnHand(DB.brassLots[0]))) === 97, '...and nothing is removed');
+  await page.click('#back'); await page.waitForTimeout(200);
+
+  await page.evaluate(() => { DB.batches = []; DB.brassLots[0].culls = [];
+    DB.brassLots[0].qty = 100; save(); });
+}
+
 /* ================================= the form says so before you commit to it */
 section('the batch form shows the draw while you type');
 {

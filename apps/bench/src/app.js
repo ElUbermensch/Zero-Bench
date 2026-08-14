@@ -290,6 +290,30 @@ const batchesUsing = (lot) => DB.batches.filter(b =>
   (lot.kind === 'primer' && b.primerLot === lot.id))
   .slice().sort((a, b) => (a.date < b.date ? 1 : -1));
 
+/* Cases leave a lot: a neck splits, a head separates, one rolls under the
+ * bench. They are gone from the count and that is ALL they are -- removing a
+ * case does not change how many times the surviving cases have been fired.
+ *
+ * Which is why the firing average is computed against the population that was
+ * in circulation AT THE TIME of each firing, not against today's count. Using
+ * today's count would let a cull retroactively rewrite history: lose ten cases
+ * and every past firing would silently become a slightly larger fraction of a
+ * smaller lot, and the lot would appear to age without anything being fired. */
+const casesLost = (l) => (l.culls || []).reduce((s, c) => s + (+c.n || 0), 0);
+const brassOnHand = (l) => Math.max(0, (+l.initialQty || 0) - casesLost(l));
+
+/** How many cases were in the lot on a given date. */
+function lotPopulationAt(l, date) {
+  const gone = (l.culls || [])
+    .filter(c => !date || String(c.date || '') <= String(date))
+    .reduce((s, c) => s + (+c.n || 0), 0);
+  return Math.max(0, (+l.initialQty || 0) - gone);
+}
+
+const CULL_REASONS = {
+  sep: 'Case separation', lost: 'Lost', note: 'Other — see note', none: 'No reason given',
+};
+
 /* ── Brass life, counted as partial firings ───────────────────────────────
  *
  * Cases from one lot get fired, tumbled back together and reloaded as a pool.
@@ -315,20 +339,22 @@ const batchesUsing = (lot) => DB.batches.filter(b =>
  * throwing the worst cases one cycle past where they should have gone.
  */
 function brassLife(lot) {
-  const N = (+lot.qty || +lot.initialQty || 0);
+  const N = brassOnHand(lot);
   const base = +lot.firings || 0;
   let cycles = 0, varr = 0, fired = 0;
-  if (N > 0) {
-    for (const b of DB.batches) {
-      if (b.brassLot !== lot.id) continue;
-      // A loaded but unfired batch has put no wear on anything.
-      const n = Math.max(0, (+b.qty || 0) - Math.max(0, +b.remaining || 0));
-      if (!n) continue;
-      fired += n;
-      const p = Math.min(1, n / N);
-      cycles += p;
-      varr += p * (1 - p);
-    }
+  for (const b of DB.batches) {
+    if (b.brassLot !== lot.id) continue;
+    // A loaded but unfired batch has put no wear on anything.
+    const n = Math.max(0, (+b.qty || 0) - Math.max(0, +b.remaining || 0));
+    if (!n) continue;
+    // The lot as it stood when these were fired, so a later cull cannot
+    // rewrite the past.
+    const pop = lotPopulationAt(lot, b.date);
+    if (pop <= 0) continue;
+    fired += n;
+    const p = Math.min(1, n / pop);
+    cycles += p;
+    varr += p * (1 - p);
   }
   const sd = Math.sqrt(varr);
   return { base, N, fired, cycles, sd,
@@ -343,7 +369,7 @@ const brassCommitted = (lot, exceptBatch) => DB.batches
   .reduce((s, b) => s + Math.max(0, +b.remaining || 0), 0);
 
 const brassAvailable = (lot, exceptBatch) =>
-  (+lot.qty || 0) - brassCommitted(lot, exceptBatch);
+  brassOnHand(lot) - brassCommitted(lot, exceptBatch);
 
 /** How many more rounds of a given charge the powder on hand will make.
  *  The number a reloader actually wants: "have I enough for Saturday?" */
@@ -545,6 +571,15 @@ const FORMS = {
     { k: 'origin', l: 'Origin', t: 'select',
       opts: [['new', 'New'], ['once-fired', 'Once-fired'], ['range pickup', 'Range pickup']] },
     { k: 'notes', l: 'Notes', t: 'area' },
+  ]},
+
+  cull: { title: 'Cases removed', fields: [
+    { k: 'n', l: 'Cases removed', t: 'num', req: true, def: 1 },
+    { k: 'reason', l: 'Reason', t: 'select', opts: [
+      ['sep', 'Case separation'], ['lost', 'Lost'],
+      ['note', 'Other — see note'], ['none', 'No reason given']] },
+    { k: 'date', l: 'Date', t: 'date' },
+    { k: 'note', l: 'Note', t: 'area' },
   ]},
 
   batch: { title: 'Batch', fields: [
@@ -798,6 +833,21 @@ function validate(kind, d) {
     return 'That colour code is already in use.';
   }
   if (kind === 'component' && d.qty <= 0) return 'Quantity must be greater than zero.';
+  if (kind === 'cull') {
+    const l = byId(DB.brassLots, (cur().arg || {}).lot);
+    if (!l) return 'That brass lot no longer exists.';
+    if (!(d.n > 0)) return 'Removing zero cases would record nothing.';
+    const free = brassAvailable(l);
+    if (d.n > brassOnHand(l)) {
+      return `Only ${brassOnHand(l)} case${brassOnHand(l) === 1 ? '' : 's'} in this lot.`;
+    }
+    // Cases inside loaded rounds are not on the bench to be culled. Saying so
+    // beats letting the free count go negative.
+    if (d.n > free) {
+      return `Only ${free} case${free === 1 ? '' : 's'} are free — `
+        + `${brassCommitted(l)} are inside loaded rounds. Fire or pull those first.`;
+    }
+  }
   if (kind === 'batch' && d.qty <= 0) return 'Rounds loaded must be greater than zero.';
   if (kind === 'batch') {
     // Refuse rather than go negative. A stock figure that can be negative is
@@ -956,7 +1006,7 @@ function brassRow(l) {
     <span class="grow">
       <span class="ttl">${esc(l.headstamp)} · ${esc(cartName(l.cartridge))}</span>
       <span class="sub mono">${esc(l.serial)} · ${esc(codeOf(l.marks))}</span>
-      <span class="sub">${l.qty} cases · ${brassLife(l).mean.toFixed(1)} of ${l.expectedFirings} firings</span>
+      <span class="sub">${brassOnHand(l)} cases · ${brassLife(l).mean.toFixed(1)} of ${l.expectedFirings} firings</span>
       ${brassChips(l).length ? `<span class="sub mt5">${chips(brassChips(l))}</span>` : ''}
     </span><span class="chev">›</span></button>`;
 }
@@ -997,7 +1047,8 @@ VIEWS.brassDetail = (id) => {
         <span class="mono">${pct.toFixed(0)}%</span></div>
       <div class="capbar"><i style="width:${pct}%;background:${bar}"></i></div>
       <div class="tiny dim mt4">
-        ${life.fired} round${life.fired === 1 ? '' : 's'} fired from ${life.N} case${life.N === 1 ? '' : 's'}${life.base ? `, on top of ${life.base} before this lot was recorded` : ''}.
+        ${life.fired} round${life.fired === 1 ? '' : 's'} fired, each counted against the lot as it
+        stood at the time${life.base ? `, on top of ${life.base} before this lot was recorded` : ''}.
         Cases are mixed back together between loadings, so this is the mean per case.
       </div>
       ${life.sd > 0.05 ? `<div class="tiny mt4" style="color:${hiPct >= 100 ? 'var(--warn)' : 'var(--dim)'}">
@@ -1006,7 +1057,8 @@ VIEWS.brassDetail = (id) => {
       </div>` : ''}
       <hr>
       <dl class="kv">
-        <dt>Cases on hand</dt><dd class="mono">${l.qty} of ${l.initialQty}</dd>
+        <dt>Cases on hand</dt><dd class="mono">${brassOnHand(l)} of ${l.initialQty}${
+          casesLost(l) ? ` · ${casesLost(l)} removed` : ''}</dd>
         <dt>Committed</dt><dd class="mono">${brassCommitted(l)} loaded · ${brassAvailable(l)} free</dd>
         <dt>Origin</dt><dd>${esc(l.origin || '—')}</dd>
         <dt>Acquired</dt><dd>${fmtDate(l.acquired)}</dd>
@@ -1017,6 +1069,15 @@ VIEWS.brassDetail = (id) => {
       </dl>
       ${l.notes ? `<hr><p class="small muted m0">${esc(l.notes)}</p>` : ''}
     </div>
+    ${(l.culls || []).length ? `<div class="card"><h2>Cases removed</h2>
+      ${l.culls.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).map(c => `
+        <div class="rowline"><div class="spread small">
+          <span>${esc(CULL_REASONS[c.reason] || 'No reason given')}</span>
+          <span class="mono">−${c.n}</span></div>
+        <div class="tiny dim">${fmtDate(c.date)}${c.note ? ' · ' + esc(c.note) : ''}</div></div>`).join('')}
+      <div class="tiny dim mt6">Removing cases changes the count only. The cases still in
+        the lot have been fired exactly as often as they had been before.</div>
+    </div>` : ''}
     <div class="card"><h2>Used by</h2>${used.length
       ? used.map(b => `<button class="listitem" data-act="ammoDetail" data-arg="${b.id}">
           <span class="grow"><span class="ttl mono">${esc(b.serial)}</span>
@@ -1024,6 +1085,7 @@ VIEWS.brassDetail = (id) => {
           <span class="chev">›</span></button>`).join('')
       : '<div class="empty"><p>Not loaded into any batch yet.</p></div>'}</div>
     <div class="btnrow noprint">
+      <button class="btn" data-act="cull" data-arg="${l.id}">Remove cases</button>
       <button class="btn" data-act="logfire" data-arg="${l.id}"
         title="For firings this app did not see — batches count themselves">+1 outside firing</button>
       <button class="btn" data-act="loganneal" data-arg="${l.id}">Log anneal</button>
@@ -1413,7 +1475,7 @@ const SAVERS = {
     const rec = { id: uid('bl'), serial, marks: d.marks, cartridge: d.cartridge,
       headstamp: d.headstamp, maker: d.maker, initialQty: d.initialQty,
       qty: d.initialQty, firings: d.firings || 0,
-      expectedFirings: d.expectedFirings || 6, cost: d.cost || 0,
+      expectedFirings: d.expectedFirings || 6, cost: d.cost || 0, culls: [],
       origin: d.origin, acquired: today(), lastAnneal: null, retired: false, notes: d.notes };
     DB.brassLots.push(rec);
     return ['goDetail', ['brassDetail', rec.id], `Brass lot ${serial} created.`];
@@ -1430,6 +1492,21 @@ const SAVERS = {
     DB.batches.push(rec);
     return ['goDetail', ['ammoDetail', rec.id], `Batch ${serial} created.`];
   },
+  /* Removing cases changes the COUNT and nothing else. The survivors have
+   * been fired exactly as many times as they had been a moment ago, so the
+   * firing average is deliberately untouched -- see brassLife, which measures
+   * each firing against the population in circulation at the time. */
+  cull: (d) => {
+    const l = byId(DB.brassLots, d.lot);
+    if (!l) return ['err', null, 'That brass lot no longer exists.'];
+    (l.culls = l.culls || []).push({ id: uid('cu'), n: d.n,
+      reason: CULL_REASONS[d.reason] ? d.reason : 'none',
+      date: d.date || today(), note: d.note || '' });
+    l.qty = brassOnHand(l);          // kept in step for exports and old records
+    return ['goDetail', ['brassDetail', l.id],
+      `${d.n} case${d.n === 1 ? '' : 's'} removed — ${brassOnHand(l)} left.`];
+  },
+
   session: (d) => {
     DB.sessions.push({ id: uid('se'), batch: d.batch, firearm: d.firearm,
       date: d.date || today(), rounds: d.rounds, distance: d.distance,
@@ -1512,6 +1589,7 @@ const ACTIONS = {
   logfire: (a) => { const l = byId(DB.brassLots, a); l.firings = (+l.firings || 0) + 1;
     save(); toast(`Baseline +1 — ${l.serial} now at ${brassLife(l).mean.toFixed(2)} firings.`);
     render(); },
+  cull: (a) => { UI.cartNew = {}; go('form', { kind: 'cull', lot: a }); },
   loganneal: (a) => { const l = byId(DB.brassLots, a); l.lastAnneal = today();
     save(); toast('Anneal logged.'); render(); },
 
@@ -1631,6 +1709,7 @@ document.addEventListener('submit', (e) => {
 
   const d = readForm(form, kind);
   if (kind === 'session' && cur().arg && cur().arg.batch) d.batch = cur().arg.batch;
+  if (kind === 'cull' && cur().arg && cur().arg.lot) d.lot = cur().arg.lot;
 
   const err = validate(kind, d);
   const box = document.getElementById('formErr');

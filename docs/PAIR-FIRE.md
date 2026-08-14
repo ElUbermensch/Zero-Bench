@@ -1,40 +1,53 @@
-# Pair fire — diagnosis before rebuild
+# Pair fire — the live relay
 
-**Status:** not implemented. No pair-fire code exists in the current `Zero.jsx` —
-I grepped for pair/partner/relay/alternate/spotter and for realtime/websocket/channel/
-subscribe/broadcast/presence, and found nothing. `fireMode` carries only `Slow` and
-`Rapid`. So this is a rebuild from scratch, not a repair.
-
-This document exists because the obvious fix for the reported symptom is the wrong one,
-and building on that mistake would waste the work.
+**Status: built.** Migration `0004_relay.sql`, the relay client in `zero-core`, and
+the UI in `Zero.jsx`. 27 SQL assertions and a 28-assertion two-device browser test
+(`apps/zero/test-relay.mjs`) cover it.
 
 ---
 
-## The symptom splits into two unrelated problems
+## TL;DR
+
+A shooter taps **● go live** on a session and gets a 4-character code. A coach taps
+**● join** on their own phone, enters the code, their name and a role, and watches the
+shot string, group plot, score and mean radius build in real time, with a shared feed
+for wind calls. The coach needs no account.
+
+Two decisions carry the whole design, and both are contrarian:
+
+1. **No WebSocket.** The relay polls every 2.5 s. This is not a fallback; it is the
+   transport. §2 explains why, and it is the direct fix for the failure you reported.
+2. **The code is not the access control.** Holding the code is not what grants access
+   — having a row in `relay_participants` is, and the only way to get that row is
+   `join_relay()`, a throttled `security definer` function. One door, so the door can
+   be watched. §3.
+
+---
+
+## 1. Your symptom was two unrelated failures
 
 > "did not work well due to supabase killing it frequently"
 > "constant idle, call and return message so that supabase doesn't cancel the [project]"
 
-Those describe **two different failures on two different timescales**, and the fix for
-one does nothing for the other.
+Those are **two different failures on two different timescales**, and fixing one does
+nothing for the other.
 
 ### Problem 1 — the project pauses. Timescale: 7 days.
 
-Supabase pauses a free project after roughly 7 days of low activity. Data survives and
-is restorable, but the API goes dark until someone clicks restore.
+Supabase pauses a free project after roughly 7 days of low activity. Data survives; the
+API goes dark until someone clicks restore.
 
 **This cannot be what killed pair fire mid-session.** Nothing that takes a week to
 trigger explains a feature failing repeatedly during use.
 
-**Fixed**, in this repo: `public.keepalive()` (migration `0003`) plus
-`.github/workflows/keepalive.yml`, which calls it daily. The function touches no table
-and returns one timestamp, so granting it to `anon` is safe — the test suite asserts
-that the grant opened no table access.
+Fixed by `public.keepalive()` (migration `0003`) plus `.github/workflows/keepalive.yml`,
+which calls it daily. The function touches no table and returns one timestamp, so
+granting it to `anon` is safe — the suite asserts the grant opened no table access.
 
 ### Problem 2 — the live connection dies mid-session. Timescale: minutes.
 
-This is the one that actually broke pair fire, and per Supabase's own troubleshooting
-docs the mechanism is specific:
+This is the one that actually broke it. Per Supabase's own troubleshooting docs, the
+mechanism is specific:
 
 > When your application moves to the background, web browsers implement **browser
 > throttling**, reducing JavaScript timer frequency and preventing the Realtime client
@@ -42,84 +55,136 @@ docs the mechanism is specific:
 > and the client never detects the loss, because it was never actively detected on the
 > main thread.
 
-**Pair fire is the worst possible case for this.** The entire premise is that one
-shooter's phone sits idle while the other shoots. Screen locks, tab backgrounds,
-timers throttle, heartbeat stops, server drops the socket — and the app shows a
-connected UI over a dead connection. Then the partner's shot never arrives.
+**Pair fire is the worst possible case for this.** The premise is that one phone sits
+idle while the other shoots. Screen locks, tab backgrounds, timers throttle, heartbeat
+stops, server drops the socket — and the app shows a connected UI over a dead
+connection. Then the partner's shot never arrives.
 
 ---
 
-## Why "a constant idle keepalive message" is the wrong fix for Problem 2
+## 2. Why "a constant idle keepalive message" is the wrong fix for Problem 2
 
 It is the natural instinct and it does not work, because **the thing that fails is the
-timer itself**. A backgrounded tab's `setInterval` is throttled to roughly once per
-minute or stopped entirely. Adding another main-thread timer to ping more often gives
-you a ping that is throttled exactly as hard as the heartbeat already being throttled.
-You cannot fix a stopped clock by scheduling more work on it.
+timer itself**. A backgrounded tab's `setInterval` is throttled to roughly once a minute
+or stopped outright. Adding another main-thread timer to ping more often gives you a
+ping throttled exactly as hard as the heartbeat already being throttled. You cannot fix
+a stopped clock by scheduling more work on it.
 
-Worse, it hides the failure: a keepalive that the browser silently stops firing looks
-identical to a keepalive that is working.
+Worse, it hides the failure: a keepalive the browser has silently stopped firing looks
+identical to one that is working.
 
-### What actually works
-
-1. **Move the heartbeat off the main thread.** Supabase's client supports
-   `worker: true`, running heartbeat logic in a Web Worker, which browsers throttle far
-   less aggressively than an inactive tab's main thread.
-2. **Assume the connection is dead and verify, rather than assume it is alive.** Use
-   `heartbeatCallback` to detect `disconnected` and reconnect explicitly.
-3. **Reconcile on resume, do not rely on the stream.** On `visibilitychange` →
-   visible, and on `online`, re-fetch session state outright. The WebSocket becomes an
-   optimisation for latency, never the source of truth.
-4. **Wake locks.** `navigator.wakeLock` keeps the screen on during an active pair-fire
-   session, which sidesteps the whole problem for the common case — at the cost of
-   battery, so it should be opt-in and released when the session ends.
-
-### The option worth considering seriously: no WebSocket at all
+### What was built instead: polling, deliberately
 
 Pair fire needs to know "my partner fired" within a few seconds. It does not need
-millisecond latency. A **2–3 second poll of one shared row** has properties that matter
-more here than latency does:
+millisecond latency. A 2.5 s poll of one RPC has properties that matter more here:
 
-- a plain `fetch` on resume just works; there is no connection to have silently died
-- it survives backgrounding, screen lock, airplane mode, and switching apps
+- **there is no connection to have silently died.** A `fetch` on resume just works.
+- it survives backgrounding, screen lock, airplane mode and app switching
 - it degrades gracefully on the bad cellular signal you get at most ranges
 - it needs no new dependency — `zero-core` already does authenticated REST
 
-The cost is a request every few seconds per active pairing, which for a handful of
-shooters is nothing, and it only runs while a pair-fire session is actually open.
+The client backs off ×1.8 up to 20 s on failure and snaps back to 2.5 s on the first
+success, and re-polls immediately on `visibilitychange` and `online` rather than waiting
+out a backoff the user cannot see.
 
-**My recommendation: build pair fire on polling first.** If latency proves genuinely
-insufficient, add Realtime as an accelerator on top of a polling fallback that is
-already proven to work. The reverse order is how the previous attempt failed.
+**Presence comes free.** `relay_state` stamps `last_seen_at` on every poll, so the poll
+*is* the heartbeat — there is no separate keepalive to go stale. The host's card shows a
+coach as "away" after 20 s of silence. This is the thing the WebSocket version could not
+do honestly: it showed "connected" over a dead socket.
+
+The cost is one request per 2.5 s per participant, only while a relay is open. For a
+handful of shooters that is nothing.
+
+If latency ever proves insufficient, add Realtime as an *accelerator* on top of a polling
+layer already proven to work. The reverse order is how the previous attempt failed.
 
 ---
 
-## What I need before building
+## 3. The security model, stated honestly
 
-The interaction model matters more than the transport, and I do not want to guess it.
-In competitive shooting "pair fire" can mean several different things:
+"No accounts" is implemented as **anonymous sign-in**, not as unauthenticated access.
+The coach's device gets a real `authenticated` JWT with `is_anonymous: true`; the user
+simply never typed an email. Everything below is ordinary RLS on a real `auth.uid()`.
 
-- **Two shooters, one target, alternating shots** — the classic pairs relay, where each
-  shooter fires in turn while the other waits.
-- **Shooter and scorer/spotter** — one shoots, the partner records and calls, then they
-  swap. Only one person is entering data at a time.
-- **Two shooters on adjacent targets, one relay clock** — both shoot, shared timing and
-  shared range conditions, separate scores.
-- **One device, two shooters** — no network involved at all, just a session that
-  interleaves two people's shots.
+```
+                     ┌─────────────────────────────────────────┐
+  code ──────────────▶ join_relay()  security definer, throttled│
+                     └────────────────────┬────────────────────┘
+                                          │ inserts
+                                          ▼
+                              relay_participants row
+                                          │
+                     ┌────────────────────┴────────────────────┐
+                     │  every relay RLS policy reads this row  │
+                     └─────────────────────────────────────────┘
+```
 
-That last possibility is worth flagging: **if pair fire is one device passed between
-two shooters, none of the Supabase problems apply**, and the whole feature is local
-state. It would be worth knowing whether the previous implementation genuinely needed
-two devices, or whether it reached for the network because it was already there.
+- **The code alphabet is `23456789BCDFGHJKMNPQRSTVWXZ`** — 27 characters. No vowels, so
+  a code can never spell a word; no `0/O/1/I/L`, so it is unambiguous shouted down a
+  firing line. 27⁴ = 531,441 codes.
+- **A code is only valid while its relay is `live` and unexpired**, so the target set is
+  however many relays are running right now — typically one or two, not half a million.
+- **`join_relay` returns a result, it does not raise.** This is load-bearing: a `RAISE`
+  rolls back the transaction, which rolled back the failed-attempt row, so the throttle
+  counted nothing and could never trip. The SQL suite regression-tests exactly this by
+  asserting the attempt rows persist.
+- **Ten failed attempts per user per 15 minutes.** The eleventh is refused *on the
+  throttle*, not on the lookup, so a guesser learns nothing by continuing.
+- **Only the host writes shots.** The insert policy checks `relays.host_id = auth.uid()`.
+  A coach can post to the feed and nothing else — the browser test forges a `POST` with
+  the coach's own real token and asserts a 403.
+- **Anonymous devices cannot publish to the leaderboard.** A `RESTRICTIVE` policy rejects
+  any insert whose JWT carries `is_anonymous: true`, or the board is trivially spammable.
 
-Pasting the old code or the original chat would settle all of this — particularly:
+**The honest limit:** a four-character code is short enough to say out loud, which means
+it is short enough to guess given enough time. Combined with the throttle and Supabase's
+default 30 anonymous sign-ins per hour per IP, guessing a live code takes days of
+sustained effort. The prize is someone's shot string. That is an acceptable trade here
+and would **not** be acceptable for anything sensitive.
 
-1. the session/shot shape the old mode wrote,
-2. how the two devices found each other (a code? a match id? a shared link?),
-3. whether both devices could enter shots or only one,
-4. what exactly the user saw when it broke.
+---
 
-Point 4 matters most for confirming the diagnosis above: a UI that stayed "connected"
-while silently receiving nothing is the signature of the throttled-heartbeat failure.
-Anything else means the cause is elsewhere and this document needs revising.
+## 4. What each side sees
+
+**Shooter** — a card on the session, above the shot list: the code in large type, who is
+watching (and who has gone away), and the feed. Leaving the session does not end the
+relay; the home screen shows a live strip that taps back into it. Going live from a
+second session ends the first — one live relay per shooter, enforced by a partial unique
+index on `(code) where status = 'live'`.
+
+Shots already fired are **backfilled** when going live, so a coach joining mid-string
+does not see an empty target.
+
+**Coach** — a full screen: score and X count, mean radius, extreme spread, shot count, a
+group plot with the mean-radius ring, the numbered shot string, and the feed. Sighters
+are drawn dashed and excluded from the statistics.
+
+The relay is a *projection*, not a system of record. Zero's local session remains the
+source of truth on the shooter's device; `relay_shots` is a view of it that expires.
+
+---
+
+## 5. Before it works on a real project
+
+1. `supabase db push` (or paste `0004_relay.sql` into the SQL editor after `0001`–`0003`).
+2. **Enable anonymous sign-ins**: Supabase dashboard → Authentication → Providers →
+   Anonymous. It ships **disabled**, and with it off the coach cannot join at all. The
+   app names this failure explicitly rather than showing a generic error, because it is
+   the single most likely first-run problem.
+3. Consider turning on CAPTCHA for anonymous sign-ins if the app ever goes public.
+
+Relays expire on their own; nothing needs pruning by hand.
+
+---
+
+## 6. What is verified
+
+| | |
+|---|---|
+| `supabase/test/rls_test3.sql` | 27 assertions, three actors. A stranger cannot list relays, read one by id, read the shot string, enumerate participants, or self-insert a participant row. Wrong codes trip the throttle *and the attempt rows survive*. A coach can read and post but cannot log shots or end the relay. The `>=` cursor returns two shots sharing one timestamp. The code dies when the relay ends or expires. |
+| `apps/zero/test-relay.mjs` | 28 assertions across two real browser profiles. Drives the actual buttons on both devices — nothing calls the relay API to make something appear. Verified by negative control: removing the one line that mirrors a shot makes it fail. |
+
+The browser suite runs against `packages/zero-core/mock-supabase.mjs`, a mock of GoTrue
+and PostgREST. That mock encodes an understanding of Supabase's endpoints, which is
+exactly the thing that could be wrong — **the first run against a real project is the
+test that counts.**

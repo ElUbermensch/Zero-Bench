@@ -2,7 +2,8 @@
 
 Two offline-first shooting PWAs over one shared Supabase backend.
 
-- **Zero** — precision shooting log: sessions, shot plotting, DOPE, analytics, leaderboard.
+- **Zero** — precision shooting log: sessions, shot plotting, DOPE, analytics, leaderboard,
+  and a live relay so a coach can watch your string from their own phone.
 - **Reloading Batch Tracker** — brass lots by colour code, load recipes, serialised
   batches, printable QR labels.
 
@@ -46,8 +47,12 @@ supabase link --project-ref YOUR-PROJECT-REF
 supabase db push
 ```
 
-Or paste `supabase/migrations/0001_init.sql` then `0002_leaderboard.sql` into the
-dashboard SQL editor, in that order.
+Or paste `supabase/migrations/0001_init.sql`, `0002_leaderboard.sql`, `0003_keepalive.sql`
+and `0004_relay.sql` into the dashboard SQL editor, in that order.
+
+**Then enable anonymous sign-ins** (Authentication → Providers → Anonymous). The live
+relay needs no accounts, and "no accounts" is implemented as anonymous sign-in — it
+ships disabled, and with it off a coach cannot join. See `docs/PAIR-FIRE.md`.
 
 Do **not** run `supabase/test/harness.sql` against a real project — it stubs the `auth`
 schema so the migrations can be tested in vanilla Postgres, and Supabase provides the
@@ -76,11 +81,12 @@ The tracker's service worker is cache-first, so **bump `CACHE` in
 
 | Suite | Assertions | What it actually proves |
 |---|---|---|
-| `supabase/test/` | 57 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing |
-| `packages/zero-core` | 60 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
+| `supabase/test/` | 89 | Two users cannot see each other's private rows; the leaderboard is public-read and own-write; a negative control shows the `security_invoker` view guard is load-bearing; a relay code grants nothing on its own |
+| `packages/zero-core` | 77 | Single-flight token refresh, FK-ordered push, cursor correctness, poison-pill rejection handling |
 | `apps/tracker` | 53 | Empty-start, one route per destination, persistence across a real reload, offline via service worker |
 | `apps/zero` integration | 21 | A tracker batch becomes a Zero load; group size flows back in inches; idempotent across reloads |
 | `apps/zero` leaderboard | 16 | Two separate browser profiles, one backend: A publishes, B sees it, B cannot alter it, private tables stay private |
+| `apps/zero` relay | 28 | Two browser profiles driving the real buttons: shooter goes live, coach joins anonymously with the code, shots and wind calls flow, a coach's own token is refused when writing shots, the code dies with the relay |
 
 Everything runs against a mock of GoTrue and PostgREST (`packages/zero-core/mock-supabase.mjs`).
 That mock encodes an understanding of Supabase's endpoints, which is exactly the thing
@@ -101,16 +107,17 @@ Variables, not secrets — the publishable key is not one. The job fails loudly 
 non-200 so it cannot silently stop protecting the project.
 
 This addresses project *pausing* only. It is not a fix for a live connection dropping
-mid-session; see `docs/PAIR-FIRE.md`.
+mid-session — the relay solves that by not holding a connection at all. See
+`docs/PAIR-FIRE.md`.
 
 ## Status
 
-- Zero: synced, tracker-linked, leaderboard — done.
+- Zero: synced, tracker-linked, leaderboard, live relay — done.
 - Tracker: fully working standalone; **not yet wired to zero-core.** It still stores
   locally only. That is the next piece of work.
-- Pair fire: **not implemented.** No pair-fire code survives in `Zero.jsx`.
-  `docs/PAIR-FIRE.md` has the diagnosis of why the previous attempt kept dying and
-  what it needs before a rebuild.
+- Pair fire: **built.** Polling, not WebSockets, on purpose — `docs/PAIR-FIRE.md`
+  explains why the obvious fix for the reported symptom is the wrong one. Needs
+  anonymous sign-ins enabled on the project.
 - Scores on the leaderboard are self-reported. Constraints reject the implausible
   (a 10-shot 700); nothing makes a score *true*. It is a scoreboard among people who
   know each other, and the app says so rather than implying verification.

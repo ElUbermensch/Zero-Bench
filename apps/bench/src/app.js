@@ -226,6 +226,138 @@ function costPerRound(b) {
   return p;
 }
 
+/* ==========================================================================
+ * STOCK — what a batch actually takes off the shelf.
+ *
+ * Component lots were created with `remaining = qty` and nothing ever wrote
+ * to `remaining` again. The inventory bar therefore read 100% forever, no
+ * matter how much you loaded. This is that bug, fixed, and fixed by removing
+ * the counter rather than by remembering to decrement it.
+ *
+ * Stock is DERIVED from the batches, never stored:
+ *
+ *     left = purchased − Σ (what every batch drew from this lot)
+ *
+ * A stored counter has to be decremented on create, incremented on delete,
+ * and adjusted on edit; miss any one of those and it drifts, silently, with
+ * no way to tell that it has. Deriving makes deleting a batch put its
+ * components back for free, and makes the number on screen impossible to
+ * disagree with the records it came from.
+ *
+ * Brass is different in kind and is modelled differently. Cases are not
+ * consumed, they are COMMITTED: loaded into a batch, then returned to the
+ * pool when that batch is fired. So brass tracks how many are sitting loaded
+ * rather than how many are gone.
+ * ========================================================================*/
+
+/** What one batch draws, in natural units. Powder is in grains: the measured
+ *  charge if it was weighed, otherwise the recipe's target. */
+function batchDraw(b) {
+  const r = recipeOf(b);
+  const n = Math.max(0, +b.qty || 0);
+  const charge = +b.chargeActual || (r ? +r.charge : 0) || 0;
+  return { rounds: n, bullets: n, primers: n, powderGr: n * charge, cases: n };
+}
+
+/** Convert grains into whatever unit a powder lot was bought in. Powder sold
+ *  by weight is the only place the unit actually varies. */
+function powderInLotUnit(grains, lot) {
+  return lot && lot.unit === 'lb' ? grains / GRAINS_PER_LB : grains;
+}
+
+/** Everything drawn from one component lot, in that lot's own unit.
+ *  `exceptBatch` lets a form ask "what would be left if this batch changed?" */
+function lotUsed(lot, exceptBatch) {
+  let used = 0;
+  for (const b of DB.batches) {
+    if (exceptBatch && b.id === exceptBatch) continue;
+    const d = batchDraw(b);
+    if (lot.kind === 'bullet' && b.bulletLot === lot.id) used += d.bullets;
+    if (lot.kind === 'primer' && b.primerLot === lot.id) used += d.primers;
+    if (lot.kind === 'powder' && b.powderLot === lot.id) used += powderInLotUnit(d.powderGr, lot);
+  }
+  return used;
+}
+
+const lotLeft = (lot, exceptBatch) =>
+  (+lot.qty || 0) - lotUsed(lot, exceptBatch);
+
+/** Batches that drew on this lot, newest first — so "where did it go?" is one
+ *  tap away rather than an inference. */
+const batchesUsing = (lot) => DB.batches.filter(b =>
+  (lot.kind === 'bullet' && b.bulletLot === lot.id) ||
+  (lot.kind === 'powder' && b.powderLot === lot.id) ||
+  (lot.kind === 'primer' && b.primerLot === lot.id))
+  .slice().sort((a, b) => (a.date < b.date ? 1 : -1));
+
+/** Cases sitting in loaded, unfired rounds. They are not gone — firing a
+ *  batch returns them to the pool as once-more-fired brass. */
+const brassCommitted = (lot, exceptBatch) => DB.batches
+  .filter(b => b.brassLot === lot.id && b.id !== exceptBatch)
+  .reduce((s, b) => s + Math.max(0, +b.remaining || 0), 0);
+
+const brassAvailable = (lot, exceptBatch) =>
+  (+lot.qty || 0) - brassCommitted(lot, exceptBatch);
+
+/** How many more rounds of a given charge the powder on hand will make.
+ *  The number a reloader actually wants: "have I enough for Saturday?" */
+function roundsLeftFromPowder(lot, chargeGr) {
+  const c = +chargeGr;
+  if (!lot || !(c > 0)) return null;
+  const grLeft = lot.unit === 'lb' ? lotLeft(lot) * GRAINS_PER_LB : lotLeft(lot);
+  return Math.max(0, Math.floor(grLeft / c));
+}
+
+/** The most rounds the currently-selected lots can actually make. Drives both
+ *  the live preview on the batch form and the refusal below. */
+function maxRoundsFor(d, exceptBatch) {
+  const at = (id) => byId(DB.componentLots, id);
+  const r = byId(DB.recipes, d.recipe);
+  const charge = +d.chargeActual || (r ? +r.charge : 0) || 0;
+  const caps = [];
+  const bl = at(d.bulletLot), pr = at(d.primerLot), pw = at(d.powderLot);
+  const br = byId(DB.brassLots, d.brassLot);
+  if (bl) caps.push({ what: `${bl.name} bullets`, n: Math.floor(lotLeft(bl, exceptBatch)) });
+  if (pr) caps.push({ what: `${pr.name} primers`, n: Math.floor(lotLeft(pr, exceptBatch)) });
+  if (pw && charge > 0) caps.push({ what: `${pw.name} powder`,
+    n: roundsLeftFromPowder(pw, charge) ?? Infinity });
+  if (br) caps.push({ what: `${br.serial} cases`, n: Math.floor(brassAvailable(br, exceptBatch)) });
+  if (!caps.length) return null;
+  const worst = caps.reduce((a, c) => (c.n < a.n ? c : a));
+  return { max: Math.max(0, worst.n), limiter: worst.what, caps, charge };
+}
+
+/** A consumption line, ready to render, for the live preview. */
+function drawPreview(d, exceptBatch) {
+  const at = (id) => byId(DB.componentLots, id);
+  const r = byId(DB.recipes, d.recipe);
+  const n = Math.max(0, +d.qty || 0);
+  const charge = +d.chargeActual || (r ? +r.charge : 0) || 0;
+  const rows = [];
+  const line = (lot, need, unit) => {
+    if (!lot) return;
+    const left = lotLeft(lot, exceptBatch);
+    rows.push({ name: lot.name, need, unit, left, after: left - need, short: need > left + 1e-9 });
+  };
+  line(at(d.bulletLot), n, 'ea');
+  line(at(d.primerLot), n, 'ea');
+  const pw = at(d.powderLot);
+  if (pw) {
+    const grains = n * charge;
+    const need = powderInLotUnit(grains, pw);
+    const left = lotLeft(pw, exceptBatch);
+    rows.push({ name: pw.name, need, unit: pw.unit === 'lb' ? 'lb' : 'gr', left,
+                after: left - need, short: need > left + 1e-9, grains });
+  }
+  const br = byId(DB.brassLots, d.brassLot);
+  if (br) {
+    const avail = brassAvailable(br, exceptBatch);
+    rows.push({ name: `${br.serial} cases`, need: n, unit: 'ea', left: avail,
+                after: avail - n, short: n > avail, brass: true });
+  }
+  return { rows, charge, n };
+}
+
 function brassChips(l) {
   const out = [];
   if (l.retired) out.push(['bad', 'Retired']);
@@ -505,11 +637,74 @@ function formHtml(kind, ctx) {
   // toggled on change -- re-rendering the form would reset the <select> to its
   // first option and throw away anything already typed.
   return `<form id="frm" class="card" data-kind="${kind}" novalidate>
-    ${spec.fields.map(f => f.only
-      ? `<div data-only="${f.only}" class="${f.only === shown ? '' : 'hidden'}">${fieldHtml(f, kind)}</div>`
-      : fieldHtml(f, kind)).join('')}
+    ${spec.fields.map(f => {
+      const html = f.only
+        ? `<div data-only="${f.only}" class="${f.only === shown ? '' : 'hidden'}">${fieldHtml(f, kind)}</div>`
+        : fieldHtml(f, kind);
+      // The draw preview sits immediately under "Rounds loaded", not at the
+      // foot of the form. It is the consequence of that one number, and a
+      // consequence ten fields below the cause is a consequence nobody reads.
+      return (kind === 'batch' && f.k === 'qty') ? html + '<div id="drawpv"></div>' : html;
+    }).join('')}
     <button class="btn primary wide" type="submit">Save ${esc(spec.title.toLowerCase())}</button>
   </form>`;
+}
+
+/* What this batch will take off the shelf, updated as the form is filled in.
+ *
+ * This is the whole reason the app exists shown at the moment it matters: you
+ * are deciding how many to load, and the constraint is how much powder is in
+ * the jug. Finding that out by saving and reading an error is a worse app than
+ * one that simply tells you while you are typing. */
+function drawPreviewHtml(d) {
+  const pv = drawPreview(d);
+  if (!pv.rows.length) return '';
+  const cap = maxRoundsFor(d);
+  const dp = (r) => (r.unit === 'lb' ? 3 : 0);
+  const rows = pv.rows.map(r => {
+    const col = r.short ? 'var(--bad)' : r.after / Math.max(1e-9, r.left) < 0.2 ? 'var(--warn)' : '';
+    // When short, say by HOW MUCH. "0 left" hides the size of the problem and
+    // makes a 3-round shortfall look identical to a 3000-round one.
+    const tail = r.short
+      ? `<span style="color:var(--bad)">short ${Math.abs(r.after).toFixed(dp(r))}${r.unit}</span>`
+      : `<span class="dim">→ ${r.after.toFixed(dp(r))} left</span>`;
+    return `<div class="spread tiny" style="padding:3px 0">
+      <span class="dim">${esc(r.name)}${r.brass ? ' <span class="dim">(back when fired)</span>' : ''}</span>
+      <span class="mono" ${col ? `style="color:${col}"` : ''}>
+        ${r.need.toFixed(dp(r))}${r.unit}${r.grains && r.unit === 'lb' ? ` <span class="dim">(${Math.round(r.grains)}gr)</span>` : ''}
+        ${tail}
+      </span></div>`;
+  }).join('');
+  const short = pv.rows.some(r => r.short);
+  return `<div class="rowline" style="border:1px solid ${short ? 'var(--bad)' : 'var(--line)'};border-radius:10px;padding:10px 12px;margin:2px 0 14px">
+    <div class="spread"><b class="small">This batch will use</b>
+      ${cap ? `<button type="button" class="linkish tiny mono" data-act="fillmax" data-arg="${cap.max}"
+        ${short ? 'style="color:var(--bad)"' : ''}>max ${cap.max} rounds</button>` : ''}</div>
+    <div class="mt6">${rows}</div>
+    ${cap && cap.max > 0 && !short
+      ? `<div class="tiny dim mt6">Limited by ${esc(cap.limiter)}.</div>` : ''}
+    ${short ? `<div class="tiny mt6" style="color:var(--bad)">■ Not enough on hand. Tap
+        <b>max ${cap ? cap.max : 0} rounds</b> above to load what you have, or record more stock in Inventory.</div>` : ''}
+  </div>`;
+}
+
+let lastDrawHtml = null;
+function paintDrawPreview() {
+  const host = document.getElementById('drawpv');
+  const form = document.getElementById('frm');
+  if (!host || !form) { lastDrawHtml = null; return; }
+  let html = '';
+  try { html = drawPreviewHtml(readForm(form, 'batch')); } catch (_) { html = ''; }
+  // Only touch the DOM when the numbers actually changed.
+  //
+  // This is not an optimisation. Tapping "max N rounds" blurs the count field,
+  // which fires `change`, which repainted this panel -- destroying the button
+  // between mousedown and mouseup, so the click never landed and the tap did
+  // nothing. Repainting identical HTML is never worth doing, and here it was
+  // actively breaking the control.
+  if (html === lastDrawHtml) return;
+  lastDrawHtml = html;
+  host.innerHTML = html;
 }
 
 /** Read a form into a plain object, resolving cartridge and numeric fields. */
@@ -555,6 +750,21 @@ function validate(kind, d) {
   }
   if (kind === 'component' && d.qty <= 0) return 'Quantity must be greater than zero.';
   if (kind === 'batch' && d.qty <= 0) return 'Rounds loaded must be greater than zero.';
+  if (kind === 'batch') {
+    // Refuse rather than go negative. A stock figure that can be negative is
+    // not a stock figure, and silently allowing it is how the inventory stops
+    // being worth reading.
+    const pv = drawPreview(d);
+    const short = pv.rows.filter(r => r.short);
+    if (short.length) {
+      const cap = maxRoundsFor(d);
+      const dp = (r) => (r.unit === 'lb' ? 3 : 0);
+      return `Not enough ${short.map(r => esc(r.name)).join(' and ')}. `
+        + short.map(r => `${r.name}: need ${r.need.toFixed(dp(r))}${r.unit}, `
+            + `${Math.max(0, r.left).toFixed(dp(r))}${r.unit} on hand`).join('; ')
+        + `. These lots will make ${cap ? cap.max : 0} rounds.`;
+    }
+  }
   return null;
 }
 
@@ -611,6 +821,8 @@ function render() {
       aria-current="${c.v === v ? 'page' : 'false'}">
       <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="${icon}"/></svg>
       <span>${label}</span></button>`).join('');
+
+  if (c.v === 'form' && c.arg && c.arg.kind === 'batch') paintDrawPreview();
 
   if (UI.toast) {
     const d = document.createElement('div');
@@ -927,15 +1139,34 @@ VIEWS.inventory = () => {
     const rows = lotsOf(kind);
     if (!rows.length) return '';
     return `<div class="card"><h2>${label}</h2>${rows.map(c => {
-      const pct = c.qty > 0 ? (c.remaining / c.qty) * 100 : 0;
-      const col = pct < 20 ? 'var(--bad)' : pct < 40 ? 'var(--warn)' : 'var(--brass)';
+      // Derived, not stored. See lotUsed(): purchased minus what the batches took.
+      const left = lotLeft(c);
+      const used = (+c.qty || 0) - left;
+      const pct = c.qty > 0 ? (left / c.qty) * 100 : 0;
+      const col = pct <= 0 ? 'var(--bad)' : pct < 20 ? 'var(--bad)'
+                : pct < 40 ? 'var(--warn)' : 'var(--brass)';
       const unit = c.unit === 'lb' ? ' lb' : '';
+      const dp = c.unit === 'lb' ? 3 : 0;
+      const uses = batchesUsing(c);
+      // For powder, the number a reloader actually wants is rounds, not pounds.
+      const perRecipe = c.kind !== 'powder' ? [] : DB.recipes
+        .filter(r => +r.charge > 0)
+        .map(r => `${roundsLeftFromPowder(c, r.charge)} × ${esc(r.name)}`)
+        .slice(0, 3);
       return `<div class="rowline">
         <div class="spread"><b class="small">${esc(c.name)}</b>
-          <span class="small mono">${c.remaining}${unit}</span></div>
+          <span class="small mono" style="color:${col}">${left.toFixed(dp)}${unit} left</span></div>
         <div class="capbar"><i style="width:${Math.max(0, Math.min(100, pct))}%;background:${col}"></i></div>
-        <div class="tiny dim mt4">${c.lot ? 'lot ' + esc(c.lot) + ' · ' : ''}${money2(c.cost)}
+        <div class="tiny dim mt4">${used > 0
+            ? `${used.toFixed(dp)}${unit} used across ${uses.length} batch${uses.length === 1 ? '' : 'es'} · `
+            : 'nothing loaded from this lot yet · '}${c.lot ? 'lot ' + esc(c.lot) + ' · ' : ''}${money2(c.cost)}
           for ${c.qty}${unit}${c.qty > 0 ? ' · ' + money(c.cost / c.qty) + '/' + c.unit : ''}</div>
+        ${perRecipe.length ? `<div class="tiny dim mt4">enough for ${perRecipe.join(' · ')}</div>` : ''}
+        ${left <= 0 ? '<div class="tiny mt4" style="color:var(--bad)">■ Out of stock — a batch using this lot cannot be saved</div>'
+          : pct < 20 ? '<div class="tiny mt4" style="color:var(--warn)">▲ Running low</div>' : ''}
+        ${uses.length ? `<div class="tiny dim mt4">${uses.slice(0, 4).map(b =>
+            `<button class="linkish" data-act="ammoDetail" data-arg="${b.id}">${esc(b.serial)}</button>`
+          ).join(' ')}${uses.length > 4 ? ` +${uses.length - 4}` : ''}</div>` : ''}
         <div class="mt6"><button class="btn sm danger" data-act="delComponent" data-arg="${c.id}">Delete</button></div>
       </div>`;
     }).join('')}</div>`;
@@ -1103,7 +1334,7 @@ const SAVERS = {
   },
   component: (d) => {
     DB.componentLots.push({ id: uid('cl'), serial: Serial.shortCode('C', takenSerials()),
-      kind: d.kind, name: d.name, lot: d.lot, qty: d.qty, remaining: d.qty,
+      kind: d.kind, name: d.name, lot: d.lot, qty: d.qty,
       unit: d.unit || 'ea', cost: d.cost || 0, vendor: d.vendor,
       weightGr: d.weightGr, bcG1: d.bcG1, bcG7: d.bcG7 });
     return ['nav', 'inventory', 'Component lot saved.'];
@@ -1177,6 +1408,16 @@ const ACTIONS = {
   new: (a) => { UI.marks = {}; UI.formKind = a === 'component' ? 'bullet' : null;
                 UI.cartNew = {}; go('form', { kind: a }); },
   newSessionFor: (a) => { UI.cartNew = {}; go('form', { kind: 'session', batch: a }); },
+
+  /* The app already knows the largest loadable count; making the user retype
+   * it is busywork. Tapping the figure fills the field. */
+  fillmax: (a) => {
+    const el = document.querySelector('#frm [name="qty"]');
+    if (!el) return;
+    el.value = String(Math.max(0, +a || 0));
+    el.focus();
+    paintDrawPreview();
+  },
 
   serialgo: () => doSerialLookup(),
   clearpick: () => { UI.lookup = {}; render(); },
@@ -1285,6 +1526,14 @@ document.addEventListener('change', (e) => {
     document.querySelectorAll('#frm [data-only]').forEach(d =>
       d.classList.toggle('hidden', d.dataset.only !== el.value));
   }
+  if (cur().v === 'form' && cur().arg && cur().arg.kind === 'batch') paintDrawPreview();
+});
+
+/* Typing a round count should move the numbers immediately, not on blur. */
+document.addEventListener('input', (e) => {
+  if (cur().v !== 'form' || !cur().arg || cur().arg.kind !== 'batch') return;
+  if (!e.target.closest('#frm')) return;
+  paintDrawPreview();
 });
 
 document.addEventListener('input', (e) => {

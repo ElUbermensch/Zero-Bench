@@ -260,6 +260,114 @@ section('workflow');
   ok((await page.evaluate(() => DB.batches[0].remaining)) === 50, 'rounds remaining decrements');
 }
 
+/* ==================================== components actually leave the shelf */
+section('loading a batch draws down the components');
+{
+  // State from the workflow above: 500 bullets, 8 lb H4350, 1000 primers,
+  // 100 Lapua cases, and one 60-round batch at 41.52gr already loaded.
+  const st = await page.evaluate(() => {
+    const at = k => DB.componentLots.find(c => c.kind === k);
+    return {
+      bullets: lotLeft(at('bullet')), primers: lotLeft(at('primer')),
+      powderLb: lotLeft(at('powder')),
+      cases: brassAvailable(DB.brassLots[0]),
+      committed: brassCommitted(DB.brassLots[0]),
+    };
+  });
+  ok(st.bullets === 440, `60 rounds took 60 bullets off 500 (${st.bullets} left)`);
+  ok(st.primers === 940, `...and 60 primers off 1000 (${st.primers} left)`);
+  // 60 x 41.52gr = 2491.2gr = 0.35588... lb
+  const expectLb = 8 - (60 * 41.52) / 7000;
+  ok(Math.abs(st.powderLb - expectLb) < 1e-9,
+     `...and 2491gr of powder, converted into the lot's pounds (${st.powderLb.toFixed(4)} lb left)`);
+  // 60 were loaded and a session above fired 10 of them, so 50 are still
+  // sitting loaded and 50 cases are free -- the 40 never used plus the 10 back.
+  ok(st.committed === 50 && st.cases === 50,
+     'cases are COMMITTED not consumed: 10 fired came back, 50 still sit loaded');
+
+  await page.evaluate(() => reset('inventory'));
+  await page.waitForTimeout(150);
+  const inv = await page.textContent('#view');
+  ok(inv.includes('440') && inv.includes('940'),
+     'the inventory screen shows what is left, not what was bought');
+  ok(inv.includes('used across 1 batch'), '...and says where it went');
+  ok(/enough for \d+ × 6\.5CM/.test(inv),
+     'powder is also quoted in rounds of a real recipe, which is the useful unit');
+
+  // Firing the rest of the batch returns its brass to the pool.
+  await page.evaluate(() => { const b = DB.batches[0]; b.remaining = 0; save(); });
+  ok((await page.evaluate(() => brassAvailable(DB.brassLots[0]))) === 100,
+     'firing a batch off returns its cases to the lot');
+  await page.evaluate(() => { const b = DB.batches[0]; b.remaining = 50; save(); });
+
+  // Deleting a batch must put everything back, with no restore code to forget.
+  const before = await page.evaluate(() => lotLeft(DB.componentLots.find(c => c.kind === 'bullet')));
+  await page.evaluate(() => { DB.batches = DB.batches.filter(b => b.id !== DB.batches[0].id); save(); });
+  ok((await page.evaluate(() => lotLeft(DB.componentLots.find(c => c.kind === 'bullet')))) === 500,
+     'deleting a batch returns its components, because stock is derived not stored');
+  ok(before === 440, '...having genuinely been drawn down beforehand');
+}
+
+/* ================================= the form says so before you commit to it */
+section('the batch form shows the draw while you type');
+{
+  await page.evaluate(() => reset('ammo'));
+  await page.waitForTimeout(140);
+  await tapText('New batch');
+  await page.waitForTimeout(200);
+  await fill('qty', '100');
+  await page.waitForTimeout(250);
+  const pv = await page.textContent('#drawpv');
+  ok(pv.includes('This batch will use'), 'the form shows what the batch will consume');
+  ok(pv.includes('100ea'), '...100 bullets and 100 primers');
+  // 100 x 41.5 (recipe charge, nothing measured yet) = 4150gr = 0.593 lb
+  ok(pv.includes('4150gr') || pv.includes('0.593'),
+     '...and the powder in both grains and the pounds it was bought in');
+  ok(/max \d+ rounds/.test(pv), '...and the most these lots can make');
+  ok(pv.includes('Limited by'), '...naming which component is the binding constraint');
+
+  // typing a measured charge must move the numbers
+  await fill('chargeActual', '41.52');
+  await page.waitForTimeout(250);
+  const pv2 = await page.textContent('#drawpv');
+  ok(pv2.includes('4152gr') || pv2.includes('0.593'),
+     'the measured charge replaces the recipe target in the preview');
+
+  // and asking for more than exists is refused, with the number you can have
+  await fill('qty', '2000');
+  await page.waitForTimeout(250);
+  const pv3 = await page.textContent('#drawpv');
+  ok(pv3.includes('Not enough on hand'), 'asking for more than exists is called out before saving');
+  await submit();
+  const err = await page.textContent('#view');
+  ok(err.includes('Not enough'), '...and refused on save');
+  ok(/will make \d+ rounds/.test(err), '...stating how many these lots WILL make');
+  ok((await page.evaluate(() => DB.batches.length)) === 0, '...with nothing saved');
+
+  // the number it offered must actually work
+  const cap = await page.evaluate(() => {
+    const m = document.getElementById('view').textContent.match(/will make (\d+) rounds/);
+    return m ? +m[1] : -1;
+  });
+
+  // Tapping the figure fills the field. This regressed once: blurring the
+  // count field fired `change`, which repainted the panel, which destroyed the
+  // button between mousedown and mouseup so the click never landed.
+  await fill('qty', '2000');
+  await page.waitForTimeout(250);
+  await page.click('[data-act="fillmax"]');
+  await page.waitForTimeout(250);
+  ok((await page.inputValue('[name="qty"]')) === String(cap),
+     `tapping "max ${cap} rounds" fills the count, even though tapping it blurs the field`);
+  ok(!(await page.textContent('#drawpv')).includes('Not enough'),
+     `the count it offered (${cap}) is genuinely loadable`);
+  await submit();
+  ok((await page.evaluate(() => DB.batches.length)) === 1,
+     '...and saves, so the message is an instruction rather than a complaint');
+  const leftAfter = await page.evaluate(() => lotLeft(DB.componentLots.find(c => c.kind === 'primer')));
+  ok(leftAfter === 1000 - cap, `stock lands exactly where the form said (${leftAfter} primers)`);
+}
+
 /* ============================================ failed saves leave no residue */
 section('failed saves');
 {

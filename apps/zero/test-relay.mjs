@@ -55,7 +55,7 @@ async function device(label, { seed, email } = {}) {
   await page.goto(BASE);
   await page.evaluate(s => {
     localStorage.clear();
-    if (s) localStorage.setItem('zs_sessions_v1', JSON.stringify(s));
+    if (s) localStorage.setItem('sessions_v1', JSON.stringify(s));
   }, seed || null);
   await page.reload();
   await page.waitForTimeout(600);

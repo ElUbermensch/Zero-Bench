@@ -42,7 +42,7 @@ async function shooter(email, seed) {
   page.on('pageerror', e=>errs.push(`${email}: ${e.message}`));
   await page.goto(BASE);
   await page.evaluate(({seed})=>{ localStorage.clear();
-    localStorage.setItem('zs_sessions_v1', JSON.stringify(seed)); }, {seed});
+    localStorage.setItem('sessions_v1', JSON.stringify(seed)); }, {seed});
   await page.reload(); await page.waitForTimeout(600);
   await page.fill('input[placeholder="email"]', email);
   await page.fill('input[placeholder="password"]', 'pw12345');

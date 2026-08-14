@@ -25,6 +25,10 @@ export function startMock(opts = {}) {
           batches: ['recipe_id', 'recipes'] },
     // RLS `using (true)` stand-in: reads cross user boundaries here
     publicTables: new Set(['leaderboard_profiles', 'leaderboard_entries', 'v_leaderboard']),
+    relays: new Map(),          // id -> relay
+    relayParts: new Map(),      // relayId -> Map(userId -> participant)
+    joinFails: new Map(),       // userId -> count
+    anonUsers: new Set(),       // user ids created by anonymous sign-in
   };
 
   const stamp = () => new Date(state.clock).toISOString();
@@ -39,8 +43,16 @@ export function startMock(opts = {}) {
     res.end(s);
   };
 
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
   function issue(userId, email) {
-    const access = 'at_' + randomUUID();
+    // JWT-shaped, so a client that decodes the token (rather than reading the
+    // user object) exercises a realistic path.
+    const anon = state.anonUsers.has(userId);
+    const access = [b64u({ alg: 'HS256', typ: 'JWT' }),
+                    b64u({ sub: userId, role: 'authenticated', is_anonymous: anon }),
+                    'sig'].join('.');
     const refresh = 'rt_' + randomUUID();
     state.tokens.set(access, { userId, expiresAt: state.clock + state.ttlSec * 1000 });
     state.refreshTokens.set(refresh, userId);
@@ -79,6 +91,13 @@ export function startMock(opts = {}) {
       /* ------------------------------------------------------------ auth */
       if (p === '/auth/v1/signup') {
         const id = randomUUID();
+        // No email => anonymous sign-in, exactly as @supabase/auth-js sends it.
+        if (!payload.email) {
+          state.anonUsers.add(id);
+          const s2 = issue(id, null);
+          s2.user.is_anonymous = true;
+          return json(res, 200, s2);
+        }
         state.users.set(payload.email, { id, password: payload.password });
         return json(res, 200, issue(id, payload.email));
       }
@@ -106,6 +125,90 @@ export function startMock(opts = {}) {
 
       if (p === '/auth/v1/logout') return json(res, 204, {});
 
+      /* ------------------------------------------------------------- rpc */
+      if (p.startsWith('/rest/v1/rpc/')) {
+        const fn = p.slice('/rest/v1/rpc/'.length);
+        const a = auth(req);
+        if (!a || a.expired) return json(res, 401, { message: 'JWT expired' });
+        const CODE_ALPHABET = '23456789BCDFGHJKMNPQRSTVWXZ';
+
+        if (fn === 'keepalive') return json(res, 200, stamp());
+
+        if (fn === 'create_relay') {
+          for (const r of state.relays.values()) {
+            if (r.host_id === a.userId && r.status === 'live') r.status = 'ended';
+          }
+          let code;
+          do {
+            code = Array.from({ length: 4 }, () =>
+              CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]).join('');
+          } while ([...state.relays.values()].some(r => r.status === 'live' && r.code === code));
+          const relay = { id: randomUUID(), code, host_id: a.userId,
+            host_name: payload.p_host_name || 'Shooter', title: payload.p_title || null,
+            target_name: payload.p_target_name || null,
+            distance_yd: payload.p_distance_yd || null,
+            status: 'live', started_at: stamp(), expires_at: null,
+            created_at: stamp(), updated_at: stamp() };
+          state.relays.set(relay.id, relay);
+          state.relayParts.set(relay.id, new Map([[a.userId,
+            { user_id: a.userId, name: relay.host_name, role: 'shooter', last_seen_at: stamp() }]]));
+          return json(res, 200, relay);
+        }
+
+        if (fn === 'join_relay') {
+          const fails = state.joinFails.get(a.userId) || 0;
+          if (fails >= 10) {
+            return json(res, 200, { ok: false, error: 'throttled',
+              message: 'Too many attempts. Wait a few minutes.' });
+          }
+          const code = String(payload.p_code || '').trim().toUpperCase();
+          const relay = [...state.relays.values()]
+            .find(r => r.code === code && r.status === 'live');
+          if (!relay) {
+            state.joinFails.set(a.userId, fails + 1);
+            return json(res, 200, { ok: false, error: 'not_found',
+              message: 'No live relay with that code.' });
+          }
+          const parts = state.relayParts.get(relay.id) || new Map();
+          parts.set(a.userId, { user_id: a.userId, name: payload.p_name || 'Guest',
+            role: payload.p_role === 'shooter' ? 'shooter' : 'coach', last_seen_at: stamp() });
+          state.relayParts.set(relay.id, parts);
+          return json(res, 200, { ok: true, relay });
+        }
+
+        if (fn === 'relay_state') {
+          const relay = state.relays.get(payload.p_relay);
+          const parts = state.relayParts.get(payload.p_relay);
+          if (!relay || !parts || !parts.has(a.userId)) {
+            return json(res, 403, { code: '42501', message: 'not a participant' });
+          }
+          parts.get(a.userId).last_seen_at = stamp();
+          // >= to match the migration: rows tying the cursor are re-sent, not lost
+          const since = (rows, cur) => rows.filter(x => x.created_at >= cur);
+          return json(res, 200, {
+            relay,
+            shots: since([...table('relay_shots').values()]
+              .filter(x => x.relay_id === payload.p_relay), payload.p_since_shot || ''),
+            messages: since([...table('relay_messages').values()]
+              .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || ''),
+            participants: [...parts.values()].map(x => ({ name: x.name, role: x.role,
+              last_seen_at: x.last_seen_at, is_self: x.user_id === a.userId })),
+            server_time: stamp(),
+          });
+        }
+
+        if (fn === 'end_relay') {
+          const relay = state.relays.get(payload.p_relay);
+          if (!relay || relay.host_id !== a.userId) {
+            return json(res, 403, { code: '42501', message: 'only the host can end a relay' });
+          }
+          relay.status = 'ended'; relay.ended_at = stamp();
+          return json(res, 200, null);
+        }
+
+        return json(res, 404, { message: 'no such function: ' + fn });
+      }
+
       /* ------------------------------------------------------------ rest */
       if (p.startsWith('/rest/v1/')) {
         const t = p.slice('/rest/v1/'.length);
@@ -126,6 +229,15 @@ export function startMock(opts = {}) {
             const rows2 = [...table('leaderboard_entries').values()]
               .filter(r => !r.deleted_at)
               .map(e => ({ ...e, handle: [...profs.values()].find(p => p.id === e.user_id)?.handle || 'anon' }));
+            return json(res, 200, rows2.slice(offset, offset + limit));
+          }
+
+          // relay tables are participant-scoped, not user-scoped
+          if (t === 'relay_shots' || t === 'relay_messages') {
+            const rows2 = [...table(t).values()].filter(r => {
+              const parts = state.relayParts.get(r.relay_id);
+              return parts && parts.has(a.userId);
+            });
             return json(res, 200, rows2.slice(offset, offset + limit));
           }
 
@@ -156,6 +268,20 @@ export function startMock(opts = {}) {
                 return json(res, 403, { code: '42501', message: 'RLS: not your entry' });
               }
             }
+            // Only the host may write the shot string; a coach must not be
+            // able to fabricate shots.
+            if (t === 'relay_shots') {
+              const relay = state.relays.get(row.relay_id);
+              if (!relay || relay.host_id !== a.userId) {
+                return json(res, 403, { code: '42501', message: 'only the host logs shots' });
+              }
+            }
+            if (t === 'relay_messages') {
+              const parts = state.relayParts.get(row.relay_id);
+              if (!parts || !parts.has(a.userId)) {
+                return json(res, 403, { code: '42501', message: 'not a participant' });
+              }
+            }
             if (fk && row[fk[0]]) {
               const parent = table(fk[1]).get(row[fk[0]]);
               if (!parent) {
@@ -164,6 +290,13 @@ export function startMock(opts = {}) {
                   message: `insert on "${t}" violates foreign key "${fk[0]}"`,
                 });
               }
+            }
+            if (!row.id && (t === 'relay_shots' || t === 'relay_messages')) {
+              const key = t === 'relay_shots'
+                ? [...table(t).values()].find(x => x.relay_id === row.relay_id
+                    && x.shot_no === row.shot_no && !!x.is_sighter === !!row.is_sighter)
+                : null;
+              row.id = key ? key.id : randomUUID();
             }
             const existing = table(t).get(row.id) || {};
             const merged = Object.assign({}, existing, row, {

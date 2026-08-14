@@ -43,6 +43,9 @@ const ZeroCore = (() => {
     OUTBOX_CHANGED:      'outbox:changed',      // { pending, rejected }
     OUTBOX_REJECTED:     'outbox:rejected',     // { table, ids, status, error }
     DATA_CHANGED:        'data:changed',        // { table, ids, origin }
+    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants }
+    RELAY_ENDED:         'relay:ended',         // { relayId }
+    RELAY_ERROR:         'relay:error',         // { phase, error }
   });
 
   /** Declared parent-before-child. Push and pull both walk this order, so a
@@ -242,6 +245,60 @@ const ZeroCore = (() => {
       }
       setSession(shapeSession(json));
       return { ok: true, session };
+    }
+
+    /**
+     * Anonymous sign-in: a real auth.users row on the `authenticated` role,
+     * carrying an is_anonymous JWT claim, with no email or password. This is
+     * what makes "no accounts" true for the user while leaving RLS intact.
+     *
+     * The wire format is POST /auth/v1/signup with a body containing `data`
+     * and no credentials -- taken from @supabase/auth-js, not guessed.
+     *
+     * Must be enabled in the dashboard (Auth > Providers > Anonymous), and
+     * Supabase rate-limits it to 30 per hour per IP by default.
+     */
+    async function signInAnonymously() {
+      const res = await raw('/auth/v1/signup', {
+        method: 'POST',
+        headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: {}, gotrue_meta_security: {} }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.access_token) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'signInAnonymously', error: json });
+        return { ok: false, error: json };
+      }
+      setSession(shapeSession(json));
+      return { ok: true, session };
+    }
+
+    /** True when the current session is an anonymous device rather than a
+     *  real account. Anonymous users can relay but cannot publish scores. */
+    function isAnonymous() {
+      if (!session || !session.access_token) return false;
+      // GoTrue puts is_anonymous on the user object; prefer it to picking the
+      // token apart, which depends on the token staying a readable JWT.
+      if (session.user && typeof session.user.is_anonymous === 'boolean') {
+        return session.user.is_anonymous;
+      }
+      try {
+        const payload = JSON.parse(
+          atob(session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        return payload.is_anonymous === true;
+      } catch (e) {
+        // Undecidable. Say "not anonymous": the server enforces this anyway via
+        // a restrictive policy, so the worst case is offering a publish button
+        // that fails, rather than hiding one that would have worked.
+        return false;
+      }
+    }
+
+    /** Ensure SOME identity exists, without asking the user for anything.
+     *  Relay entry points call this. */
+    async function ensureIdentity() {
+      if (isSignedIn()) return { ok: true, session };
+      return signInAnonymously();
     }
 
     /** Magic link / OTP. No password to lose, but needs mail delivery working. */
@@ -530,6 +587,18 @@ const ZeroCore = (() => {
     }
 
     /* -------------------------------------------------------- convenience */
+    /** Call a Postgres function. Relay operations are all RPCs because the
+     *  security lives in security-definer functions, not in table policies. */
+    async function rpc(fn, args) {
+      const res = await authed('/rest/v1/rpc/' + fn, {
+        method: 'POST',
+        body: JSON.stringify(args || {}),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) return { ok: false, status: res.status, error: body };
+      return { ok: true, data: body };
+    }
+
     /** Read-only query for the cross-app views. */
     async function selectView(view, query) {
       const res = await authed(`/rest/v1/${view}?${query || 'select=*'}`, { method: 'GET' });
@@ -569,6 +638,219 @@ const ZeroCore = (() => {
     const batchPerformance = (extra) =>
       selectView('v_batch_performance', 'select=*&' + (extra || ''));
 
+    /* ==================================================================
+     * Live relay client.
+     *
+     * Polling, not WebSockets, and that is the whole point. A coach's phone
+     * spends the session backgrounded; browsers throttle background timers,
+     * which stops a WebSocket heartbeat, which makes the server drop the
+     * socket -- silently, so the UI still says "connected" over a dead pipe.
+     * That is what killed the previous attempt. A plain request on resume
+     * simply works, and there is no connection to have quietly died.
+     * ================================================================== */
+    let relay = null;   // { id, code, role, name, isHost, sinceShot, sinceMsg,
+                        //   shots:Map, messages:Map, timer, stopped }
+
+    const RELAY_POLL_MS = 2500;
+    const RELAY_BACKOFF_MAX_MS = 20000;
+
+    async function createRelay(opts) {
+      const o = opts || {};
+      const id = await ensureIdentity();
+      if (!id.ok) return { ok: false, error: id.error };
+      const r = await rpc('create_relay', {
+        p_host_name: o.hostName || 'Shooter',
+        p_title: o.title || null,
+        p_target_name: o.targetName || null,
+        p_target_rings: o.targetRings || null,
+        p_distance_yd: o.distanceYd || null,
+      });
+      if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'create', error: r.error }); return r; }
+      const row = Array.isArray(r.data) ? r.data[0] : r.data;
+      startRelay({ id: row.id, code: row.code, isHost: true,
+                   name: o.hostName || 'Shooter', role: 'shooter' });
+      return { ok: true, relay: row };
+    }
+
+    async function joinRelay(code, name, role) {
+      const id = await ensureIdentity();
+      if (!id.ok) return { ok: false, error: id.error };
+      const r = await rpc('join_relay', {
+        p_code: String(code || '').trim(),
+        p_name: name || 'Guest',
+        p_role: role === 'shooter' ? 'shooter' : 'coach',
+      });
+      if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
+      // join_relay returns a RESULT, not an exception: a bad code is ok:false,
+      // which is how the server-side throttle can record the failed attempt.
+      const d = r.data || {};
+      if (!d.ok) return { ok: false, reason: d.error, message: d.message };
+      startRelay({ id: d.relay.id, code: d.relay.code, isHost: false,
+                   name: name || 'Guest', role: role === 'shooter' ? 'shooter' : 'coach' });
+      return { ok: true, relay: d.relay };
+    }
+
+    function startRelay(meta) {
+      stopRelay();
+      relay = Object.assign({
+        sinceShot: '1970-01-01T00:00:00Z',
+        sinceMsg: '1970-01-01T00:00:00Z',
+        shots: new Map(), messages: new Map(), participants: [],
+        backoff: RELAY_POLL_MS, stopped: false, timer: null,
+      }, meta);
+      pumpRelay();
+      attachRelayResume();
+      return relay;
+    }
+
+    function stopRelay() {
+      if (relay && relay.timer) clearTimeout(relay.timer);
+      if (relay) relay.stopped = true;
+      detachRelayResume();
+      relay = null;
+    }
+
+    async function pollRelayOnce() {
+      if (!relay || relay.stopped) return { ok: false, reason: 'no-relay' };
+      const r = await rpc('relay_state', {
+        p_relay: relay.id,
+        p_since_shot: relay.sinceShot,
+        p_since_msg: relay.sinceMsg,
+      });
+      if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'poll', error: r.error }); return r; }
+      const st = r.data || {};
+
+      /* Dedupe by id, because relay_state uses a >= cursor: rows sharing the
+       * boundary timestamp are deliberately re-sent rather than dropped. */
+      (st.shots || []).forEach(x => relay.shots.set(x.id, x));
+      (st.messages || []).forEach(m => relay.messages.set(m.id, m));
+      relay.participants = st.participants || [];
+
+      const maxOf = (rows, cur) => rows.reduce(
+        (m, x) => (x.created_at > m ? x.created_at : m), cur);
+      relay.sinceShot = maxOf(st.shots || [], relay.sinceShot);
+      relay.sinceMsg = maxOf(st.messages || [], relay.sinceMsg);
+
+      const shots = [...relay.shots.values()]
+        .sort((a, b) => (a.is_sighter === b.is_sighter)
+          ? a.shot_no - b.shot_no : (a.is_sighter ? -1 : 1));
+      const messages = [...relay.messages.values()]
+        .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+
+      emit(EVENTS.RELAY_STATE, {
+        relay: st.relay, shots, messages,
+        participants: relay.participants, serverTime: st.server_time,
+      });
+
+      if (st.relay && st.relay.status === 'ended') {
+        emit(EVENTS.RELAY_ENDED, { relayId: relay.id });
+        stopRelay();
+      }
+      return { ok: true, shots, messages };
+    }
+
+    async function pumpRelay() {
+      if (!relay || relay.stopped) return;
+      const r = await pollRelayOnce();
+      if (!relay || relay.stopped) return;
+      // Back off on failure so a dead network does not hammer the API, and
+      // snap back to the normal cadence the moment a poll succeeds.
+      relay.backoff = r.ok ? RELAY_POLL_MS
+        : Math.min(RELAY_BACKOFF_MAX_MS, Math.round(relay.backoff * 1.8));
+      relay.timer = setTimeout(pumpRelay, relay.backoff);
+    }
+
+    /* Resume immediately when the tab comes back or the network returns,
+     * rather than waiting out a backoff the user cannot see. */
+    let relayResumeHandler = null;
+    function attachRelayResume() {
+      if (typeof document === 'undefined' || relayResumeHandler) return;
+      relayResumeHandler = () => {
+        if (!relay || relay.stopped) return;
+        if (typeof document !== 'undefined' && document.hidden) return;
+        if (relay.timer) clearTimeout(relay.timer);
+        relay.backoff = RELAY_POLL_MS;
+        pumpRelay();
+      };
+      document.addEventListener('visibilitychange', relayResumeHandler);
+      if (typeof window !== 'undefined') window.addEventListener('online', relayResumeHandler);
+    }
+    function detachRelayResume() {
+      if (!relayResumeHandler) return;
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', relayResumeHandler);
+      }
+      if (typeof window !== 'undefined') window.removeEventListener('online', relayResumeHandler);
+      relayResumeHandler = null;
+    }
+
+    /** Host only: mirror a shot into the relay. Fire and forget -- a failure
+     *  here must never block logging the shot locally. */
+    async function relayPushShot(shot) {
+      if (!relay || !relay.isHost) return { ok: false, reason: 'not-host' };
+      const res = await authed('/rest/v1/relay_shots?on_conflict=relay_id,shot_no,is_sighter', {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+        body: JSON.stringify([{
+          relay_id: relay.id,
+          shot_no: shot.shotNo,
+          ring: shot.ring == null ? null : String(shot.ring),
+          x_in: shot.x, y_in: shot.y,
+          is_sighter: !!shot.isSighter,
+          note: shot.note || null,
+        }]),
+      });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.RELAY_ERROR, { phase: 'push-shot', error });
+        return { ok: false, error };
+      }
+      pokeRelay();
+      return { ok: true };
+    }
+
+    async function relaySend(body, kind) {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      const text = String(body || '').trim();
+      if (!text) return { ok: false, reason: 'empty' };
+      const res = await authed('/rest/v1/relay_messages', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify([{
+          relay_id: relay.id, author_name: relay.name,
+          kind: kind === 'wind' ? 'wind' : 'chat', body: text.slice(0, 500),
+        }]),
+      });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.RELAY_ERROR, { phase: 'send', error });
+        return { ok: false, error };
+      }
+      pokeRelay();
+      return { ok: true };
+    }
+
+    /** Poll now rather than waiting for the next tick, so your own writes
+     *  appear immediately instead of up to 2.5s later. */
+    function pokeRelay() {
+      if (!relay || relay.stopped) return;
+      if (relay.timer) clearTimeout(relay.timer);
+      relay.timer = setTimeout(pumpRelay, 120);
+    }
+
+    async function endRelay() {
+      if (!relay || !relay.isHost) return { ok: false, reason: 'not-host' };
+      const r = await rpc('end_relay', { p_relay: relay.id });
+      stopRelay();
+      return r;
+    }
+
+    const relayInfo = () => (relay
+      ? { id: relay.id, code: relay.code, isHost: relay.isHost,
+          name: relay.name, role: relay.role,
+          shotCount: relay.shots.size, participants: relay.participants }
+      : null);
+
     function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }
 
     return {
@@ -579,8 +861,11 @@ const ZeroCore = (() => {
       upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected,
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
-      selectView, ballisticProfiles, batchPerformance,
+      selectView, rpc, ballisticProfiles, batchPerformance,
+      signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
+      createRelay, joinRelay, stopRelay, endRelay, pollRelayOnce,
+      relayPushShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return online; },
       get cursors() { return Object.assign({}, cursors); },

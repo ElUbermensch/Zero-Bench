@@ -316,6 +316,75 @@ section('leaderboard');
   ok(b.rejectedList().length === 0, 'the diagnostic list can be cleared');
 }
 
+/* ============================================================== live relay */
+section('live relay');
+{
+  const host = mkClient(), coach = mkClient(), stranger = mkClient();
+
+  // No sign-up call anywhere: the relay creates identities by itself.
+  const created = await host.createRelay({ hostName: 'Jaxon', title: 'Sunday league',
+    targetName: 'NRA B-8', distanceYd: 100 });
+  ok(created.ok, 'going live works with no account');
+  ok(host.isSignedIn(), '...by creating an anonymous identity behind the scenes');
+  ok(host.isAnonymous(), '...which is flagged anonymous');
+  const code = created.relay.code;
+  ok(/^[2-9BCDFGHJKMNPQRSTVWXZ]{4}$/.test(code), `the code is 4 sayable characters (${code})`);
+
+  // host logs three shots
+  for (const [n, ring, x, y] of [[1,'10',0,0],[2,'X',0.3,0.1],[3,'9',-0.55,0.2]]) {
+    await host.relayPushShot({ shotNo: n, ring, x, y });
+  }
+
+  const joined = await coach.joinRelay(code, 'Coach Dave', 'coach');
+  ok(joined.ok, 'the coach joins with the code alone');
+
+  const seen = await coach.pollRelayOnce();
+  ok(seen.ok && seen.shots.length === 3, `the coach sees the shot string (${seen.shots?.length})`);
+  ok(seen.shots[1].ring === 'X', '...in order, with ring values');
+
+  // the numbers a coach actually watches are pure point geometry
+  const pts = seen.shots.map(s2 => ({ x: +s2.x_in, y: +s2.y_in }));
+  const cx = pts.reduce((a, p2) => a + p2.x, 0) / pts.length;
+  const cy = pts.reduce((a, p2) => a + p2.y, 0) / pts.length;
+  const mr = pts.reduce((a, p2) => a + Math.hypot(p2.x - cx, p2.y - cy), 0) / pts.length;
+  ok(mr > 0 && Number.isFinite(mr), `mean radius is computable from the relayed points (${mr.toFixed(3)}")`);
+
+  // feed both ways
+  await coach.relaySend('half value from 4, hold 0.5L', 'wind');
+  await host.relaySend('seen, sending it');
+  const after = await coach.pollRelayOnce();
+  ok(after.messages.length === 2, 'the feed carries both voices');
+  ok(after.messages.some(m => m.kind === 'wind'), 'a wind call is tagged as one');
+
+  // a coach must never be able to fabricate the shooter's string
+  const forged = await coach.relayPushShot({ shotNo: 9, ring: 'X', x: 0, y: 0 });
+  ok(!forged.ok, 'a coach cannot log shots');
+
+  // a stranger with no code gets nothing
+  const guessed = await stranger.joinRelay('BBBB', 'nosy', 'coach');
+  ok(!guessed.ok && guessed.reason === 'not_found', 'a wrong code is refused');
+  for (let i = 0; i < 11; i++) await stranger.joinRelay('BBBB', 'nosy', 'coach');
+  const throttled = await stranger.joinRelay('BBBB', 'nosy', 'coach');
+  ok(throttled.reason === 'throttled', 'repeated guesses are throttled');
+
+  // dedupe: the >= cursor deliberately re-sends boundary rows
+  const before = (await coach.pollRelayOnce()).shots.length;
+  const again = await coach.pollRelayOnce();
+  ok(again.shots.length === before,
+     're-polling does not duplicate shots (the >= cursor overlap is deduped by id)');
+
+  // ending is visible to the viewer, and stops its polling
+  let endedSeen = false;
+  coach.on(coach.EVENTS.RELAY_ENDED, () => { endedSeen = true; });
+  await host.endRelay();
+  await coach.pollRelayOnce();
+  ok(endedSeen, 'the coach is told when the shooter ends the relay');
+  ok(coach.relayInfo() === null, '...and stops polling a dead relay');
+
+  const late = await stranger.joinRelay(code, 'late', 'coach');
+  ok(!late.ok, 'the code stops working once the relay ends');
+}
+
 /* ============================================================ user isolation */
 section('user isolation');
 {

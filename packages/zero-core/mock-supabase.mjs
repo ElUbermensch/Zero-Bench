@@ -152,6 +152,9 @@ export function startMock(opts = {}) {
           const relay = { id: randomUUID(), code, host_id: a.userId,
             host_name: payload.p_host_name || 'Shooter', title: payload.p_title || null,
             target_name: payload.p_target_name || null,
+            // The face geometry, so a viewer can draw the real paper without
+            // owning the same custom target.
+            target_rings: payload.p_target_rings || null,
             distance_yd: payload.p_distance_yd || null,
             status: 'live', started_at: stamp(), expires_at: null,
             created_at: stamp(), updated_at: stamp() };

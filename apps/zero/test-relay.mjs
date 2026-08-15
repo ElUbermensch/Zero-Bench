@@ -139,6 +139,9 @@ const relayId = [...mock.state.relays.values()][0]?.id;
 const shotsOn = () => [...(mock.state.rows.get('relay_shots')?.values() || [])]
   .filter(s => s.relay_id === relayId);
 ok(shotsOn().length === 4, `the string already fired is backfilled (${shotsOn().length})`);
+const relayRow = [...mock.state.relays.values()][0];
+ok(Array.isArray(relayRow?.target_rings?.rings) && relayRow.target_rings.rings.length > 0,
+   'the target geometry travels with the relay, so a coach can draw the real paper');
 ok(shotsOn().every(s => s.call_x_in != null),
    "every shooter's call is mirrored alongside its impact");
 
@@ -217,6 +220,13 @@ ok(bodyC1.includes('Both strings'),
 ok(bodyC1.includes('40–0X') && bodyC1.includes('36–0X'),
    '...and both scores, computed independently (40–0X and 36–0X)');
 ok(await C.page.locator('svg circle').count() >= 8, 'both strings are plotted');
+// A pair fires ONE target, so the coach gets the real paper with both strings
+// on it rather than an abstract scatter. The rings travel with the relay.
+const caption = await C.page.locator('.tcard:has-text("Both strings") svg text').last().textContent();
+ok(/\d+yd/.test(caption || ''), `the combined plot is captioned with the target and distance (${caption})`);
+const ringCount = await C.page.locator('.tcard:has-text("Both strings") svg circle').count();
+ok(ringCount > 10,
+   `the coach's combined plot draws the target face, not a bare grid (${ringCount} circles)`);
 ok(await C.page.locator('svg line[opacity="0.5"]').count() === 8,
    'a call is drawn joined to its impact, once per called shot');
 
@@ -284,6 +294,32 @@ ok(shotsOn().length === 10, `ten shots on the relay, five each (${shotsOn().leng
 await A.page.waitForTimeout(3000);
 ok(await A.page.locator('svg circle.relayed').count() === 5,
    "B's fifth shot appears on A's target");
+
+/* ══════════════════════ the partner is visible WHILE you are on the gun */
+section('a partner\'s shots show on the target you are aiming at');
+{
+  // The whole point of pair fire: their last shot is your wind call. Seeing it
+  // only after the string is over is too late to be worth anything.
+  await A.page.click('button:has-text("+ shot")');
+  await A.page.waitForTimeout(500);
+  const onTap = await A.page.locator('svg circle.relayed').count();
+  ok(onTap === 5, `the partner's five impacts are on the tap target (${onTap})`);
+
+  // and in the ring+clock view too, which is the other way in
+  await A.page.click('button:has-text("Ring + clock")');
+  await A.page.waitForTimeout(400);
+  const onClassic = await A.page.locator('svg circle.relayed').count();
+  const offFrame = await A.page.locator('svg circle.relayed-edge').count();
+  ok(onClassic === 5, `...and on the classic view's live preview (${onClassic})`);
+  // The frame is scaled to YOUR shots only, so a partner's wide one can fall
+  // outside it. It is clamped to the edge rather than dropped: you lose the
+  // exact position and keep the fact and the bearing.
+  ok(offFrame === 1,
+     `a partner shot outside the frame is marked at the edge, not dropped (${offFrame})`);
+  await A.page.screenshot({ path: 'shots/relay-shooting.png', fullPage: true });
+  await A.page.click('button.bback');          // leave without logging
+  await A.page.waitForTimeout(400);
+}
 
 /* ═══════════════════════════════════ nobody writes anybody else's string */
 section('each shooter owns exactly one string');

@@ -2630,47 +2630,68 @@ function relaySeries(shots, participants) {
  * centroid. Re-centring makes two groups easy to compare for size and lies
  * about where either of them actually sits, which is the more important fact
  * when a coach is deciding whether to call a sight change. */
-function RelayPlot({ series, yards, size }) {
+function RelayPlot({ series, yards, size, target }) {
   const SZ = size || 190, pad = 14, c = SZ / 2;
   const all = series.flatMap(s => s.stats.pts);
   if (!all.length) return null;
-  const reach = Math.max(0.5, ...all.map(p => Math.hypot(p.x, p.y)));
-  const k = (c - pad) / (reach * 1.15);
+
+  /* Both shooters of a pair fire the SAME target, so their coordinates share
+   * one frame and the honest picture is one target face with both strings on
+   * it. Where the geometry travelled with the relay, draw the real paper and
+   * scale it the way the shooter's own plot does; otherwise fall back to a
+   * bare grid, which is all an older host will have sent. */
+  const face = target && target.rings?.length ? target : null;
+  const sc = face
+    ? (SZ * 0.88) / (steppedViewRadius(face, all, { pad: 0.6, minStepIdx: 1 }) * 2)
+    : (c - pad) / (Math.max(0.5, ...all.map(p => Math.hypot(p.x, p.y))) * 1.15);
+
   return (
     <svg width="100%" viewBox={`0 0 ${SZ} ${SZ}`}
-      style={{ maxWidth: 260, display: 'block', margin: '0 auto' }}>
-      <rect width={SZ} height={SZ} fill="var(--surf2)" rx="6"/>
-      <line x1={c} y1={pad / 2} x2={c} y2={SZ - pad / 2} stroke="var(--bdr)" strokeWidth="1"/>
-      <line x1={pad / 2} y1={c} x2={SZ - pad / 2} y2={c} stroke="var(--bdr)" strokeWidth="1"/>
+      style={{ maxWidth: 280, display: 'block', margin: '0 auto',
+               background: '#1a1d27', borderRadius: 6 }}>
+      {face
+        ? <TargetFace target={face} SZ={SZ} c={c} sc={sc}/>
+        : <rect width={SZ} height={SZ} fill="var(--surf2)" rx="6"/>}
+      <line x1={c} y1={pad / 2} x2={c} y2={SZ - pad / 2}
+        stroke={face ? '#ffffff22' : 'var(--bdr)'} strokeWidth={face ? 0.5 : 1}/>
+      <line x1={pad / 2} y1={c} x2={SZ - pad / 2} y2={c}
+        stroke={face ? '#ffffff22' : 'var(--bdr)'} strokeWidth={face ? 0.5 : 1}/>
+
       {series.map(s => s.stats.mr != null && (
-        <circle key={'mr' + s.slot} cx={c + s.stats.cx * k} cy={c - s.stats.cy * k}
-          r={s.stats.mr * k} fill="none" stroke={s.color} strokeWidth="1"
-          strokeDasharray="3 3" opacity="0.6"/>
+        <circle key={'mr' + s.slot} cx={c + s.stats.cx * sc} cy={c - s.stats.cy * sc}
+          r={s.stats.mr * sc} fill="none" stroke={s.color} strokeWidth="1"
+          strokeDasharray="3 3" opacity="0.75"/>
       ))}
+
       {series.map(s => s.shots.filter(x => !x.is_sighter).map((x, i) => {
-        const px = c + (+x.x_in || 0) * k, py = c - (+x.y_in || 0) * k;
+        const px = c + (+x.x_in || 0) * sc, py = c - (+x.y_in || 0) * sc;
         return (
           <g key={s.slot + '-' + x.id}>
             {/* the call, when the shooter recorded one: hollow, joined to the
                 impact. The line IS the information. */}
             {x.call_x_in != null && (
               <>
-                <line x1={c + (+x.call_x_in) * k} y1={c - (+x.call_y_in || 0) * k}
+                <line x1={c + (+x.call_x_in) * sc} y1={c - (+x.call_y_in || 0) * sc}
                   x2={px} y2={py} stroke={s.color} strokeWidth="0.7" opacity="0.5"/>
-                <circle cx={c + (+x.call_x_in) * k} cy={c - (+x.call_y_in || 0) * k}
+                <circle cx={c + (+x.call_x_in) * sc} cy={c - (+x.call_y_in || 0) * sc}
                   r="2.5" fill="none" stroke={s.color} strokeWidth="0.9" opacity="0.7"/>
               </>
             )}
-            <circle cx={px} cy={py} r="5" fill={s.color} opacity={s.isSelf ? 0.9 : 0.7}/>
+            {/* A white ring around every impact: on a real target face the
+                shooter colours sit on top of paper that may be any colour,
+                and an unoutlined dot vanishes into the black. */}
+            <circle cx={px} cy={py} r="5" fill={s.color}
+              stroke="#ffffff" strokeWidth={face ? 1 : 0} opacity={s.isSelf ? 1 : 0.85}/>
             <text x={px} y={py + 3} textAnchor="middle"
               style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: '#1a1d27', fontWeight: 700 }}>
               {i + 1}</text>
           </g>
         );
       }))}
+
       <text x={c} y={SZ - 3} textAnchor="middle"
-        style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: 'var(--dim)' }}>
-        centre = point of aim{yards ? ` · ${yards}yd` : ''}
+        style={{ fontFamily: 'var(--fm)', fontSize: 7, fill: face ? '#ffffffaa' : 'var(--dim)' }}>
+        {face ? face.name : 'centre = point of aim'}{yards ? ` · ${yards}yd` : ''}
       </text>
     </svg>
   );
@@ -2735,7 +2756,7 @@ function RelayShotStrip({ shots, color, yards }) {
 /* One card per shooter: numbers, plot, string. Stacked rather than side by
  * side because a coach is holding a phone, and two 190px plots on a 430px
  * screen makes both of them useless. */
-function RelayShooterCard({ s, yards, dense }) {
+function RelayShooterCard({ s, yards, dense, faceOf = () => null }) {
   const yd = s.yards || yards;
   return (
     <div className="tcard" style={{ padding: '11px 13px', borderColor: s.color + '55' }}>
@@ -2747,7 +2768,7 @@ function RelayShooterCard({ s, yards, dense }) {
       </div>
       <RelayScoreRow stats={s.stats} color={s.color}/>
       {!dense && s.stats.pts.length > 0 && (
-        <div style={{ marginTop: 9 }}><RelayPlot series={[s]} yards={yards}/></div>
+        <div style={{ marginTop: 9 }}><RelayPlot series={[s]} yards={yards} target={faceOf(s)}/></div>
       )}
       {s.shots.length > 0
         ? <div style={{ marginTop: 9 }}>
@@ -2897,7 +2918,8 @@ function RelayViewer({ core, onExit }) {
           {withShots.length > 1 && (
             <div className="tcard" style={{ padding: '11px 13px' }}>
               <div className="lbl" style={{ marginBottom: 8 }}>Both strings</div>
-              <RelayPlot series={withShots} yards={relay?.distance_yd} size={230}/>
+              <RelayPlot series={withShots} yards={relay?.distance_yd} size={250}
+                target={relay?.target_rings}/>
             </div>
           )}
 
@@ -2910,7 +2932,7 @@ function RelayViewer({ core, onExit }) {
           )}
           {series.map(s => (
             <RelayShooterCard key={s.slot} s={s} yards={relay?.distance_yd}
-              dense={withShots.length > 1}/>
+              dense={withShots.length > 1} faceOf={() => relay?.target_rings}/>
           ))}
 
           <div className="tcard" style={{ padding: '11px 13px' }}>
@@ -3413,6 +3435,10 @@ export default function App() {
       hostName: name,
       title: sess.name || sess.rangeLocation || null,
       targetName: tgt?.name || null,
+      // The face itself, so a coach can draw the real paper without owning
+      // this target. A pair fires ONE target, so both strings land in one
+      // frame and the overlay is the literal picture, not an approximation.
+      targetRings: tgt ? { name: tgt.name, rings: tgt.rings, zones: tgt.zones || null } : null,
       distanceYd: +sess.rangeYards || null,
     });
     if (r.ok) bindRelay(sess, tgt);
@@ -4736,6 +4762,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
       onSave={sh=>onAddShot(sh)}
       onDone={()=>setAddingShot(false)}
       getShotCount={()=>shots.length}
+      partners={partners}
     />;
   }
 
@@ -5010,7 +5037,110 @@ function MoaGrid({ SZ, c, sc, yards }) {
 }
 
 /* ── Real-time target preview ── */
-function TargetPreview({ target, yards, ring, ringPos, clockH, clockM, priorShots, lastSavedIdx, isSighter }) {
+/* A partner's impact, drawn on the target you are both shooting.
+ *
+ * Partner shots are deliberately NOT included in the view-radius calculation:
+ * letting one of their wide shots rescale the picture would move the paper
+ * under a shooter who is mid-aim, and that is the one moment the frame has to
+ * hold still. But silently dropping what falls outside is worse -- on a shared
+ * target the wide shot is the one you most need to know about -- so an
+ * off-frame impact is clamped to the edge along its own bearing. You lose the
+ * exact position and keep the fact and the direction. */
+function RelayImpactMark({ pt, slot, i, color, SZ, c, sc, r = 4.5 }) {
+  const px = c + pt.x * sc, py = c - pt.y * sc;
+  const m = 7;
+  if (px >= m && py >= m && px <= SZ - m && py <= SZ - m) {
+    return (
+      <g key={'pp' + slot + '-' + i}>
+        <circle className="relayed" cx={px} cy={py} r={r} fill="none"
+          stroke={color} strokeWidth={1.9} strokeDasharray="3.5 2"/>
+        <text x={px} y={py + 2} textAnchor="middle" fill={color}
+          fontSize={4.5} fontFamily="Space Mono,monospace" fontWeight="700">{i + 1}</text>
+      </g>
+    );
+  }
+  const dx = px - c, dy = py - c;
+  const t = Math.min((c - m) / Math.max(Math.abs(dx), 1e-6),
+                     (c - m) / Math.max(Math.abs(dy), 1e-6));
+  const ex = c + dx * t, ey = c + dy * t;
+  return (
+    <g key={'pp' + slot + '-' + i}>
+      <circle className="relayed relayed-edge" cx={ex} cy={ey} r={3} fill={color} opacity={0.9}/>
+      <title>{`shot ${i + 1} landed outside this view`}</title>
+    </g>
+  );
+}
+
+/* The target face itself: background, zones or rings, and score labels.
+ *
+ * One implementation, used by the shooter's live preview and by the coach's
+ * relay plot. They draw the same paper and had every reason to diverge —
+ * which is exactly the kind of duplication that ends with two apps disagreeing
+ * about where the 10 ring is. */
+function TargetFace({ target, SZ, c, sc, labels = true }) {
+  if (!target || !target.rings?.length) return null;
+  const outermost = target.rings[target.rings.length - 1];
+  const bg = outermost.color || DEFAULT_RING_COLORS[outermost.score] || '#aaa';
+  return (
+    <>
+      {/* Background fill, for rings scrolled off the edge of the view */}
+      <rect x={0} y={0} width={SZ} height={SZ} fill={bg}/>
+      {/* Zone targets: true shapes worst→best so better zones paint on top,
+          mirroring the best-first hit-test order. Ring targets fall through
+          to the concentric render below. */}
+      {target.zones?.length ? [...target.zones].reverse().map((z, i) => {
+        const col = z.color || '#7a7f96';
+        const stroke = isLightColor(col) ? '#00000055' : '#ffffff55';
+        const cxp = c + (z.shape.cx||0)*sc, cyp = c - (z.shape.cy||0)*sc;
+        if (z.shape.kind === 'circle')
+          return <circle key={i} cx={cxp} cy={cyp} r={z.shape.d/2*sc} fill={col} stroke={stroke} strokeWidth={0.8}/>;
+        if (z.shape.kind === 'rect')
+          return <rect key={i} x={cxp - z.shape.w/2*sc} y={cyp - z.shape.h/2*sc}
+            width={z.shape.w*sc} height={z.shape.h*sc} rx={(z.shape.rx||0)*sc}
+            fill={col} stroke={stroke} strokeWidth={0.8}/>;
+        if (z.shape.kind === 'poly')
+          return <path key={i} d={'M'+z.shape.pts.map(([px,py])=>`${c+px*sc},${c-py*sc}`).join('L')+'Z'}
+            fill={col} stroke={stroke} strokeWidth={0.8}/>;
+        return null;
+      }) : null}
+      {/* Rings: outside-in, only those that intersect the viewport */}
+      {!target.zones?.length && [...target.rings].reverse().map((r, revIdx) => {
+        const fwdIdx = target.rings.length - 1 - revIdx;
+        const col = r.color || DEFAULT_RING_COLORS[r.score] || '#aaa';
+        const outerCol = fwdIdx < target.rings.length - 1
+          ? (target.rings[fwdIdx + 1].color || DEFAULT_RING_COLORS[target.rings[fwdIdx+1].score] || '#aaa')
+          : '#0f1117';
+        const borderCol = ringBorderColor(col, outerCol);
+        const ringW = fwdIdx > 0
+          ? (r.diam/2 - target.rings[fwdIdx-1].diam/2) * sc
+          : r.diam/2*sc;
+        const sw = Math.min(1.5, Math.max(0.5, ringW * 0.06));
+        return (
+          <circle key={r.score} cx={c} cy={c} r={r.diam / 2 * sc}
+            fill={col} stroke={borderCol} strokeWidth={sw}/>
+        );
+      })}
+      {/* Score labels, only where the band is wide enough to hold one */}
+      {labels && !target.zones?.length && target.rings.map((r, i) => {
+        const oR = r.diam / 2 * sc;
+        const iR = i > 0 ? target.rings[i-1].diam / 2 * sc : 0;
+        if (oR - iR < 8 || oR < 4) return null;
+        const labelR = (iR + oR) / 2;
+        const col = r.color || DEFAULT_RING_COLORS[r.score] || '#aaa';
+        const textCol = isLightColor(col) ? '#00000066' : '#ffffff66';
+        return (
+          <text key={r.score} x={c + labelR} y={c + 3.5}
+            textAnchor="middle" fill={textCol}
+            fontSize={Math.min(9, (oR - iR) * 0.5)}
+            fontFamily="Space Mono,monospace"
+          >{r.score}</text>
+        );
+      })}
+    </>
+  );
+}
+
+function TargetPreview({ target, yards, ring, ringPos, clockH, clockM, priorShots, lastSavedIdx, isSighter, partners }) {
   const SZ = 200;
   const c = SZ / 2;
 
@@ -5023,6 +5153,11 @@ function TargetPreview({ target, yards, ring, ringPos, clockH, clockM, priorShot
   // change the scale.
   const priorPts = (priorShots || []).map(sh => shotXY(sh, target));
   const currentPt = { x: shotR * Math.sin(ang), y: shotR * Math.cos(ang) };
+  // Partner impacts are drawn but deliberately NOT included in the view
+  // radius. A pair fires one target, so their shots belong in this frame --
+  // but letting a partner's wide shot rescale the picture would move the
+  // paper under a shooter who is mid-aim, which is the one moment the frame
+  // has to hold still.
   const viewR = steppedViewRadius(target, [...priorPts, currentPt], { pad: 0.6, minStepIdx: 1 });
   const sc = (SZ * 0.88) / (viewR * 2);
 
@@ -5066,70 +5201,20 @@ function TargetPreview({ target, yards, ring, ringPos, clockH, clockM, priorShot
         </span>
       </div>
       <svg viewBox={`0 0 ${SZ} ${SZ}`} style={{width:'100%',display:'block',background:'#1a1d27'}}>
-        {/* Outermost background fill for rings scrolled off the edge */}
-        {(() => {
-          const outermost = target.rings[target.rings.length - 1];
-          const outerCol = outermost.color || DEFAULT_RING_COLORS[outermost.score] || '#aaa';
-          return <rect x={0} y={0} width={SZ} height={SZ} fill={outerCol}/>;
-        })()}
-        {/* Zone targets: render true shapes worst→best so better zones paint
-            on top, mirroring the best-first hit-test order. Ring targets fall
-            through to the concentric render below. */}
-        {target.zones?.length ? [...target.zones].reverse().map((z, i) => {
-          const col = z.color || '#7a7f96';
-          const stroke = isLightColor(col) ? '#00000055' : '#ffffff55';
-          const cxp = c + (z.shape.cx||0)*sc, cyp = c - (z.shape.cy||0)*sc;
-          if (z.shape.kind === 'circle')
-            return <circle key={i} cx={cxp} cy={cyp} r={z.shape.d/2*sc} fill={col} stroke={stroke} strokeWidth={0.8}/>;
-          if (z.shape.kind === 'rect')
-            return <rect key={i} x={cxp - z.shape.w/2*sc} y={cyp - z.shape.h/2*sc}
-              width={z.shape.w*sc} height={z.shape.h*sc} rx={(z.shape.rx||0)*sc}
-              fill={col} stroke={stroke} strokeWidth={0.8}/>;
-          if (z.shape.kind === 'poly')
-            return <path key={i} d={'M'+z.shape.pts.map(([px,py])=>`${c+px*sc},${c-py*sc}`).join('L')+'Z'}
-              fill={col} stroke={stroke} strokeWidth={0.8}/>;
-          return null;
-        }) : null}
-        {/* Rings: outside-in, only those that intersect the viewport */}
-        {!target.zones?.length && [...target.rings].reverse().map((r, revIdx) => {
-          const fwdIdx = target.rings.length - 1 - revIdx;
-          const col = r.color || DEFAULT_RING_COLORS[r.score] || '#aaa';
-          const outerCol = fwdIdx < target.rings.length - 1
-            ? (target.rings[fwdIdx + 1].color || DEFAULT_RING_COLORS[target.rings[fwdIdx+1].score] || '#aaa')
-            : '#0f1117';
-          const borderCol = ringBorderColor(col, outerCol);
-          const ringW = fwdIdx > 0
-            ? (r.diam/2 - target.rings[fwdIdx-1].diam/2) * sc
-            : r.diam/2*sc;
-          const sw = Math.min(1.5, Math.max(0.5, ringW * 0.06));
-          return (
-            <circle key={r.score} cx={c} cy={c} r={r.diam / 2 * sc}
-              fill={col} stroke={borderCol} strokeWidth={sw}/>
-          );
-        })}
-        {/* Ring score labels — only if the band is wide enough (ring targets only) */}
-        {!target.zones?.length && target.rings.map((r, i) => {
-          const oR = r.diam / 2 * sc;
-          const iR = i > 0 ? target.rings[i-1].diam / 2 * sc : 0;
-          if (oR - iR < 8) return null;
-          // Only label if ring is at least partially visible
-          if (oR < 4) return null;
-          const labelR = (iR + oR) / 2;
-          const col = r.color || DEFAULT_RING_COLORS[r.score] || '#aaa';
-          const textCol = isLightColor(col) ? '#00000066' : '#ffffff66';
-          return (
-            <text key={r.score} x={c + labelR} y={c + 3.5}
-              textAnchor="middle" fill={textCol}
-              fontSize={Math.min(9, (oR - iR) * 0.5)}
-              fontFamily="Space Mono,monospace"
-            >{r.score}</text>
-          );
-        })}
+        <TargetFace target={target} SZ={SZ} c={c} sc={sc}/>
         {/* MOA reference grid */}
         <MoaGrid SZ={SZ} c={c} sc={sc} yards={yards}/>
         {/* Crosshair */}
         <line x1={c-6} y1={c} x2={c+6} y2={c} stroke="#ffffff22" strokeWidth={0.5}/>
         <line x1={c} y1={c-6} x2={c} y2={c+6} stroke="#ffffff22" strokeWidth={0.5}/>
+        {/* The partner's string, live. Hollow and dashed in their firing-point
+            colour so it never reads as one of yours, and excluded from every
+            statistic on this screen. Seeing it while you are on the gun is the
+            point of pair fire: their last shot is your wind call. */}
+        {(partners || []).flatMap(o => o.stats.pts.map((pt, i) => (
+          <RelayImpactMark key={'pp' + o.slot + '-' + i} pt={pt} slot={o.slot} i={i}
+            color={o.color} SZ={SZ} c={c} sc={sc}/>
+        )))}
         {/* Prior shots — fixed high-visibility color with contrast outline */}
         {prior.map((p) => {
           const sh = (priorShots||[])[p.num-1];
@@ -5216,7 +5301,7 @@ function ringBorderColor(ringCol, outerCol) {
  * optional (can skip) but the actual shot is required for save.
  */
 function TapInput({
-  target, yards, fireMode, priorShots,
+  target, yards, fireMode, priorShots, partners,
   tapXY, setTapXY,
   callXY, setCallXY,
   holdTrace, setHoldTrace,
@@ -5433,6 +5518,15 @@ function TapInput({
         <line x1={c-8} y1={c} x2={c+8} y2={c} stroke="#ffffff44" strokeWidth={0.6}/>
         <line x1={c} y1={c-8} x2={c} y2={c+8} stroke="#ffffff44" strokeWidth={0.6}/>
 
+        {/* The partner's string, live, on the target you are both shooting.
+            Full opacity where your own prior shots are dimmed to 0.35: theirs
+            is the new information. Hollow and dashed so it can never be
+            mistaken for one of yours, and outside every statistic here. */}
+        {(partners || []).flatMap(o => o.stats.pts.map((pt, i) => (
+          <RelayImpactMark key={'pp'+o.slot+'-'+i} pt={pt} slot={o.slot} i={i}
+            color={o.color} SZ={SZ} c={c} sc={sc} r={5}/>
+        )))}
+
         {/* Prior shots — dimmed */}
         {priorShots && priorShots.map((sh,i) => {
           const p = shotXY(sh, target);
@@ -5617,7 +5711,7 @@ function TapInput({
 }
 
 /* ── ShotEntry with live target preview ── */
-function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWind, lastRing, dopeSource, onBack, onSave, onDone, getShotCount }) {
+function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWind, lastRing, dopeSource, onBack, onSave, onDone, getShotCount, partners }) {
   const rings = target.rings.map(r=>r.score);
   const defaultRing = rings.includes(lastRing) ? lastRing : (rings[1]||rings[0]);
   const [inputMode, setInputMode] = useState('tap'); // 'tap' | 'classic'
@@ -5805,6 +5899,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                 step={tapStep} setStep={setTapStep}
                 tracing={tracing} setTracing={setTracing}
                 isSighter={isSighter}
+                partners={partners}
               />
             </div>
           )}
@@ -5941,6 +6036,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
               priorShots={priorShots || []}
               lastSavedIdx={lastSavedIdx}
               isSighter={isSighter}
+              partners={partners}
             />
           </div>
 

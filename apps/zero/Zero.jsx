@@ -1187,11 +1187,21 @@ const ZeroCore = (() => {
    *  lets a client clock decide conflict resolution. */
   const SERVER_OWNED = Object.freeze(['updated_at', 'created_at']);
 
-  /** Velocity summaries are derived by a database trigger from `shots`. A
-   *  client that writes them is writing a value the next shot insert erases. */
-  const DERIVED = Object.freeze({
-    range_sessions: ['velocity_avg_fps', 'velocity_sd_fps', 'velocity_es_fps', 'velocity_n'],
-  });
+  /* Columns a client must not send, because the server owns them.
+   *
+   * range_sessions' velocity summary USED to be listed here, on the reasoning
+   * that a trigger recomputes it from `shots`. That reasoning only holds for a
+   * session that HAS a shot string. Bench records a chronograph readout and no
+   * per-shot velocities at all, so stripping its summary left the session with
+   * no velocity anywhere -- and muzzle velocity is the first thing Zero reads
+   * back out of v_ballistic_profiles.
+   *
+   * The real rule is narrower than the old one: never send a summary ALONGSIDE
+   * a shot string, because then two sources of truth disagree until the trigger
+   * settles it. Zero writes the string and no summary; Bench writes the summary
+   * and no string. Both are honest, and zero-core's own suite pins that Zero
+   * still sends no summary, so this stays true by test rather than by memory. */
+  const DERIVED = Object.freeze({});
 
   /* --------------------------------------------------------------- helpers */
   const nowMs = () => Date.now();
@@ -1214,7 +1224,7 @@ const ZeroCore = (() => {
     const cfg = Object.assign({
       url: null,              // https://<ref>.supabase.co
       anonKey: null,
-      appId: 'unknown',       // 'zero' | 'Bench' — lands in source_app
+      appId: 'unknown',       // 'zero' or 'bench' — lands in source_app
       tables: TABLES,
       storage: null,          // injectable; defaults to localStorage or memory
       fetch: (globalThis.fetch ? globalThis.fetch.bind(globalThis) : null),

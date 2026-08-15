@@ -21,7 +21,7 @@ const memStore = () => {
 
 const mock = await startMock({ ttlSec: 3600 });
 const mkClient = (store, extra = {}) => ZeroCore.create(Object.assign({
-  url: mock.url, anonKey: 'anon-key-public', appId: 'Bench',
+  url: mock.url, anonKey: 'anon-key-public', appId: 'bench',
   storage: store || memStore(), pageSize: 2,
 }, extra));
 
@@ -148,8 +148,8 @@ section('server-owned and derived columns');
     occurred_on: '2026-08-13',
     updated_at: '1999-01-01T00:00:00Z',      // a client trying to set the clock
     created_at: '1999-01-01T00:00:00Z',
-    velocity_avg_fps: 9999,                   // derived by a database trigger
-    velocity_es_fps: 9999,
+    velocity_avg_fps: 2705,                   // see the note below
+    velocity_es_fps: 20,
     source_app: 'zero',
   });
   await c.sync({ trigger: 'test' });
@@ -161,9 +161,14 @@ section('server-owned and derived columns');
 
   ok(!('updated_at' in sent), 'client-supplied updated_at is never transmitted');
   ok(!('created_at' in sent), 'client-supplied created_at is never transmitted');
-  ok(!('velocity_avg_fps' in sent), 'trigger-derived velocity columns are never transmitted');
-  ok(!('velocity_es_fps' in sent), '...including velocity ES');
   ok(sent.source_app === 'zero', 'ordinary columns are transmitted untouched');
+  // Velocity summaries used to be stripped here as trigger-derived. They are
+  // not any more: Bench has a chronograph readout and no shot string, so a
+  // client-side strip left those sessions with no velocity at all and no
+  // trigger to supply one. The authority question moved to where it can
+  // actually be answered -- migration 0005, which can see whether shots exist.
+  ok(sent.velocity_avg_fps === 2705 && sent.velocity_es_fps === 20,
+     'velocity summaries are transmitted; the server decides whether to keep them');
   ok(saved.updated_at === new Date(mock.state.clock).toISOString(),
      'the stored updated_at is the server stamp');
 }
@@ -456,6 +461,36 @@ section('pair fire — two shooters and a coach');
   await a.endRelay();
   const lateShot = await b.relayPushShot({ shotNo: 3, ring: '9', x: 0, y: 0 });
   ok(!lateShot.ok, 'an ended relay accepts no further shots');
+}
+
+/* ================================== the velocity summary has one author */
+section('a chronograph summary survives the trip');
+{
+  const c = mkClient();
+  await c.signUp('vel@example.com', 'pw12345');
+
+  // Bench's shape: a chronograph readout and no shots. Nothing on the server
+  // can derive the summary for such a session, so if the client drops it the
+  // velocity is gone for good -- and with it muzzle_velocity_fps on every
+  // ballistic profile built from that batch. This is the regression that a
+  // client-side "velocity is always derived" rule caused.
+  const bid = c.upsert('range_sessions', { occurred_on: '2026-08-02', source_app: 'bench',
+    velocity_avg_fps: 2712, velocity_sd_fps: 7.4, velocity_es_fps: 20, velocity_n: 10 });
+  await c.sync({ trigger: 'test' });
+  const row = (mock.state.lastPush['range_sessions'] || []).find(r => r.id === bid);
+  ok(row && row.velocity_avg_fps === 2712,
+     'a chronograph summary reaches the server when there is no shot string to derive it from');
+  ok(row && row.velocity_sd_fps === 7.4 && row.velocity_n === 10,
+     '...including the spread, which is what drives vertical dispersion');
+
+  // Zero's shape still works, and the summary it does not set stays unset --
+  // the client invents nothing, it only declines to censor.
+  const sid = c.upsert('range_sessions', { occurred_on: '2026-08-01', source_app: 'zero' });
+  c.upsert('shots', { session_id: sid, shot_no: 1, velocity_fps: 2710 });
+  await c.sync({ trigger: 'test' });
+  const zeroRow = (mock.state.lastPush['range_sessions'] || []).find(r => r.id === sid);
+  ok(zeroRow && !('velocity_avg_fps' in zeroRow),
+     'a session that was never given a summary does not acquire one in transit');
 }
 
 /* ============================================================ user isolation */

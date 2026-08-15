@@ -102,6 +102,17 @@ const Store = (() => {
   };
 })();
 
+/* One zero-core instance per configured backend, or null when Bench is
+ * local-only. Everything below has to work with null: local-only is not a
+ * degraded mode, it is how the app shipped and how most of it still runs. */
+const CORE = (() => {
+  try {
+    if (!SHARED_SUPABASE?.url || !SHARED_SUPABASE?.anonKey) return null;
+    return ZeroCore.create({ url: SHARED_SUPABASE.url, anonKey: SHARED_SUPABASE.anonKey,
+                             appId: 'bench' });
+  } catch (e) { return null; }
+})();
+
 /* --------------------------------------------------------------------------
  * Data model
  * ------------------------------------------------------------------------*/
@@ -931,6 +942,7 @@ const TITLES = {
   firearms: ['Firearms', ''],
   settings: ['Marking scheme', ''],
   data: ['Data', 'backup and reset'],
+  sync: ['Cloud sync', 'shared with Zero'],
   form: ['', ''],
 };
 
@@ -1286,6 +1298,8 @@ VIEWS.more = () => [
   ['recipes', 'Recipes', `${DB.recipes.length} load specification${DB.recipes.length === 1 ? '' : 's'}`],
   ['firearms', 'Firearms', `${DB.firearms.length} recorded`],
   ['settings', 'Marking scheme', `${scheme().positions.length} positions · ${schemeCapacity()} codes`],
+  ...(CORE ? [['sync', 'Cloud sync',
+    CORE.isSignedIn() ? `signed in as ${CORE.getUser()?.email || 'you'}` : 'not signed in']] : []),
   ['data', 'Data', Store.persistent ? 'saved on this device' : 'not persisting — export to keep'],
 ].map(([v, t, s]) => `<button class="listitem" data-act="nav" data-arg="${v}">
     <span class="grow"><span class="ttl">${t}</span><span class="sub">${esc(s)}</span></span>
@@ -1423,6 +1437,71 @@ VIEWS.settings = () => {
   </div>`;
 };
 
+/* ------------------------------------------------------------ cloud sync */
+VIEWS.sync = () => {
+  if (!CORE) return empty('No backend is configured in this build, so Bench stores everything on this device.');
+  const st = UI.sync || {};
+  const signedIn = CORE.isSignedIn();
+
+  if (!signedIn) {
+    return `<div class="card">
+      <h2>Sign in</h2>
+      <p class="small muted">One account for Bench and Zero. Your batches become
+        selectable loads in Zero, and the groups they shoot come back here.</p>
+      <label class="f"><span>Email</span>
+        <input type="email" id="sy-email" autocapitalize="none" autocomplete="username"></label>
+      <label class="f"><span>Password</span>
+        <input type="password" id="sy-pw" autocomplete="current-password"></label>
+      <div class="row g8 mt10">
+        <button class="btn primary" data-act="syIn" style="flex:1">Sign in</button>
+        <button class="btn" data-act="syUp" style="flex:1">Create account</button>
+      </div>
+      ${st.err ? `<div class="banner bad mt10"><div class="small">${esc(st.err)}</div></div>` : ''}
+      <p class="tiny dim mt10">Offline writes queue and go on the next sync, so a
+        bench with no signal is not a bench that loses work.</p>
+    </div>`;
+  }
+
+  const pending = CORE.pendingCount();
+  const rejected = CORE.rejectedList ? CORE.rejectedList() : [];
+  const blocked = st.blocked || [];
+  return `<div class="card">
+    <div class="spread"><b class="small">${esc(CORE.getUser()?.email || 'signed in')}</b>
+      <button class="btn sm" data-act="syOut">Sign out</button></div>
+    <div class="tiny dim mt6">${pending ? `${pending} record${pending === 1 ? '' : 's'} waiting to send`
+      : 'everything sent'}${st.at ? ` · last sync ${st.at}` : ''}</div>
+    <button class="btn primary wide mt10" data-act="sySync" ${st.busy ? 'disabled' : ''}>
+      ${st.busy ? 'Syncing…' : '⇅ Sync now'}</button>
+    ${st.msg ? `<div class="banner ${st.ok ? 'ok' : 'bad'} mt10"><div class="small">${esc(st.msg)}</div></div>` : ''}
+  </div>
+
+  ${blocked.length ? `<div class="card"><h2>Not sent</h2>
+    <p class="small muted">These could not be represented in the shared schema. Everything
+      else went; one record never strands the rest.</p>
+    ${blocked.map(b => `<div class="rowline">
+      <div class="small">${esc(b.what)}</div>
+      <div class="tiny" style="color:var(--warn)">${esc(b.why)}</div></div>`).join('')}
+  </div>` : ''}
+
+  ${rejected.length ? `<div class="card"><h2>Refused by the server</h2>
+    <p class="small muted">Dropped from the queue so it keeps moving. These will not retry.</p>
+    ${rejected.slice(0, 8).map(r => `<div class="rowline"><div class="tiny mono">${esc(r.table)}</div>
+      <div class="tiny dim">${esc(String(r.error || '').slice(0, 160))}</div></div>`).join('')}
+    <button class="btn sm mt10" data-act="syClearRej">Clear</button>
+  </div>` : ''}
+
+  <div class="card"><h2>What goes up</h2>
+    <div class="tiny dim" style="line-height:1.6">
+      Firearms, component lots, brass lots, recipes, batches and range sessions —
+      mapped onto the schema Zero reads. A component lot becomes two rows there,
+      a product and a purchase, because a recipe references the product while it
+      is the purchase that runs out.<br><br>
+      Your marking scheme travels too, so a colour code means the same thing on
+      every device you sign in on.
+    </div>
+  </div>`;
+};
+
 VIEWS.data = () => {
   const counts = [['Cartridges', DB.cartridges.length], ['Firearms', DB.firearms.length],
     ['Component lots', DB.componentLots.length], ['Brass lots', DB.brassLots.length],
@@ -1492,6 +1571,48 @@ function doSerialLookup() {
   input.classList.add('good');
   msg.innerHTML = '';
   go(found[0], found[1]);
+}
+
+/* Sign in / create account. Kept out of ACTIONS so the async flow reads in one
+ * place rather than inside an object literal. */
+async function doAuth(mode) {
+  const email = (document.getElementById('sy-email') || {}).value || '';
+  const pw = (document.getElementById('sy-pw') || {}).value || '';
+  UI.sync = { busy: true };
+  const r = mode === 'up' ? await CORE.signUp(email.trim(), pw)
+                          : await CORE.signIn(email.trim(), pw);
+  UI.sync = r.ok
+    ? (r.needsConfirmation ? { err: 'Account created — confirm the email, then sign in.' } : {})
+    : { err: r.error?.msg || r.error?.error_description || r.error?.message || 'Sign-in failed.' };
+  render();
+}
+
+/* Map the whole bench onto the shared schema, queue it, and push.
+ *
+ * Remote ids are assigned onto the local records and SAVED FIRST. If the
+ * network step ran before the save, a retry would mint fresh ids and duplicate
+ * every row on the server — the same trap Zero's sync had to avoid. */
+async function doSync() {
+  if (!CORE || !CORE.isSignedIn()) return;
+  UI.sync = { ...(UI.sync || {}), busy: true, msg: null };
+  render();
+  try {
+    const { queued, blocked } = BenchSync.push(CORE, DB, lotLeft);
+    save();                                   // ids first, network second
+    const r = await CORE.sync({ trigger: 'manual' });
+    UI.sync = {
+      busy: false, blocked,
+      ok: r.ok,
+      at: new Date().toLocaleTimeString(),
+      msg: r.ok
+        ? `Sent ${queued} record${queued === 1 ? '' : 's'}, pulled ${r.stats.pulled}.`
+          + (blocked.length ? ` ${blocked.length} could not be represented — see below.` : '')
+        : 'Sync failed: ' + r.reason,
+    };
+  } catch (e) {
+    UI.sync = { busy: false, ok: false, msg: 'Sync failed: ' + (e?.message || e) };
+  }
+  render();
 }
 
 /* Creation: exactly one save path per kind. */
@@ -1603,6 +1724,12 @@ const ACTIONS = {
     el.focus();
     paintDrawPreview();
   },
+
+  syIn:  () => doAuth('in'),
+  syUp:  () => doAuth('up'),
+  syOut: () => { CORE.signOut(); UI.sync = {}; render(); },
+  syClearRej: () => { CORE.clearRejected && CORE.clearRejected(); render(); },
+  sySync: () => doSync(),
 
   serialgo: () => doSerialLookup(),
   clearpick: () => { UI.lookup = {}; render(); },

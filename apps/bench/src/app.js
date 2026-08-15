@@ -227,6 +227,9 @@ const save = () => Store.save(DB);
 const scheme = () => DB.meta.scheme;
 
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
+/* 41.2 + 0.3 is 41.499999999999996 in binary floating point, and a charge
+ * weight printed to fifteen places on a box label is not a charge weight. */
+const round3 = (n) => Math.round((+n || 0) * 1000) / 1000;
 const byId = (arr, id) => arr.find(x => x.id === id) || null;
 const takenSerials = () => new Set([
   ...DB.brassLots.map(x => x.serial),
@@ -885,6 +888,30 @@ const FORMS = {
     { k: 'note', l: 'Note', t: 'area' },
   ]},
 
+  /* A ladder is N batches on one recipe. Building them one at a time meant N
+   * trips through the batch form -- or, before batches could carry their own
+   * charge, N fully-cited recipes. */
+  ladder: { title: 'Ladder', fields: [
+    { k: 'brassLot', l: 'Brass lot', t: 'ref', req: true,
+      ref: () => DB.brassLots.filter(l => !l.retired),
+      label: l => `${l.serial} — ${l.headstamp} (${brassLife(l).mean.toFixed(1)}f, ${brassAvailable(l)} free)` },
+    { k: 'bulletLot', l: 'Bullet lot', t: 'ref', req: true, ref: () => lotsOf('bullet'),
+      label: l => l.name + (l.lot ? ` — ${l.lot}` : '') },
+    { k: 'powderLot', l: 'Powder lot', t: 'ref', req: true, ref: () => lotsOf('powder'),
+      label: l => l.name + (l.lot ? ` — ${l.lot}` : '') },
+    { k: 'primerLot', l: 'Primer lot', t: 'ref', req: true, ref: () => lotsOf('primer'),
+      label: l => l.name + (l.lot ? ` — ${l.lot}` : '') },
+    { k: 'date', l: 'Date loaded', t: 'date' },
+    { k: 'axis', l: 'Vary', t: 'select', opts: [
+      ['charge', 'Charge weight'], ['cbto', 'Seating depth (CBTO)']] },
+    { k: 'start', l: 'Start at', t: 'num', req: true, step: '0.001',
+      hint: 'Grains for a charge ladder, inches for a seating test.' },
+    { k: 'step', l: 'Step', t: 'num', req: true, step: '0.001', def: 0.3 },
+    { k: 'steps', l: 'Rungs', t: 'num', req: true, def: 8 },
+    { k: 'perStep', l: 'Rounds per rung', t: 'num', req: true, def: 3 },
+    { k: 'storage', l: 'Storage', t: 'text' },
+  ]},
+
   anneal: { title: 'Anneal', fields: [
     { k: 'date', l: 'Date annealed', t: 'date' },
     { k: 'note', l: 'Note', t: 'text', ph: 'AMP setting 118 / 6 sec' },
@@ -1195,6 +1222,29 @@ function validate(kind, d, editId) {
     if (d.n > free) {
       return `Only ${free} case${free === 1 ? '' : 's'} are free — `
         + `${brassCommitted(l)} are inside loaded rounds. Fire or pull those first.`;
+    }
+  }
+  if (kind === 'ladder') {
+    const steps = Math.round(+d.steps || 0), per = Math.round(+d.perStep || 0);
+    if (steps < 2) return 'A ladder needs at least two rungs.';
+    if (steps > 40) return 'Forty rungs is the limit — a ladder that long is a different experiment.';
+    if (per < 1) return 'Each rung needs at least one round.';
+    if (!(Math.abs(+d.step) > 0)) return 'A step of zero would build the same load N times.';
+    // Check the WHOLE ladder against stock, not one rung. Discovering on rung
+    // six that the powder ran out leaves five orphan batches and a serial gap.
+    const rr = byId(DB.recipes, (cur().arg || {}).recipe);
+    const worst = d.axis === 'cbto'
+      ? (rr ? +rr.charge : 0)
+      : Math.max(+d.start || 0, (+d.start || 0) + (steps - 1) * (+d.step || 0));
+    const pv = drawPreview({ recipe: (cur().arg || {}).recipe, brassLot: d.brassLot,
+      bulletLot: d.bulletLot, powderLot: d.powderLot, primerLot: d.primerLot,
+      qty: steps * per, chargeActual: worst });
+    const short = pv.rows.filter(x => x.short);
+    if (short.length) {
+      const dp = (x) => (x.unit === 'lb' ? 3 : 0);
+      return `${steps} rungs of ${per} is ${steps * per} rounds, and there is not enough `
+        + short.map(x => `${x.name} (short ${Math.abs(x.after).toFixed(dp(x))}${x.unit})`).join(' or ')
+        + '. Nothing was built.';
     }
   }
   if (kind === 'batch' && d.qty <= 0) return 'Rounds loaded must be greater than zero.';
@@ -1749,12 +1799,130 @@ VIEWS.recipes = () => {
         <span class="sub mt5">${over ? '<span class="chip bad">Over max</span> ' : ''}
           <span class="chip neutral">${esc(r.source)}</span></span>
         <span class="mt6" style="display:block">
+          <button class="btn sm" data-act="workup" data-arg="${r.id}">Workup</button>
+          <button class="btn sm" data-act="edit" data-kind="recipe" data-arg="${r.id}">Edit</button>
           <button class="btn sm danger" data-act="delRecipe" data-arg="${r.id}">Delete</button></span>
       </span></div>`;
   }).join('') : empty('No recipes yet. A recipe records the load and, crucially, where the data came from.');
   return body + `<button class="btn primary wide" data-act="new" data-arg="recipe">+ New recipe</button>
     <div class="banner info mt12"><div class="small">This app records load data.
       It never suggests, interpolates or extrapolates a charge, and ships with none.</div></div>`;
+};
+
+/* ==========================================================================
+ * Workup — the thing a precision shooter actually does
+ *
+ * A charge ladder or a seating-depth test is one recipe fired at a range of
+ * charges or CBTOs, and the whole output is the COMPARISON: velocity climbing
+ * with charge, a flat spot where it does not, group size against seating
+ * depth, and the rung where pressure signs start. Bench recorded every one of
+ * those numbers and had nowhere to put them side by side, so the comparison
+ * happened on a notepad and the app held the data that made the notepad
+ * redundant.
+ *
+ * Rungs are batches on the same recipe. They already carry a measured charge
+ * and a measured CBTO, so a ladder needs no new record type -- just an axis to
+ * sort on and a table to read. The axis is chosen by whichever actually varies:
+ * comparing ten batches by charge when they all threw 41.5 and differ by
+ * seating depth would sort them into arrival order and tell you nothing.
+ */
+function workupRows(recipeId) {
+  const r = byId(DB.recipes, recipeId);
+  const rows = DB.batches.filter(b => b.recipe === recipeId).map(b => {
+    const ses = sessionsFor(b.id);
+    // Velocity across every session on this rung, weighted by rounds: two
+    // 5-shot strings are one 10-shot sample, not two numbers to pick between.
+    let n = 0, vsum = 0, sd = null, es = null, grp = null, gn = 0, gsum = 0;
+    let signs = 'none';
+    for (const s of ses) {
+      const k = Math.max(0, +s.rounds || 0);
+      if (s.vAvg != null && k) { vsum += (+s.vAvg) * k; n += k; }
+      if (s.vSd != null && (sd == null || k > 0)) sd = +s.vSd;
+      if (s.vEs != null) es = Math.max(es == null ? -Infinity : es, +s.vEs);
+      if (s.group != null) { gsum += +s.group; gn++; }
+      if (s.pressureSigns && s.pressureSigns !== 'none') signs = s.pressureSigns;
+    }
+    if (gn) grp = gsum / gn;
+    return { b, charge: chargeOf(b), cbto: b.cbtoMean ?? (r ? r.cbto : null),
+             vAvg: n ? vsum / n : null, n, sd, es: es === -Infinity ? null : es,
+             group: grp, groups: gn, signs, fired: roundsFired(b),
+             over: isOverMax(b) };
+  });
+  // Which axis varies? Fall back to charge, which is what a ladder usually is.
+  const spread = (k) => {
+    const vals = rows.map(x => x[k]).filter(v => v != null);
+    return vals.length ? Math.max(...vals) - Math.min(...vals) : 0;
+  };
+  const byCbto = spread('charge') === 0 && spread('cbto') > 0;
+  const axis = byCbto ? 'cbto' : 'charge';
+  rows.sort((a, b) => (a[axis] ?? 0) - (b[axis] ?? 0));
+  return { rows, axis, recipe: r };
+}
+
+VIEWS.workup = (id) => {
+  const { rows, axis, recipe: r } = workupRows(id);
+  if (!r) return `<div class="empty">That recipe no longer exists.</div>`;
+  const label = axis === 'cbto' ? 'CBTO' : 'Charge';
+  const unit = axis === 'cbto' ? '"' : ' gr';
+  const shot = rows.filter(x => x.vAvg != null);
+
+  // The flat spot: consecutive rungs where velocity barely moves. Reported as
+  // an observation with its numbers, never as a recommendation -- this app
+  // does not suggest charges, and a node found in three shots per rung is
+  // mostly noise anyway.
+  let flat = null;
+  if (axis === 'charge' && shot.length >= 3) {
+    let best = null;
+    for (let i = 1; i < shot.length; i++) {
+      const dC = shot[i].charge - shot[i - 1].charge;
+      if (!(dC > 0)) continue;
+      const rate = (shot[i].vAvg - shot[i - 1].vAvg) / dC;   // fps per grain
+      if (best == null || rate < best.rate) best = { rate, a: shot[i - 1], b: shot[i] };
+    }
+    if (best && best.rate >= 0) flat = best;
+  }
+
+  const head = `<div class="card">
+    <h2 class="m0">${esc(r.name)}</h2>
+    <div class="small muted mt3">${esc(cartName(r.cartridge))} · ${esc(r.bullet)} · ${esc(r.powder)}</div>
+    <div class="tiny dim mt6">${rows.length} rung${rows.length === 1 ? '' : 's'} on this recipe,
+      ordered by ${esc(label.toLowerCase())}${r.sourceMax > 0
+        ? ` · published max ${r.sourceMax} gr` : ' · no published maximum recorded'}.</div>
+    <div class="btnrow mt10 noprint">
+      <button class="btn primary" data-act="ladder" data-arg="${r.id}">Build a ladder</button>
+    </div>
+  </div>`;
+
+  if (!rows.length) {
+    return head + empty('Nothing loaded on this recipe yet. A ladder builds the rungs in one pass.');
+  }
+
+  const body = rows.map(x => `<button class="listitem" data-act="ammoDetail" data-arg="${x.b.id}">
+    <span class="grow">
+      <span class="ttl mono">${axis === 'cbto' ? (x.cbto ?? '—') : x.charge}${unit}${
+        x.over ? ' <span class="chip bad">over max</span>' : ''}</span>
+      <span class="sub mono">${x.vAvg != null
+        ? `${Math.round(x.vAvg)} fps${x.sd != null ? ` · SD ${x.sd}` : ''}${
+            x.es != null ? ` · ES ${x.es}` : ''}`
+        : x.fired ? 'fired, no chronograph' : 'not fired yet'}</span>
+      <span class="sub mono">${x.group != null ? `${x.group.toFixed(3)}" group${
+        x.groups > 1 ? ` (mean of ${x.groups})` : ''}` : ''}${
+        x.n ? ` <span class="dim">· ${x.n} over the screens</span>` : ''}</span>
+      <span class="sub">${esc(x.b.serial)}${x.signs !== 'none'
+        ? ` <span class="chip bad">${esc(x.signs)}</span>` : ''}</span>
+    </span><span class="chev">›</span></button>`).join('');
+
+  return head + `<div class="card"><h2>Rungs</h2>${body}
+    ${flat ? `<div class="rowline"><div class="small"><b>Flattest step:</b>
+      ${flat.a.charge} → ${flat.b.charge} gr moved ${Math.round(flat.b.vAvg - flat.a.vAvg)} fps
+      (${flat.rate.toFixed(0)} fps/gr).</div>
+      <div class="tiny dim mt4">An observation about these strings, not a recommendation.
+      With few rounds per rung the difference between a node and sampling noise is
+      not something this data can settle.</div></div>` : ''}
+    ${shot.length < rows.length
+      ? `<div class="tiny dim mt8">${rows.length - shot.length} rung${
+          rows.length - shot.length === 1 ? ' has' : 's have'} no velocity recorded yet.</div>` : ''}
+  </div>`;
 };
 
 VIEWS.firearms = () => {
@@ -2136,6 +2304,47 @@ const SAVERS = {
     return ['goDetail', ['ammoDetail', d.batch], 'Session saved — batch is no longer untested.'];
   },
 
+  /* Builds every rung in one pass. Each is a real batch with its own serial
+   * and its own label, because that is what ends up in the ammo box -- the
+   * ladder is a way of creating them, not a new kind of record.
+   *
+   * Rungs that would exceed the published maximum are created anyway and
+   * flagged, rather than silently dropped: a ladder deliberately walks toward
+   * max, and quietly building seven of the eight rungs somebody asked for is
+   * worse than building eight and saying which ones are over. */
+  ladder: (d) => {
+    const rid = (cur().arg || {}).recipe;
+    const r = byId(DB.recipes, rid);
+    if (!r) return ['err', null, 'That recipe no longer exists.'];
+    const steps = Math.round(+d.steps || 0);
+    const per = Math.round(+d.perStep || 0);
+    const made = [];
+    const taken = takenSerials();
+    for (let i = 0; i < steps; i++) {
+      const at = round3((+d.start || 0) + i * (+d.step || 0));
+      const serial = Serial.batchSerial(d.date || today(), taken);
+      if (!serial) return ['err', null,
+        `Only ${made.length} serial${made.length === 1 ? '' : 's'} left for that date — `
+        + 'the ladder was not built. Spread it over two days, or pick another date.'];
+      taken.add(serial);
+      const rec = Object.assign({ id: uid('ba'), serial, adjust: [], quarantine: false },
+        FIELDS.batch({
+          recipe: rid, brassLot: d.brassLot, bulletLot: d.bulletLot,
+          powderLot: d.powderLot, primerLot: d.primerLot, date: d.date,
+          qty: per, storage: d.storage,
+          chargeActual: d.axis === 'cbto' ? null : at,
+          cbtoMean: d.axis === 'cbto' ? at : null,
+          notes: `Rung ${i + 1} of ${steps} — ${d.axis === 'cbto' ? 'seating' : 'charge'} ladder.`,
+        }));
+      made.push(rec);
+    }
+    DB.batches.push(...made);
+    const over = made.filter(isOverMax).length;
+    return ['goDetail', ['workup', rid],
+      `${made.length} rungs built, ${made.length * per} rounds.`
+      + (over ? ` ${over} ${over === 1 ? 'is' : 'are'} over the published maximum.` : '')];
+  },
+
   anneal: (d) => {
     const l = byId(DB.brassLots, (cur().arg || {}).lot);
     if (!l) return ['err', null, 'That brass lot no longer exists.'];
@@ -2205,6 +2414,8 @@ const ACTIONS = {
   editSession: (a) => ACTIONS.edit(a, { dataset: { kind: 'session' } }),
 
   adjustRounds: (a) => { UI.cartNew = {}; go('form', { kind: 'adjust', batch: a }); },
+  workup: (a) => go('workup', a),
+  ladder: (a) => { UI.cartNew = {}; go('form', { kind: 'ladder', recipe: a }); },
   unadjust: (a) => {
     const [bid, aid] = String(a).split(':');
     const b = byId(DB.batches, bid);

@@ -1042,6 +1042,106 @@ section('label');
   await shot('07-label');
 }
 
+/* ============================================================ load workups */
+section('a ladder is built in one pass, and read as one table');
+{
+  await page.evaluate(() => {
+    DB.componentLots.forEach(c => { if (c.kind === 'powder') { c.qty = 8; c.unit = 'lb'; }
+                                    else c.qty = 1000; });
+    Object.assign(DB.brassLots[0], { initialQty: 200, qty: 200, culls: [], firings: 0,
+      retired: false, expectedFirings: 10, anneals: [], annealEvery: 0 });
+    Object.assign(DB.recipes[0], { charge: 41.5, sourceMax: 42.0, cbto: 2.245 });
+    DB.batches = []; DB.sessions = []; save(); reset('recipes');
+  });
+  await page.waitForTimeout(200);
+  await page.click('[data-act="workup"]');
+  await page.waitForTimeout(250);
+  ok((await page.textContent('#view')).includes('Nothing loaded on this recipe yet'),
+     'an empty workup says so and offers to build the rungs');
+
+  await tapText('Build a ladder');
+  await page.waitForTimeout(300);
+  await fill('start', '40.6');
+  await fill('step', '0.3');
+  await fill('steps', '6');
+  await fill('perStep', '3');
+  await submit();
+  await page.waitForTimeout(300);
+
+  const built = await page.evaluate(() => DB.batches.map(b => ({
+    charge: b.chargeActual, qty: b.qty, serial: b.serial, notes: b.notes })));
+  ok(built.length === 6, 'six rungs, six batches');
+  ok(built.every(b => b.qty === 3), '...three rounds each');
+  ok(new Set(built.map(b => b.serial)).size === 6, '...each with its own serial, because each gets a label');
+  ok(built.map(b => b.charge).join(',') === '40.6,40.9,41.2,41.5,41.8,42.1',
+     `the charges step cleanly (${built.map(b => b.charge).join(', ')})`);
+  ok(/Rung 1 of 6/.test(built[0].notes), '...and each rung says what it is');
+
+  const drew = await page.evaluate(() =>
+    lotLeft(DB.componentLots.find(c => c.kind === 'bullet')));
+  ok(drew === 1000 - 18, `the whole ladder comes off the shelf at once (${drew} bullets left)`);
+
+  const v = await page.textContent('#view');
+  ok(v.includes('6 rungs'), 'the workup screen lists them');
+  ok(v.includes('42.1') && v.includes('over max'),
+     'the rung above the published maximum is built and flagged, not silently dropped');
+
+  // Fire the ladder and read it back as a comparison.
+  await page.evaluate(() => {
+    const v0 = [2680, 2701, 2722, 2731, 2735, 2764];
+    DB.batches.forEach((b, i) => DB.sessions.push({ id: 'lad' + i, batch: b.id,
+      firearm: DB.firearms[0].id, date: '2026-08-20', rounds: 3, distance: 100,
+      vAvg: v0[i], vSd: i === 3 ? 4.1 : 9.2, vEs: i === 3 ? 9 : 22,
+      group: i === 3 ? 0.31 : 0.62, pressureSigns: i === 5 ? 'ejector mark' : 'none' }));
+    save(); render();
+  });
+  await page.waitForTimeout(200);
+  const w = await page.textContent('#view');
+  ok(/2680[\s\S]*2701[\s\S]*2722[\s\S]*2731/.test(w.replace(/\s+/g, ' ')),
+     'the rungs read in charge order, which is the only order a ladder makes sense in');
+  ok(w.includes('ejector mark'), 'pressure signs are on the rung that showed them');
+  // 2731 -> 2735 over 0.3 gr is 13 fps/gr; every other step is 30 or more.
+  ok(/Flattest step/.test(w) && /41\.5 → 41\.8/.test(w) && /4 fps/.test(w),
+     'the flattest step is named with its numbers (41.5 → 41.8 moved 4 fps)');
+  ok(/not a recommendation/.test(w),
+     '...and explicitly not offered as a recommendation, because three rounds a rung cannot settle it');
+  await shot('10-workup');
+
+  // A ladder that will not fit must build nothing rather than stop halfway.
+  await tapText('Build a ladder');
+  await page.waitForTimeout(300);
+  await fill('start', '40.6');
+  await fill('step', '0.3');
+  await fill('steps', '40');
+  await fill('perStep', '40');
+  await submit();
+  const err = await page.textContent('#view');
+  ok(/Nothing was built/.test(err) && /1600 rounds/.test(err),
+     'a ladder that outruns the shelf is refused whole, with the size of the problem');
+  ok((await page.evaluate(() => DB.batches.length)) === 6,
+     '...and leaves no half-built rungs or serial gaps behind');
+  await page.click('#back'); await page.waitForTimeout(200);
+
+  // Seating-depth tests sort on the axis that actually varies.
+  await page.evaluate(() => {
+    DB.batches = []; DB.sessions = [];
+    [2.250, 2.235, 2.245].forEach((c, i) => DB.batches.push({ id: 'sd' + i, serial: 'SD' + i,
+      recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
+      bulletLot: DB.componentLots.find(x => x.kind === 'bullet').id,
+      powderLot: DB.componentLots.find(x => x.kind === 'powder').id,
+      primerLot: DB.componentLots.find(x => x.kind === 'primer').id,
+      date: '2026-08-01', qty: 5, adjust: [], chargeActual: 41.5, cbtoMean: c,
+      quarantine: false }));
+    save(); go('workup', DB.recipes[0].id);
+  });
+  await page.waitForTimeout(250);
+  const ax = await page.evaluate(() => workupRows(DB.recipes[0].id).axis);
+  ok(ax === 'cbto',
+     'with every charge identical and the seating varying, the table sorts on seating depth');
+  const order = await page.evaluate(() => workupRows(DB.recipes[0].id).rows.map(r => r.cbto));
+  ok(order.join(',') === '2.235,2.245,2.25', `...in order (${order.join(', ')})`);
+}
+
 section('the QR on the label opens the record');
 {
   const serial = await page.evaluate(() => DB.batches[0].serial);
@@ -1165,7 +1265,9 @@ section('installable and offline');
   await page.waitForTimeout(600);
   const offlineOk = (await page.innerHTML('#view')).length > 50;
   ok(offlineOk, 'the app loads from cache with the network off');
-  ok((await page.evaluate(() => DB.batches.length)) === 1, '...with data intact');
+  ok((await page.evaluate(() => DB.batches.length)) === 3
+     && (await page.evaluate(() => DB.brassLots.length)) === 1,
+     '...with data intact');
 
   // Both apps are served from one origin -- Bench at /, Zero at /zero/ -- so
   // this worker's scope contains Zero's. Its offline fallback must not answer

@@ -31,6 +31,17 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;          // never touch Supabase
+  /* Bench is served from /bench/ on the SAME origin, inside this worker's
+   * scope, and registers a worker of its own. Bench's narrower scope wins once
+   * it has registered -- but not before, and not on a device that has opened
+   * Zero and never opened Bench. Until then the offline fallback at the bottom
+   * of this handler would answer a request for Bench with ZERO'S page. Offline,
+   * on a phone, that looks like Bench has been replaced by the wrong app.
+   *
+   * This guard moved here from Bench's worker when the two swapped places. It
+   * belongs to whichever app sits at the root, because that is the one whose
+   * scope covers the other. */
+  if (/(^|\/)bench\//.test(url.pathname)) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
       if (res && res.ok && res.type === 'basic') {

@@ -9,3 +9,4 @@ qrshots/
 .env
 .env.*
 !.env.example
+site/

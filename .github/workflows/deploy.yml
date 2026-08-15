@@ -1,6 +1,6 @@
 # Publishes both PWAs to GitHub Pages:
 #   /            -> Bench
-#   /zero/       -> Zero
+#   /bench/      -> Bench
 name: deploy
 
 on:
@@ -25,12 +25,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install
-      - run: npm run build
-      - name: Assemble the site
-        run: |
-          mkdir -p site/zero
-          cp -r apps/bench/dist/* site/
-          cp -r apps/zero/dist/* site/zero/
+      # Same assembly step Vercel runs. Two procedures that must agree is the
+      # same shape of mistake as a hand-copied source file; there is one.
+      - run: npm run build:site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }

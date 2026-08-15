@@ -1,0 +1,22 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build:site",
+  "outputDirectory": "site",
+  "framework": null,
+  "headers": [
+    {
+      "//": "Service workers must never be served stale, or a returning user can be pinned to an old build forever. The bundle is content-hashed by the worker, so it is the worker script itself that has to be revalidated.",
+      "source": "/(.*)sw.js",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
+    {
+      "//": "Same reasoning for the shells: they name the bundle, so a stale shell points at a stale bundle. Zero is at /, Bench at /bench/.",
+      "source": "/(index.html)?",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
+    {
+      "source": "/bench/(index.html)?",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    }
+  ]
+}

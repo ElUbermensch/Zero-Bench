@@ -12,7 +12,7 @@ self-contained and degrades cleanly with no signal.
 const core = ZeroCore.create({
   url: 'https://<ref>.supabase.co',
   anonKey: '<public anon key>',
-  appId: 'zero',            // or 'Bench' — lands in source_app
+  appId: 'zero',            // or 'bench' — lands in source_app
   autoSyncMs: 60_000,       // 0 disables
 });
 ```

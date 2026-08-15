@@ -100,6 +100,146 @@ end $$;
 update public.shots set excluded = false
  where session_id = 'aa000000-0000-0000-0000-00000000ce01' and shot_no = 5;
 
+-- ================================= source_app accepts what the apps send (0006)
+-- The JS mock backend does not enforce check constraints, so a Bench sync suite
+-- can be entirely green against a value the real database refuses. It has to be
+-- asserted here or not at all.
+do $$
+declare rejected boolean := false;
+begin
+  begin
+    insert into public.range_sessions (id, batch_id, firearm_id, occurred_on, source_app)
+    values ('aa000000-0000-0000-0000-00000000ce09',
+            'aa000000-0000-0000-0000-00000000ba01',
+            'aa000000-0000-0000-0000-0000000000f1', '2026-08-07', 'bench');
+  exception when check_violation then rejected := true;
+  end;
+  perform test.check(not rejected,
+    'source_app: the literal Bench actually sends is accepted');
+  delete from public.range_sessions where id = 'aa000000-0000-0000-0000-00000000ce09';
+
+  rejected := false;
+  begin
+    insert into public.groups (session_id, distance_yd, shot_count, group_es_in, source_app)
+    values ('aa000000-0000-0000-0000-00000000ce01', 100, 5, 0.5, 'bench');
+  exception when check_violation then rejected := true;
+  end;
+  perform test.check(not rejected, 'source_app: ...on groups too, which is where Bench''s sizes go');
+  delete from public.groups where source_app = 'bench';
+
+  rejected := false;
+  begin
+    insert into public.range_sessions (id, batch_id, firearm_id, occurred_on, source_app)
+    values ('aa000000-0000-0000-0000-00000000ce0a',
+            'aa000000-0000-0000-0000-00000000ba01',
+            'aa000000-0000-0000-0000-0000000000f1', '2026-08-07', 'Bench');
+  exception when check_violation then rejected := true;
+  end;
+  perform test.check(rejected,
+    'source_app: and only one spelling is legal, so the trap cannot be reset');
+end $$;
+
+-- ======================================= who owns the velocity summary (0005)
+-- Zero writes a shot string; Bench writes only the chronograph's readout. Both
+-- land in the same four columns, and the row itself has to decide which one is
+-- allowed to win.
+do $$
+declare s record;
+begin
+  -- A session that HAS shots: whatever the client claims is discarded.
+  update public.range_sessions
+     set velocity_avg_fps = 9999, velocity_sd_fps = 9999,
+         velocity_es_fps = 9999, velocity_n = 9999
+   where id = 'aa000000-0000-0000-0000-00000000ce01';
+  select * into s from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce01';
+  perform test.check(s.velocity_avg_fps = 2705.00,
+    'guard: a hand-written summary cannot overwrite a derived one');
+  perform test.check(s.velocity_n = 5,
+    'guard: ...and the shot count still comes from the shots');
+end $$;
+
+do $$
+declare s record;
+begin
+  -- A session with NO shots is Bench's case: the readout is all there is, so
+  -- it must survive both the insert and a later edit.
+  insert into public.range_sessions
+    (id, batch_id, firearm_id, occurred_on, source_app,
+     velocity_avg_fps, velocity_sd_fps, velocity_es_fps, velocity_n)
+  values ('aa000000-0000-0000-0000-00000000ce02',
+          'aa000000-0000-0000-0000-00000000ba01',
+          'aa000000-0000-0000-0000-0000000000f1',
+          '2026-08-06', 'bench', 2712.00, 7.400, 20.00, 10);
+  select * into s from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  perform test.check(s.velocity_avg_fps = 2712.00,
+    'guard: a chronograph readout survives when there is no shot string');
+  perform test.check(s.velocity_n = 10 and s.velocity_sd_fps = 7.400,
+    'guard: ...spread and sample size included');
+
+  update public.range_sessions set temp_f = 68
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  select * into s from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  perform test.check(s.velocity_avg_fps = 2712.00,
+    'guard: an unrelated edit does not blank the readout');
+end $$;
+
+do $$
+declare s record;
+begin
+  -- ...and the moment a shot string appears, authority transfers. This is the
+  -- direction that actually bites: a Bench session someone later shoots into.
+  insert into public.shots (session_id, shot_no, velocity_fps) values
+    ('aa000000-0000-0000-0000-00000000ce02', 1, 2800),
+    ('aa000000-0000-0000-0000-00000000ce02', 2, 2810);
+  select * into s from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  perform test.check(s.velocity_avg_fps = 2805.00,
+    'guard: adding shots takes the summary back from the client');
+
+  update public.range_sessions set velocity_avg_fps = 2712
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  select * into s from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+  perform test.check(s.velocity_avg_fps = 2805.00,
+    'guard: ...and will not give it back');
+
+  delete from public.shots
+   where session_id = 'aa000000-0000-0000-0000-00000000ce02';
+  delete from public.range_sessions
+   where id = 'aa000000-0000-0000-0000-00000000ce02';
+end $$;
+
+-- ================================== case prep reaches the profile (0007)
+do $$
+declare p record;
+begin
+  update public.batches set cbto_mean_in = 2.2455, bump_in = 0.0020,
+         bushing = '.289', primer_depth_in = 0.004, charge_actual_gr = 43.5
+   where id = 'aa000000-0000-0000-0000-00000000ba01';
+  select * into p from public.v_ballistic_profiles
+   where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
+  perform test.check(p.cbto_loaded_in = 2.2455,
+    'prep: the CBTO actually loaded reaches Zero, not just the recipe''s');
+  perform test.check(p.batch_bump_in = 0.0020 and p.bushing = '.289',
+    'prep: the sizing that produced this batch travels with it');
+  -- The view had the same fault the client did: it compared the RECIPE's
+  -- charge to the published maximum and ignored what was weighed.
+  perform test.check(p.over_published_max,
+    'over max: the view reads the charge that went in the case');
+
+  update public.batches set charge_actual_gr = null
+   where id = 'aa000000-0000-0000-0000-00000000ba01';
+  select * into p from public.v_ballistic_profiles
+   where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
+  perform test.check(not p.over_published_max,
+    'over max: with nothing weighed it falls back to the recipe, which is under');
+  perform test.check(p.cbto_loaded_in = 2.2455,
+    'prep: ...and the loaded CBTO is unaffected by that');
+end $$;
+
 -- ==================================================== d2 / sigma conversion
 do $$
 begin

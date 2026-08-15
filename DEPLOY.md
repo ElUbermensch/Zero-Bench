@@ -35,8 +35,10 @@ winget install --id Git.Git -e
 winget install --id OpenJS.NodeJS.LTS -e
 # then CLOSE and REOPEN PowerShell so the new PATH takes effect
 
-Expand-Archive .\zero-suite.zip -DestinationPath .
-cd .\zero-suite
+# PowerShell opens in your home folder; the browser saved the zip to Downloads.
+# Give both ends a full path rather than assuming where you are standing.
+Expand-Archive -Path "$HOME\Downloads\zero-suite.zip" -DestinationPath $HOME -Force
+cd "$HOME\zero-suite"
 
 git --version        # both should print a version.
 node --version       # if not, the PATH has not refreshed — reopen PowerShell.
@@ -46,6 +48,17 @@ npm run preflight
 ```
 
 `preflight` reports the backend as unconfigured. That is expected — it is step 4.
+
+> **"The path ... does not exist or is not a valid file system path"** means the zip is
+> not where the command looked. Find it, whatever your browser named it:
+>
+> ```powershell
+> Get-ChildItem $HOME -Filter "zero-suite*.zip" -Recurse -ErrorAction SilentlyContinue |
+>   Select-Object -ExpandProperty FullName
+> ```
+>
+> Then put that exact path in the `-Path` argument. A second download often arrives as
+> `zero-suite (1).zip`, which no amount of retyping the original name will find.
 
 Then publish. `gh` is optional; without it, create the empty repo on github.com first
 (no README, no .gitignore — this folder already has both) and use the remote it shows you:

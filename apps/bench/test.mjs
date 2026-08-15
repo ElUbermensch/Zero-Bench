@@ -398,6 +398,60 @@ section('brass life counts partial firings');
   await page.evaluate(() => { DB.batches = []; DB.brassLots[0].firings = 0; save(); });
 }
 
+/* ============================================== marking the case head itself */
+section('the case head is a marking position, not just a band');
+{
+  await page.evaluate(() => { reset('settings'); });
+  await page.waitForTimeout(200);
+  ok((await page.textContent('#view')).includes('Add case head'),
+     'the scheme offers a case-head position alongside bands');
+
+  const before = await page.evaluate(() => scheme().positions.length);
+  await tapText('+ Add case head');
+  await page.waitForTimeout(250);
+  const added = await page.evaluate(() => scheme().positions.at(-1));
+  ok(added.kind === 'head', 'adding one records it as a head position');
+  ok(added.at === null,
+     '...with no place along the case, because the base does not have one');
+  ok((await page.evaluate(() => scheme().positions.length)) === before + 1,
+     '...and it counts toward the code space like any other position');
+
+  const view = await page.textContent('#view');
+  ok(view.includes('nothing to slide'),
+     'the placement slider is replaced by an explanation rather than left dead');
+
+  // It has to actually be drawable, or a lot marked there cannot be identified.
+  const svg = await page.evaluate(() => caseSvg({ [scheme().positions.at(-1).id]: 'R' }));
+  ok(/x="248"[^>]*fill="#d92b2b"/.test(svg),
+     'a marked case head paints the base of the case in the diagram');
+  ok(/Case head/.test(svg), '...and the diagram labels it');
+  // The label lives under the rim. Centred beside the case it ran off the
+  // 300-unit viewBox and was clipped, which is invisible until you look.
+  const labelX = +(svg.match(/<text x="([\d.]+)"[^>]*>Case head</) || [])[1];
+  ok(labelX > 0 && labelX < 285,
+     `the case-head label sits inside the drawing rather than off its edge (x=${labelX})`);
+
+  // Two head positions must not overprint each other.
+  await tapText('+ Add case head');
+  await page.waitForTimeout(250);
+  const ids = await page.evaluate(() => scheme().positions.filter(p => p.kind === 'head').map(p => p.id));
+  const svg2 = await page.evaluate((ids2) =>
+    caseSvg({ [ids2[0]]: 'R', [ids2[1]]: 'B' }), ids);
+  const heights = [...svg2.matchAll(/x="248" y="([\d.]+)" width="14" height="([\d.]+)"/g)];
+  ok(heights.length === 2 && heights[0][1] !== heights[1][1],
+     'two head marks split the base into stripes rather than overprinting');
+
+  // Codes and lookup must treat it like any other position.
+  const code = await page.evaluate((ids2) => codeOf({ [ids2[0]]: 'R', [ids2[1]]: 'B' }), ids);
+  ok(code.split('/').length === (await page.evaluate(() => scheme().positions.length)),
+     'the colour code carries a slot for every position including the head');
+
+  await page.evaluate(() => {
+    scheme().positions = scheme().positions.filter(p => p.kind !== 'head');
+    save(); reset('brass');
+  });
+}
+
 /* ======================================================= cases leave the lot */
 section('removing cases changes the count and nothing else');
 {

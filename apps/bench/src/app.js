@@ -107,10 +107,16 @@ const Store = (() => {
  * ------------------------------------------------------------------------*/
 const SCHEMA = 2;
 
+/* A marking position is either a BAND around the case body, placed by `at`
+ * (0 = head end, 1 = neck end), or the CASE HEAD itself — the flat base you
+ * write on around the primer. The head is not a point along the body, so it
+ * carries no `at` and the placement slider does not apply to it. Positions
+ * without a `kind` are bands, which is what every scheme written before this
+ * existed contains. */
 const DEFAULT_SCHEME = {
   positions: [
-    { id: 'neck', label: 'Neck band', hint: 'toward the bullet', at: 0.72 },
-    { id: 'head', label: 'Head band', hint: 'toward the primer', at: 0.26 },
+    { id: 'neck', label: 'Neck band', hint: 'toward the bullet', at: 0.72, kind: 'band' },
+    { id: 'head', label: 'Head band', hint: 'toward the primer', at: 0.26, kind: 'band' },
   ],
   palette: [
     { id: 'R', name: 'Red', hex: '#d92b2b', on: true },
@@ -472,28 +478,56 @@ let svgSeq = 0;
 function caseSvg(marks, opts) {
   const o = opts || {}, sc = scheme();
   const uidc = 'cc' + (++svgSeq);
-  const bands = sc.positions.map(p => {
+  const heads = sc.positions.filter(isHeadPos);
+  const bandPos = sc.positions.filter(p => !isHeadPos(p));
+
+  const bands = bandPos.map(p => {
     const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
-    const x = HEAD_X - p.at * (HEAD_X - NECK_X);
+    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
     const w = o.mini ? 15 : 17;
     return col
       ? `<rect x="${x - w / 2}" y="10" width="${w}" height="70" fill="${col.hex}"/>`
       : `<rect x="${x - w / 2}" y="10" width="${w}" height="70" fill="none" `
         + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
   }).join('');
-  const ticks = o.mini ? '' : sc.positions.map(p => {
-    const x = HEAD_X - p.at * (HEAD_X - NECK_X);
+
+  /* The case head is the flat base, drawn as the rim block at the right of
+   * the side view. Several head positions split it into stripes rather than
+   * overprinting each other -- a mark you cannot see is a mark you will not
+   * check. */
+  const rim = heads.map((p, i) => {
+    const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
+    const y0 = 13 + i * (62 / heads.length), h = 62 / heads.length;
+    return col
+      ? `<rect x="248" y="${y0}" width="14" height="${h}" fill="${col.hex}"/>`
+      : `<rect x="248.7" y="${y0 + 0.7}" width="12.6" height="${h - 1.4}" fill="none" `
+        + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
+  }).join('');
+
+  const ticks = o.mini ? '' : bandPos.map(p => {
+    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
     return `<line x1="${x}" y1="78" x2="${x}" y2="88" stroke="#6c7480" stroke-width="1"/>`
       + `<text x="${x}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${esc(p.label)}</text>`;
-  }).join('');
+  }).join('') + (heads.length && !o.mini
+    // Under the rim, not beside it: a label centred to the right of the case
+    // runs off the edge of the viewBox and gets clipped.
+    ? `<line x1="255" y1="78" x2="255" y2="88" stroke="#6c7480" stroke-width="1"/>`
+      + `<text x="255" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
+          esc(heads.length === 1 ? heads[0].label : 'Case head')}</text>`
+    : '');
   return `<svg class="case${o.mini ? ' casemini' : ''}" viewBox="0 0 300 ${o.mini ? 88 : 106}"
       xmlns="http://www.w3.org/2000/svg" role="img" aria-label="case marking">
     <defs><clipPath id="${uidc}"><path d="${CASE_PATH}"/></clipPath></defs>
     <path d="${CASE_PATH}" fill="#b9a06a" stroke="#8d7844" stroke-width="1.5"/>
     <g clip-path="url(#${uidc})">${bands}</g>
     <path d="${CASE_PATH}" fill="none" stroke="#8d7844" stroke-width="1.5"/>
-    <path d="M248,17 L248,71" stroke="#8d7844" stroke-width="1"/>${ticks}</svg>`;
+    <path d="M248,17 L248,71" stroke="#8d7844" stroke-width="1"/>${rim}
+    <path d="M248,13 L262,13 L262,75 L248,75 Z" fill="none" stroke="#8d7844" stroke-width="1.5"/>${ticks}</svg>`;
 }
+
+/* Written this way rather than `p.kind === 'head'` so a scheme saved before
+ * kinds existed reads as all-bands, which is what it is. */
+const isHeadPos = (p) => p && p.kind === 'head';
 
 const codeOf = (marks) =>
   scheme().positions.map(p => (marks && marks[p.id]) || '—').join('/');
@@ -1350,12 +1384,25 @@ VIEWS.settings = () => {
         <button class="btn sm danger" data-act="posDel" data-idx="${i}" aria-label="Remove">×</button>
       </div>
       <div class="row g8 mt7">
-        <span class="tiny dim">head</span>
-        <input type="range" min="5" max="95" value="${Math.round(p.at * 100)}"
-          data-act="posAt" data-idx="${i}" style="flex:1">
-        <span class="tiny dim">neck</span>
-      </div></div>`).join('')}
-    <button class="btn sm mt10" data-act="posAdd">+ Add position</button>
+        <select data-act="posKind" data-idx="${i}" style="flex:1">
+          <option value="band"${isHeadPos(p) ? '' : ' selected'}>Band around the case</option>
+          <option value="head"${isHeadPos(p) ? ' selected' : ''}>Case head (the flat base)</option>
+        </select>
+      </div>
+      ${isHeadPos(p)
+        ? `<div class="tiny dim mt7">Written on the base, around the primer. It has no
+             position along the case, so there is nothing to slide.</div>`
+        : `<div class="row g8 mt7">
+             <span class="tiny dim">head</span>
+             <input type="range" min="5" max="95" value="${Math.round((p.at ?? 0.5) * 100)}"
+               data-act="posAt" data-idx="${i}" style="flex:1">
+             <span class="tiny dim">neck</span>
+           </div>`}
+      </div>`).join('')}
+    <div class="row g8 mt10">
+      <button class="btn sm" data-act="posAdd" data-arg="band">+ Add band</button>
+      <button class="btn sm" data-act="posAdd" data-arg="head">+ Add case head</button>
+    </div>
   </div>
   <div class="card"><h2>Palette</h2>
     <p class="small muted">Only enabled colours are offered. Enable what you actually own.</p>
@@ -1600,7 +1647,9 @@ const ACTIONS = {
   delBatch: (a) => { DB.sessions = DB.sessions.filter(s => s.batch !== a);
     DB.batches = DB.batches.filter(b => b.id !== a); save(); toast('Batch deleted.'); reset('ammo'); },
 
-  posAdd: () => { scheme().positions.push({ id: uid('p'), label: 'New position', hint: '', at: 0.5 });
+  posAdd: (a) => { scheme().positions.push(a === 'head'
+      ? { id: uid('p'), label: 'Case head', hint: 'around the primer', at: null, kind: 'head' }
+      : { id: uid('p'), label: 'New band', hint: '', at: 0.5, kind: 'band' });
     save(); render(); },
   posDel: (a, el) => { const sc = scheme();
     if (sc.positions.length <= 1) { toast('Keep at least one position.'); return; }
@@ -1690,6 +1739,15 @@ document.addEventListener('input', (e) => {
       sc.positions[i].at = +el.value / 100; save();
       const w = document.querySelector('.casewrap');
       if (w) w.innerHTML = caseSvg({});
+      break;
+    }
+    case 'posKind': {
+      const p2 = sc.positions[i];
+      p2.kind = el.value === 'head' ? 'head' : 'band';
+      // A band needs a place on the case; the head does not have one.
+      if (p2.kind === 'head') p2.at = null;
+      else if (p2.at == null) p2.at = 0.5;
+      save(); render();          // the slider appears or disappears with this
       break;
     }
     case 'baseUrl': DB.meta.baseUrl = el.value.trim(); save(); break;

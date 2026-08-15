@@ -58,6 +58,18 @@ await page.goto(BASE);
 await page.waitForTimeout(400);
 
 /* ================================================================= empty */
+
+/* Firing is a session now, not a counter. `fire(batchId, n)` records one, which
+ * is what actually moves rounds out of a box and wear onto the brass. */
+const fire = (bid, n) => page.evaluate(([b, r]) => {
+  DB.sessions.push({ id: 'se' + Math.random().toString(36).slice(2, 8), batch: b,
+    date: '2026-08-10', rounds: r, distance: 100, pressureSigns: 'none' });
+  save();
+}, [bid, n]);
+const unfire = (bid) => page.evaluate((b) => {
+  DB.sessions = DB.sessions.filter(s => s.batch !== b); save();
+}, bid);
+
 section('starts empty');
 {
   const db = await page.evaluate(() => DB);
@@ -257,7 +269,8 @@ section('workflow');
   await fill('group', '0.42'); await fill('rounds', '10');
   await submit();
   ok(!(await page.textContent('#view')).includes('Untested'), 'logging a session clears the untested flag');
-  ok((await page.evaluate(() => DB.batches[0].remaining)) === 50, 'rounds remaining decrements');
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 50,
+     'rounds remaining is the loaded count less what the session fired');
 }
 
 /* ==================================== components actually leave the shelf */
@@ -295,10 +308,15 @@ section('loading a batch draws down the components');
      'powder is also quoted in rounds of a real recipe, which is the useful unit');
 
   // Firing the rest of the batch returns its brass to the pool.
-  await page.evaluate(() => { const b = DB.batches[0]; b.remaining = 0; save(); });
+  await page.evaluate(() => {
+    const b = DB.batches[0];
+    DB.sessions.push({ id: 'setmp', batch: b.id, date: '2026-08-11', rounds: 50,
+                       distance: 100, pressureSigns: 'none' });
+    save();
+  });
   ok((await page.evaluate(() => brassAvailable(DB.brassLots[0]))) === 100,
      'firing a batch off returns its cases to the lot');
-  await page.evaluate(() => { const b = DB.batches[0]; b.remaining = 50; save(); });
+  await page.evaluate(() => { DB.sessions = DB.sessions.filter(s => s.id !== 'setmp'); save(); });
 
   // Deleting a batch must put everything back, with no restore code to forget.
   const before = await page.evaluate(() => lotLeft(DB.componentLots.find(c => c.kind === 'bullet')));
@@ -326,14 +344,15 @@ section('brass life counts partial firings');
       bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
       powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
       primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
-      date: '2026-08-01', qty: 50, remaining: 50, chargeActual: 41.5, quarantine: false }];
+      date: '2026-08-01', qty: 50, chargeActual: 41.5, quarantine: false }];
     save();
   });
   ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 0,
      'loading brass does not wear it — only firing does');
 
   // Fire all 50 of the 100-case lot: half a firing, exactly.
-  await page.evaluate(() => { DB.batches[0].remaining = 0; save(); });
+  await page.evaluate(() => { DB.sessions = [{ id: 'sf1', batch: DB.batches[0].id,
+      date: '2026-08-02', rounds: 50, distance: 100, pressureSigns: 'none' }]; save(); });
   const half = await page.evaluate(() => brassLife(DB.brassLots[0]));
   ok(half.mean === 0.5, `firing 50 of 100 puts the lot at 0.5 firings (${half.mean})`);
   ok(half.fired === 50, '...from 50 rounds fired');
@@ -345,7 +364,9 @@ section('brass life counts partial firings');
 
   // Fire the other 50 and the lot reaches exactly one firing.
   await page.evaluate(() => {
-    DB.batches.push({ ...DB.batches[0], id: 'by', serial: 'BY', qty: 50, remaining: 0 });
+    DB.batches.push({ ...DB.batches[0], id: 'by', serial: 'BY', qty: 50 });
+    DB.sessions.push({ id: 'sf2', batch: 'by', date: '2026-08-03', rounds: 50,
+                       distance: 100, pressureSigns: 'none' });
     save();
   });
   ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 1,
@@ -353,7 +374,9 @@ section('brass life counts partial firings');
 
   // A full-lot draw adds no uncertainty at all.
   await page.evaluate(() => {
-    DB.batches = [{ ...DB.batches[0], id: 'bz', serial: 'BZ', qty: 100, remaining: 0 }];
+    DB.batches = [{ ...DB.batches[0], id: 'bz', serial: 'BZ', qty: 100 }];
+    DB.sessions = [{ id: 'sf3', batch: 'bz', date: '2026-08-04', rounds: 100,
+                     distance: 100, pressureSigns: 'none' }];
     save();
   });
   const full = await page.evaluate(() => brassLife(DB.brassLots[0]));
@@ -380,12 +403,17 @@ section('brass life counts partial firings');
   await page.evaluate(() => {
     DB.brassLots[0].firings = 0; DB.brassLots[0].expectedFirings = 6;
     DB.batches = [];
-    for (let i = 0; i < 9; i++) DB.batches.push({ id: 'q'+i, serial: 'Q'+i,
-      recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
-      bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
-      powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
-      primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
-      date: '2026-08-01', qty: 50, remaining: 0, chargeActual: 41.5, quarantine: false });
+    DB.sessions = [];
+    for (let i = 0; i < 9; i++) {
+      DB.batches.push({ id: 'q'+i, serial: 'Q'+i,
+        recipe: DB.recipes[0].id, brassLot: DB.brassLots[0].id,
+        bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
+        powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
+        primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
+        date: '2026-08-01', qty: 50, chargeActual: 41.5, quarantine: false });
+      DB.sessions.push({ id: 'sq'+i, batch: 'q'+i, date: '2026-08-05', rounds: 50,
+                         distance: 100, pressureSigns: 'none' });
+    }
     save(); reset('brass');
   });
   await page.waitForTimeout(200);
@@ -463,8 +491,10 @@ section('removing cases changes the count and nothing else');
       bulletLot: DB.componentLots.find(c=>c.kind==='bullet').id,
       powderLot: DB.componentLots.find(c=>c.kind==='powder').id,
       primerLot: DB.componentLots.find(c=>c.kind==='primer').id,
-      date: '2026-08-01', qty: 50, remaining: 0, chargeActual: 41.5, quarantine: false }];
-    DB.sessions = []; save(); go('brassDetail', DB.brassLots[0].id);
+      date: '2026-08-01', qty: 50, chargeActual: 41.5, quarantine: false }];
+    DB.sessions = [{ id: 'sf5', batch: 'bx', date: '2026-08-06', rounds: 50,
+                     distance: 100, pressureSigns: 'none' }];
+    save(); go('brassDetail', DB.brassLots[0].id);
   });
   await page.waitForTimeout(200);
   const before = await page.evaluate(() => brassLife(DB.brassLots[0]));
@@ -509,7 +539,9 @@ section('removing cases changes the count and nothing else');
   // that was actually in circulation.
   await page.evaluate(() => {
     DB.batches.push({ ...DB.batches[0], id: 'bx2', serial: 'BX2',
-      date: '2026-09-01', qty: 97, remaining: 0 });
+      date: '2026-09-01', qty: 97 });
+    DB.sessions.push({ id: 'sf6', batch: 'bx2',
+                       date: '2026-09-02', rounds: 97, distance: 100, pressureSigns: 'none' });
     save();
   });
   const later = await page.evaluate(() => brassLife(DB.brassLots[0]));
@@ -518,7 +550,7 @@ section('removing cases changes the count and nothing else');
 
   // Cases inside loaded rounds are not on the bench to be culled.
   await page.evaluate(() => {
-    DB.batches = [{ ...DB.batches[0], id: 'bl2', serial: 'BL2', qty: 90, remaining: 90 }];
+    DB.batches = [{ ...DB.batches[0], id: 'bl2', serial: 'BL2', qty: 90 }]; DB.sessions = [];
     save(); go('brassDetail', DB.brassLots[0].id);
   });
   await page.waitForTimeout(200);
@@ -645,7 +677,8 @@ section('over max is judged on the charge that went in the case');
       brassLot: DB.brassLots[0].id, bulletLot: DB.componentLots.find(c => c.kind === 'bullet').id,
       powderLot: DB.componentLots.find(c => c.kind === 'powder').id,
       primerLot: DB.componentLots.find(c => c.kind === 'primer').id,
-      date: '2026-08-01', qty: 20, remaining: 20, chargeActual: 43.0, quarantine: false }];
+      date: '2026-08-01', qty: 20, chargeActual: 43.0, quarantine: false }];
+    DB.sessions = [];
     save(); reset('ammo');
   });
   await page.waitForTimeout(150);
@@ -737,7 +770,9 @@ section('the label prints the brass life, not the baseline');
     // A lot bought new: baseline 0 firings, 100 cases, one 40-round batch fired.
     const l = DB.brassLots[0];
     l.firings = 0; l.initialQty = 100; l.qty = 100; l.culls = [];
-    DB.batches[0].qty = 40; DB.batches[0].remaining = 0;
+    DB.batches[0].qty = 40;
+    DB.sessions = [{ id: 'sf7', batch: DB.batches[0].id, date: '2026-08-08', rounds: 40,
+                     distance: 100, pressureSigns: 'none' }];
     save(); reset('ammo');
   });
   await page.waitForTimeout(150);
@@ -752,6 +787,236 @@ section('the label prints the brass life, not the baseline');
   ok(!/·\s*0f/.test(lbl),
      '...not 0f, which is what the baseline field says and what used to be printed');
   await page.click('#back'); await page.waitForTimeout(150);
+}
+
+/* ============================================ what is left in the box is derived */
+section('rounds left come from the sessions, so a typo is fixable');
+{
+  await page.evaluate(() => {
+    DB.brassLots[0].firings = 0; DB.brassLots[0].initialQty = 100;
+    DB.brassLots[0].qty = 100; DB.brassLots[0].culls = []; DB.brassLots[0].retired = false;
+    DB.brassLots[0].expectedFirings = 6; DB.brassLots[0].anneals = []; DB.brassLots[0].annealEvery = 1;
+    DB.batches = [{ id: 'bd1', serial: 'B26H01-77C', recipe: DB.recipes[0].id,
+      brassLot: DB.brassLots[0].id, bulletLot: DB.componentLots.find(c => c.kind === 'bullet').id,
+      powderLot: DB.componentLots.find(c => c.kind === 'powder').id,
+      primerLot: DB.componentLots.find(c => c.kind === 'primer').id,
+      date: '2026-08-01', qty: 100, adjust: [], chargeActual: 41.5, quarantine: false }];
+    DB.sessions = []; save(); reset('ammo');
+  });
+  await page.waitForTimeout(150);
+  await page.click('[data-act="ammoDetail"]');
+  await page.waitForTimeout(200);
+
+  // The classic fat-finger: 100 typed where 10 was meant.
+  await tapText('Log range session');
+  await fill('rounds', '100');
+  await submit();
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 0, 'a 100-round session empties the box');
+  ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 1,
+     '...and puts a full cycle on the brass, which used to be the unrecoverable part');
+
+  // Under the old model this was permanent. Now the session is a record.
+  const sid = await page.evaluate(() => DB.sessions[0].id);
+  await page.click(`[data-act="editSession"][data-arg="${sid}"]`);
+  await page.waitForTimeout(250);
+  ok((await page.inputValue('[name="rounds"]')) === '100',
+     'the edit form opens seeded with what was actually saved');
+  await fill('rounds', '10');
+  await submit();
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 90,
+     'correcting the session corrects the round count');
+  ok(Math.abs(await page.evaluate(() => brassLife(DB.brassLots[0]).mean) - 0.1) < 1e-9,
+     '...and the brass wear with it — both were derived from the same record');
+
+  await page.click(`[data-act="delSession"][data-arg="${sid}"]`);
+  await page.waitForTimeout(250);
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 100
+     && (await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 0,
+     'deleting it puts everything back, with no restore code to forget');
+}
+
+section('rounds that left without being fired');
+{
+  await page.click('[data-act="adjustRounds"]');
+  await page.waitForTimeout(250);
+  const reasons = await page.locator('[name="reason"] option').allTextContents();
+  ok(reasons.join('|') === 'Pulled down|Given away|Lost|Other — see note|No reason given',
+     `the reasons say where rounds actually go (${reasons.join(', ')})`);
+  await fill('n', '12');
+  await page.selectOption('[name="reason"]', 'pulled');
+  await fill('note', 'seating depth test, components recovered');
+  await submit();
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 88,
+     'twelve pulled rounds leave the box');
+  ok((await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 0,
+     '...and put no wear on the brass, because nothing was fired');
+  const dv = await page.textContent('#view');
+  ok(dv.includes('Pulled down') && dv.includes('seating depth test'),
+     'the batch says where they went, rather than just showing a smaller number');
+  ok(dv.includes('Otherwise gone'), '...and separates them from rounds actually fired');
+  await page.click('[data-act="unadjust"]');
+  await page.waitForTimeout(200);
+  ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 100, 'and it can be undone');
+}
+
+/* ================================================ everything can be corrected */
+section('records can be edited');
+{
+  await page.evaluate(() => { reset('brass'); });
+  await page.waitForTimeout(150);
+  await page.click('[data-act="brassDetail"]');
+  await page.waitForTimeout(200);
+  await page.click('[data-act="edit"][data-kind="brass"]');
+  await page.waitForTimeout(250);
+  ok((await page.textContent('#view')).includes('The serial does not change'),
+     'the edit screen is explicit that the serial is fixed — labels are already in boxes');
+  ok((await page.inputValue('[name="headstamp"]')).length > 0, 'the form is seeded from the record');
+  const marksOn = await page.locator('.sw.on').count();
+  ok(marksOn >= 1, 'the colour code is seeded too, rather than silently cleared');
+
+  const serialBefore = await page.evaluate(() => DB.brassLots[0].serial);
+  await fill('initialQty', '200');
+  await fill('headstamp', 'LAPUA');
+  await submit();
+  const after = await page.evaluate(() => ({
+    n: DB.brassLots.length, qty: DB.brassLots[0].initialQty,
+    hs: DB.brassLots[0].headstamp, serial: DB.brassLots[0].serial,
+  }));
+  ok(after.n === 1, 'editing changes the record rather than adding a second one');
+  ok(after.qty === 200 && after.hs === 'LAPUA', '...and the changes land');
+  ok(after.serial === serialBefore, '...and the serial is untouched');
+
+  // A colour code collides with every OTHER lot, not with itself.
+  await page.click('[data-act="edit"][data-kind="brass"]');
+  await page.waitForTimeout(250);
+  await fill('cost', '250');
+  await submit();
+  ok((await page.evaluate(() => DB.brassLots[0].cost)) === 250,
+     'saving an edit that leaves the colour code alone is not rejected as a duplicate');
+
+  // But it must not be shrunk below what is already spoken for.
+  await page.evaluate(() => {
+    DB.brassLots[0].culls = [{ id: 'c9', n: 10, reason: 'sep', date: '2026-08-01' }];
+    save();
+  });
+  await page.click('[data-act="edit"][data-kind="brass"]');
+  await page.waitForTimeout(250);
+  await fill('initialQty', '5');
+  await submit();
+  ok((await page.textContent('#view')).includes('cannot be smaller'),
+     'a lot cannot be edited smaller than the cases already removed and loaded');
+  await page.click('#back'); await page.waitForTimeout(200);
+}
+
+section('brass can be retired, and retired brass is not offered');
+{
+  await page.evaluate(() => {
+    DB.brassLots[0].culls = []; DB.sessions = []; DB.batches = []; save();
+    go('brassDetail', DB.brassLots[0].id);
+  });
+  await page.waitForTimeout(200);
+  await tapText('Retire lot');
+  await page.waitForTimeout(200);
+  ok((await page.evaluate(() => DB.brassLots[0].retired)) === true, 'the lot is retired');
+  ok((await page.textContent('#view')).includes('Retired'), '...and says so');
+  const offered = await page.evaluate(() =>
+    FORMS.batch.fields.find(f => f.k === 'brassLot').ref().length);
+  ok(offered === 0, 'a retired lot is no longer offered when building a batch');
+  await tapText('Return to service');
+  await page.waitForTimeout(200);
+  ok((await page.evaluate(() => DB.brassLots[0].retired)) === false, 'and it can come back');
+
+  // Retiring brass that is inside loaded rounds would strand those rounds.
+  await page.evaluate(() => {
+    DB.batches = [{ id: 'bd2', serial: 'B26H01-78D', recipe: DB.recipes[0].id,
+      brassLot: DB.brassLots[0].id, date: '2026-08-01', qty: 40, adjust: [],
+      chargeActual: 41.5, quarantine: false }];
+    DB.sessions = []; save(); go('brassDetail', DB.brassLots[0].id);
+  });
+  await page.waitForTimeout(200);
+  await tapText('Retire lot');
+  await page.waitForTimeout(250);
+  ok((await page.evaluate(() => DB.brassLots[0].retired)) === false
+     && (await page.textContent('body')).includes('still in loaded rounds'),
+     'retiring is refused while cases are inside loaded ammunition, and says why');
+}
+
+section('annealing is an interval, not a single date');
+{
+  await page.evaluate(() => {
+    // Batches with nothing fired out of them put no wear on the lot, so the
+    // baseline alone drives this section -- no need to delete them.
+    DB.sessions = [];
+    Object.assign(DB.brassLots[0], { firings: 4, annealEvery: 2, anneals: [], retired: false });
+    save(); go('brassDetail', DB.brassLots[0].id);
+  });
+  await page.waitForTimeout(200);
+  ok((await page.textContent('#view')).includes('Never annealed'), 'four firings, never annealed: flagged');
+  await tapText('Log anneal');
+  await page.waitForTimeout(250);
+  await fill('note', 'AMP 118');
+  await submit();
+  const v1 = await page.textContent('#view');
+  ok(!v1.includes('Anneal due') && !v1.includes('Never annealed'), 'logging one clears the flag');
+  ok(v1.includes('AMP 118') && v1.includes('at 4.0f'),
+     'the anneal is a dated record with the firing count it was done at');
+
+  // The old check was `!lastAnneal && mean >= 3` — one anneal silenced it forever.
+  await page.evaluate(() => { DB.brassLots[0].firings = 5; save(); render(); });
+  ok(!(await page.textContent('#view')).includes('Anneal due'),
+     'one firing later, with an interval of two, nothing is due yet');
+  await page.evaluate(() => { DB.brassLots[0].firings = 6; save(); render(); });
+  ok((await page.textContent('#view')).includes('Anneal due'),
+     'two firings past the last anneal, it is due again — the warning does not die after the first one');
+  await page.evaluate(() => { DB.brassLots[0].annealEvery = 0; save(); render(); });
+  ok(!(await page.textContent('#view')).includes('Anneal due'),
+     'an interval of zero turns the nag off for people who do not anneal');
+}
+
+section('a stored round count is migrated, not discarded');
+{
+  // This one replaces the whole database to stand up a schema-2 bench, so it
+  // puts the real one back afterwards -- later sections assert on it.
+  const snapshot = await page.evaluate(() => JSON.stringify(DB));
+  const got = await page.evaluate(() => {
+    // A schema-2 bench: batches carrying a stored `remaining`, one explained by
+    // a session and one not.
+    const db = {
+      meta: { schema: 2 },
+      cartridges: [{ id: 'c1', name: '6.5 Creedmoor' }], firearms: [], componentLots: [],
+      brassLots: [{ id: 'l1', serial: 'R-1', marks: {}, cartridge: 'c1', headstamp: 'LAPUA',
+                    initialQty: 100, qty: 100, firings: 0, expectedFirings: 6, culls: [],
+                    lastAnneal: '2026-06-01' }],
+      recipes: [], batches: [
+        { id: 'b1', serial: 'B1', brassLot: 'l1', qty: 100, remaining: 90, date: '2026-07-01' },
+        { id: 'b2', serial: 'B2', brassLot: 'l1', qty: 100, remaining: 40, date: '2026-07-02' },
+      ],
+      sessions: [{ id: 's1', batch: 'b1', rounds: 10, date: '2026-07-05' }],
+    };
+    Store.save(db);
+    DB = loadDb(); save();
+    return {
+      schema: DB.meta.schema,
+      b1: { left: roundsLeft(DB.batches[0]), adj: DB.batches[0].adjust.length,
+            stored: 'remaining' in DB.batches[0] },
+      b2: { left: roundsLeft(DB.batches[1]), adj: DB.batches[1].adjust,
+            stored: 'remaining' in DB.batches[1] },
+      anneals: DB.brassLots[0].anneals,
+      every: DB.brassLots[0].annealEvery,
+    };
+  });
+  ok(got.schema === 3, 'the bench is migrated to the new schema');
+  ok(got.b1.left === 90 && got.b1.adj === 0,
+     'a count the sessions already explain is left alone — no phantom adjustment');
+  ok(got.b2.left === 40 && got.b2.adj.length === 1 && got.b2.adj[0].n === 60,
+     'a count nothing explains is preserved as an adjustment rather than silently handed back');
+  ok(/Carried over/.test(got.b2.adj[0].note),
+     '...with a note saying where the number came from, so it is not a mystery');
+  ok(!got.b1.stored && !got.b2.stored, 'the stored counter is gone, so it cannot drift again');
+  ok(got.anneals.length === 1 && got.anneals[0].date === '2026-06-01' && got.every === 1,
+     'a single anneal date becomes the first entry in the history');
+  await page.evaluate((snap) => { Store.save(JSON.parse(snap)); DB = loadDb(); render(); }, snapshot);
+  await page.waitForTimeout(150);
 }
 
 /* ===================================================================== label */

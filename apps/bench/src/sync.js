@@ -46,7 +46,7 @@ const BenchSync = (() => {
 
   /* What is left of a component lot, derived the same way the app derives it.
    * Passed in rather than recomputed so there is one definition of "left". */
-  function buildRows(DB, left) {
+  function buildRows(DB, left, roundsLeft) {
     const out = [];       // [{table, row}] in FK-safe order
     const blocked = [];   // [{what, why}]
     const add = (table, row) => out.push({ table, row });
@@ -209,7 +209,9 @@ const BenchSync = (() => {
         primer_lot_id: lotRemote(b.primerLot),
         loaded_on: iso(b.date) || iso(new Date().toISOString()),
         qty_loaded: Math.max(1, Math.round(nn(b.qty) || 1)),
-        qty_remaining: Math.max(0, Math.round(nn(b.remaining) ?? nn(b.qty) ?? 0)),
+        // Rounds left is derived in the app from sessions and adjustments;
+        // there is no stored counter here to disagree with it.
+        qty_remaining: Math.max(0, Math.round(roundsLeft ? roundsLeft(b) : (nn(b.qty) ?? 0))),
         charge_actual_gr: nn(b.chargeActual), charge_sd_gr: nn(b.chargeSd),
         coal_mean_in: nn(b.coalMean), runout_in: nn(b.runout),
         press: b.press || null, storage: b.storage || null,
@@ -260,8 +262,8 @@ const BenchSync = (() => {
   /* Queue everything onto zero-core's outbox. The outbox already pushes in FK
    * order, retries, and dead-letters what the server refuses, so this layer
    * only has to get the mapping right. */
-  function push(core, DB, left) {
-    const { rows, blocked } = buildRows(DB, left);
+  function push(core, DB, left, roundsLeft) {
+    const { rows, blocked } = buildRows(DB, left, roundsLeft);
     let queued = 0;
     const me = core.getUser && core.getUser();
     for (const { table, row } of rows) {

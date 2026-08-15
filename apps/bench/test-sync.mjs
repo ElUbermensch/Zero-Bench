@@ -85,8 +85,10 @@ await page.evaluate(() => {
   ];
   DB.batches = [{ id: 'ba1', serial: 'B26H01-01F', recipe: 'r1', brassLot: 'bl1',
     bulletLot: 'cl1', powderLot: 'cl2', primerLot: 'cl3', date: '2026-08-01',
-    qty: 100, remaining: 40, chargeActual: 41.52, chargeSd: 0.02, coalMean: 2.809,
-    quarantine: false }];
+    qty: 100, adjust: [{ id: 'aj1', n: 50, reason: 'pulled', date: '2026-08-06' }],
+    chargeActual: 41.52, chargeSd: 0.02, coalMean: 2.809, quarantine: false }];
+  // 100 loaded, 10 fired, 50 pulled down -> 40 left. The server gets the
+  // derived figure; there is no stored counter to disagree with it.
   DB.sessions = [{ id: 'se1', batch: 'ba1', firearm: 'f1', date: '2026-08-05',
     rounds: 10, distance: 100, vAvg: 2712, vSd: 7.4, vEs: 20, group: 0.42, temp: 72 }];
   save(); reset('more');

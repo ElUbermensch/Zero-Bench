@@ -116,7 +116,7 @@ const CORE = (() => {
 /* --------------------------------------------------------------------------
  * Data model
  * ------------------------------------------------------------------------*/
-const SCHEMA = 2;
+const SCHEMA = 3;
 
 /* A marking position is either a BAND around the case body, placed by `at`
  * (0 = head end, 1 = neck end), or the CASE HEAD itself — the flat base you
@@ -166,13 +166,60 @@ function loadDb() {
     return db;
   }
   const db = Object.assign(emptyDb(), raw);
+  const was = +(raw.meta || {}).schema || 1;
   db.meta = Object.assign(emptyDb().meta, raw.meta || {});
   db.meta.schema = SCHEMA;
   for (const c of COLLECTIONS) if (!Array.isArray(db[c])) db[c] = [];
   if (!db.meta.scheme || !Array.isArray(db.meta.scheme.positions)) {
     db.meta.scheme = JSON.parse(JSON.stringify(DEFAULT_SCHEME));
   }
+  if (was < SCHEMA) migrate(db, was);
   return db;
+}
+
+/* Schema 2 -> 3.
+ *
+ * `remaining` was a stored counter on the batch. It is derived now, from the
+ * sessions fired plus a list of rounds otherwise accounted for. A bench that
+ * has been in use has counters that the sessions do not explain -- a session
+ * logged before this version and then edited, a batch created with a partial
+ * count -- and simply deriving would hand those rounds back and silently
+ * un-age the brass they were fired through.
+ *
+ * So the difference is preserved as an opening adjustment. It is visible on
+ * the batch, with a reason that says where it came from, and the user can undo
+ * any line that was actually a mistake. The alternative -- trusting the
+ * derivation and discarding the old counter -- would change numbers on a
+ * screen the user has been reading for months, with nothing on screen to
+ * explain why.
+ *
+ * `lastAnneal` was a single overwritten date. It becomes the first entry in a
+ * list, with no `at` figure because none was ever recorded.
+ */
+function migrate(db, from) {
+  if (from < 3) {
+    for (const b of db.batches) {
+      const fired = db.sessions.filter(s => s.batch === b.id)
+        .reduce((s, x) => s + Math.max(0, +x.rounds || 0), 0);
+      const stored = b.remaining;
+      if (stored != null) {
+        const unexplained = Math.max(0, (+b.qty || 0) - fired - Math.max(0, +stored));
+        if (unexplained > 0) {
+          (b.adjust = b.adjust || []).push({ id: uid('aj'), n: unexplained, reason: 'none',
+            date: b.date || today(),
+            note: 'Carried over from the stored round count when this batch was recorded.' });
+        }
+      }
+      delete b.remaining;
+      if (!Array.isArray(b.adjust)) b.adjust = [];
+    }
+    for (const l of db.brassLots) {
+      if (!Array.isArray(l.anneals)) {
+        l.anneals = l.lastAnneal ? [{ id: uid('an'), date: l.lastAnneal, note: '', at: 0 }] : [];
+      }
+      if (l.annealEvery == null) l.annealEvery = 1;
+    }
+  }
 }
 
 let DB = loadDb();
@@ -295,6 +342,40 @@ function costPerRound(b) {
  * rather than how many are gone.
  * ========================================================================*/
 
+/* ── What is left in the box ──────────────────────────────────────────────
+ *
+ * `remaining` used to be stored on the batch and decremented when a session
+ * was logged. It had every fault a stored counter has: type 100 rounds fired
+ * instead of 10 and it clamps to zero, permanently, with no session to edit
+ * and no way to put it back short of deleting the batch -- which takes its
+ * serial and all its other sessions with it. Worse, brassLife() read
+ * `qty − remaining` as "rounds fired", so one typo also aged the brass lot by
+ * a full extra cycle that could never be undone.
+ *
+ * So it is derived, exactly like component stock:
+ *
+ *     left = loaded − fired at recorded sessions − rounds otherwise accounted for
+ *
+ * Rounds leave a box for reasons other than being shot: pulled down for a
+ * component, given to a mate, dropped in the grass. Those are recorded the way
+ * culled cases are, as a dated line with a reason, so they reduce the count
+ * without pretending anything was fired -- brass wear comes from `roundsFired`
+ * alone, and a pulled round put no cycle on its case.
+ */
+const ROUND_REASONS = {
+  pulled: 'Pulled down', given: 'Given away', lost: 'Lost',
+  note: 'Other — see note', none: 'No reason given',
+};
+
+const roundsFired = (b) => sessionsFor(b.id)
+  .reduce((s, x) => s + Math.max(0, +x.rounds || 0), 0);
+
+const roundsAccounted = (b) => (b.adjust || [])
+  .reduce((s, a) => s + Math.max(0, +a.n || 0), 0);
+
+const roundsLeft = (b) =>
+  Math.max(0, (+b.qty || 0) - roundsFired(b) - roundsAccounted(b));
+
 /** What one batch draws, in natural units. Powder is in grains: the measured
  *  charge if it was weighed, otherwise the recipe's target. */
 function batchDraw(b) {
@@ -389,8 +470,10 @@ function brassLife(lot) {
   let cycles = 0, varr = 0, fired = 0;
   for (const b of DB.batches) {
     if (b.brassLot !== lot.id) continue;
-    // A loaded but unfired batch has put no wear on anything.
-    const n = Math.max(0, (+b.qty || 0) - Math.max(0, +b.remaining || 0));
+    // A loaded but unfired batch has put no wear on anything -- and neither
+    // has a round that was pulled down rather than shot, which is why this
+    // counts rounds FIRED rather than rounds gone.
+    const n = roundsFired(b);
     if (!n) continue;
     // The lot as it stood when these were fired, so a later cull cannot
     // rewrite the past.
@@ -411,7 +494,7 @@ function brassLife(lot) {
  *  batch returns them to the pool as once-more-fired brass. */
 const brassCommitted = (lot, exceptBatch) => DB.batches
   .filter(b => b.brassLot === lot.id && b.id !== exceptBatch)
-  .reduce((s, b) => s + Math.max(0, +b.remaining || 0), 0);
+  .reduce((s, b) => s + roundsLeft(b), 0);
 
 const brassAvailable = (lot, exceptBatch) =>
   brassOnHand(lot) - brassCommitted(lot, exceptBatch);
@@ -578,6 +661,28 @@ function batchMismatches(b) {
   return out;
 }
 
+/* ── Annealing ────────────────────────────────────────────────────────────
+ *
+ * The old check was `if (!lastAnneal && mean >= 3)`: warn once, and never
+ * again for the rest of the lot's life. Log a single anneal at three firings
+ * and the lot could reach ten with a years-old date on it and nothing said.
+ * Brass work-hardens continuously, so the question is never "has this ever
+ * been annealed" but "how many firings since the last time", against the
+ * interval the shooter actually works to -- every firing for most people,
+ * every two or three for some. `annealEvery: 0` turns it off.
+ */
+function annealState(l) {
+  const every = l.annealEvery == null ? 1 : +l.annealEvery;
+  const life = brassLife(l);
+  const list = l.anneals || [];
+  const last = list.length ? list[list.length - 1] : null;
+  // `at` is the lot's mean firings when the anneal was done. Old records have
+  // a date and no figure, so fall back to zero -- which errs toward nagging.
+  const since = last ? Math.max(0, life.mean - (+last.at || 0)) : life.mean;
+  return { every, since, last, ever: list.length > 0,
+           due: every > 0 && since >= every };
+}
+
 function brassChips(l) {
   const out = [];
   const life = brassLife(l);
@@ -585,7 +690,8 @@ function brassChips(l) {
   else if (life.mean >= l.expectedFirings) out.push(['bad', 'At life limit']);
   else if (life.hi >= l.expectedFirings) out.push(['warn', 'Some cases at limit']);
   else if (life.mean >= l.expectedFirings - 1) out.push(['warn', 'Near limit']);
-  if (!l.lastAnneal && life.mean >= 3) out.push(['warn', 'Never annealed']);
+  const an = annealState(l);
+  if (an.due) out.push(['warn', an.ever ? `Anneal due (${an.since.toFixed(1)} since)` : 'Never annealed']);
   return out;
 }
 
@@ -746,6 +852,12 @@ const FORMS = {
     { k: 'firings', l: 'Firings before now', t: 'num', def: 0,
       hint: 'Only what happened before this lot was recorded. Batches loaded here count themselves.' },
     { k: 'expectedFirings', l: 'Expected firings', t: 'num', def: 6 },
+    { k: 'annealEvery', l: 'Anneal every (firings)', t: 'num', def: 1, step: '1',
+      hint: 'The app nags when the lot is this far past its last anneal. 0 turns it off.' },
+    { k: 'trimTo', l: 'Trim-to length (in)', t: 'num', step: '0.001' },
+    { k: 'maxLength', l: 'Max case length (in)', t: 'num', step: '0.001',
+      hint: 'A case at or over this is a crimped neck waiting to happen.' },
+    { k: 'weightSort', l: 'Weight sort band (gr)', t: 'text', ph: '±0.5' },
     { k: 'cost', l: 'Lot cost ($)', t: 'num', step: '0.01', def: 0 },
     { k: 'origin', l: 'Origin', t: 'select',
       opts: [['new', 'New'], ['once-fired', 'Once-fired'], ['range pickup', 'Range pickup']] },
@@ -759,6 +871,23 @@ const FORMS = {
       ['note', 'Other — see note'], ['none', 'No reason given']] },
     { k: 'date', l: 'Date', t: 'date' },
     { k: 'note', l: 'Note', t: 'area' },
+  ]},
+
+  /* The same shape as a cull, one level up: rounds that left the box without
+   * being fired. Kept separate from a session because a pulled round put no
+   * cycle on its case, and brass wear counts firings. */
+  adjust: { title: 'Rounds accounted for', fields: [
+    { k: 'n', l: 'Rounds', t: 'num', req: true, def: 1 },
+    { k: 'reason', l: 'Where they went', t: 'select', opts: [
+      ['pulled', 'Pulled down'], ['given', 'Given away'], ['lost', 'Lost'],
+      ['note', 'Other — see note'], ['none', 'No reason given']] },
+    { k: 'date', l: 'Date', t: 'date' },
+    { k: 'note', l: 'Note', t: 'area' },
+  ]},
+
+  anneal: { title: 'Anneal', fields: [
+    { k: 'date', l: 'Date annealed', t: 'date' },
+    { k: 'note', l: 'Note', t: 'text', ph: 'AMP setting 118 / 6 sec' },
   ]},
 
   batch: { title: 'Batch', fields: [
@@ -781,7 +910,13 @@ const FORMS = {
     { k: 'chargeActual', l: 'Measured charge (gr)', t: 'num', step: '0.01' },
     { k: 'chargeSd', l: 'Charge SD (gr)', t: 'num', step: '0.01' },
     { k: 'coalMean', l: 'Measured COAL (in)', t: 'num', step: '0.001' },
+    { k: 'cbtoMean', l: 'Measured CBTO (in)', t: 'num', step: '0.001',
+      hint: 'Base to ogive — the number that actually repeats between bullet lots.' },
     { k: 'runout', l: 'Runout TIR (in)', t: 'num', step: '0.0001' },
+    { k: 'bump', l: 'Shoulder bump (in)', t: 'num', step: '0.0005',
+      hint: 'Measured off the fired case. This is what decides whether the bolt closes.' },
+    { k: 'bushing', l: 'Bushing / neck tension (in)', t: 'text', ph: '.289' },
+    { k: 'primerDepth', l: 'Primer seating depth (in)', t: 'num', step: '0.001' },
     { k: 'press', l: 'Press / dies', t: 'text' },
     { k: 'storage', l: 'Storage', t: 'text' },
     { k: 'notes', l: 'Notes', t: 'area' },
@@ -810,26 +945,31 @@ const FORMS = {
 /* Transient state for form controls that need it between renders. */
 const UI = { lookup: {}, marks: {}, formKind: null, toast: null, cartNew: {} };
 
-function fieldHtml(f, kind) {
+/* `rec` is the record being edited, or null when creating. Every control reads
+ * its current value from it, so one description of a field serves both. */
+function fieldHtml(f, kind, rec) {
   const hint = f.hint ? `<span class="fhint">${esc(f.hint)}</span>` : '';
   const req = f.req ? 'required' : '';
+  // A stored null and an absent key both mean "not set"; a stored 0 does not.
+  const has = rec && rec[f.k] !== undefined && rec[f.k] !== null && rec[f.k] !== '';
+  const val = has ? rec[f.k] : null;
   let ctrl = '';
 
   switch (f.t) {
     case 'area':
-      ctrl = `<textarea name="${f.k}"></textarea>`; break;
+      ctrl = `<textarea name="${f.k}">${has ? esc(String(val)) : ''}</textarea>`; break;
 
     case 'num':
       ctrl = `<input type="number" inputmode="decimal" name="${f.k}"
         ${f.step ? `step="${f.step}"` : 'step="any"'}
-        ${f.def != null ? `value="${f.def}"` : ''} ${req}>`; break;
+        ${has ? `value="${esc(String(val))}"` : (f.def != null && !rec ? `value="${f.def}"` : '')} ${req}>`; break;
 
     case 'date':
-      ctrl = `<input type="date" name="${f.k}" value="${today()}">`; break;
+      ctrl = `<input type="date" name="${f.k}" value="${has ? esc(String(val)) : today()}">`; break;
 
     case 'select':
       ctrl = `<select name="${f.k}">${f.opts.map(([v, l]) =>
-        `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>`; break;
+        `<option value="${esc(v)}" ${v === val ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`; break;
 
     case 'ref': {
       const rows = f.ref();
@@ -839,7 +979,8 @@ function fieldHtml(f, kind) {
             f.req ? ' This is required before you can continue.' : ''}</div></div></label>`;
       }
       ctrl = `<select name="${f.k}" ${req}>${!f.req ? '<option value="">—</option>' : ''}
-        ${rows.map(r => `<option value="${r.id}">${esc(f.label(r))}</option>`).join('')}</select>`;
+        ${rows.map(r => `<option value="${r.id}" ${r.id === val ? 'selected' : ''}>${
+          esc(f.label(r))}</option>`).join('')}</select>`;
       break;
     }
 
@@ -854,7 +995,7 @@ function fieldHtml(f, kind) {
       ctrl = `<select name="${f.k}" data-act="cartsel" data-key="${f.k}" ${req}>
           ${DB.cartridges.length ? '' : '<option value="__new">— add the first cartridge —</option>'}
           ${DB.cartridges.map(c =>
-            `<option value="${c.id}" ${open ? '' : ''}>${esc(c.name)}</option>`).join('')}
+            `<option value="${c.id}" ${!open && c.id === val ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
           <option value="__new" ${open ? 'selected' : ''}>+ Add new cartridge…</option>
         </select>
         <input type="text" name="${f.k}__new" class="mt6 ${open ? '' : 'hidden'}"
@@ -885,6 +1026,7 @@ function fieldHtml(f, kind) {
       const listId = f.list ? `dl_${kind}_${f.k}` : null;
       const items = f.list ? [...new Set(f.list())].filter(Boolean) : [];
       ctrl = `<input type="text" name="${f.k}" ${req} ${f.ph ? `placeholder="${esc(f.ph)}"` : ''}
+        ${has ? `value="${esc(String(val))}"` : ''}
         ${listId ? `list="${listId}"` : ''} autocomplete="off">`
         + (listId ? `<datalist id="${listId}">${items.map(i =>
             `<option value="${esc(i)}">`).join('')}</datalist>` : '');
@@ -896,20 +1038,22 @@ function fieldHtml(f, kind) {
 function formHtml(kind, ctx) {
   const spec = FORMS[kind];
   const shown = (ctx && ctx.kindSel) || null;
+  const rec = (ctx && ctx.rec) || null;
   // Every field is rendered. Type-specific ones are hidden with a class and
   // toggled on change -- re-rendering the form would reset the <select> to its
   // first option and throw away anything already typed.
-  return `<form id="frm" class="card" data-kind="${kind}" novalidate>
+  return `<form id="frm" class="card" data-kind="${kind}" ${rec ? `data-edit="${rec.id}"` : ''} novalidate>
     ${spec.fields.map(f => {
       const html = f.only
-        ? `<div data-only="${f.only}" class="${f.only === shown ? '' : 'hidden'}">${fieldHtml(f, kind)}</div>`
-        : fieldHtml(f, kind);
+        ? `<div data-only="${f.only}" class="${f.only === shown ? '' : 'hidden'}">${fieldHtml(f, kind, rec)}</div>`
+        : fieldHtml(f, kind, rec);
       // The draw preview sits immediately under "Rounds loaded", not at the
       // foot of the form. It is the consequence of that one number, and a
       // consequence ten fields below the cause is a consequence nobody reads.
       return (kind === 'batch' && f.k === 'qty') ? html + '<div id="drawpv"></div>' : html;
     }).join('')}
-    <button class="btn primary wide" type="submit">Save ${esc(spec.title.toLowerCase())}</button>
+    <button class="btn primary wide" type="submit">${rec ? 'Save changes'
+      : 'Save ' + esc(spec.title.toLowerCase())}</button>
   </form>`;
 }
 
@@ -997,8 +1141,14 @@ function readForm(form, kind) {
   return out;
 }
 
-/** Returns an error string, or null when the record is acceptable. */
-function validate(kind, d) {
+/** Returns an error string, or null when the record is acceptable.
+ *
+ *  `editId` is the record being edited, when there is one. Every check that
+ *  asks "does this collide with what already exists?" has to exclude the
+ *  record itself, or editing a brass lot without touching its colour code
+ *  would fail on the grounds that its own code is taken, and editing a batch
+ *  would find the components it already holds unavailable. */
+function validate(kind, d, editId) {
   for (const f of FORMS[kind].fields) {
     if (!f.req) continue;
     if (f.only && f.only !== d.kind) continue;
@@ -1008,10 +1158,30 @@ function validate(kind, d) {
       return `${f.l} is required.`;
     }
   }
-  if (kind === 'brass' && DB.brassLots.some(l => marksEqual(l.marks, d.marks))) {
+  if (kind === 'brass' && DB.brassLots.some(l => l.id !== editId && marksEqual(l.marks, d.marks))) {
     return 'That colour code is already in use.';
   }
   if (kind === 'component' && d.qty <= 0) return 'Quantity must be greater than zero.';
+  if (kind === 'component' && editId) {
+    const lot = byId(DB.componentLots, editId);
+    // Correcting a purchase quantity downward is legitimate; correcting it
+    // below what batches have already drawn is not a correction, it is a
+    // negative stock figure.
+    const used = lot ? lotUsed(Object.assign({}, lot, { unit: d.unit || lot.unit })) : 0;
+    if (d.qty < used) {
+      return `Batches have already drawn ${used.toFixed(used % 1 ? 3 : 0)} from this lot. `
+        + `Set it to ${Math.ceil(used)} or more, or delete those batches first.`;
+    }
+  }
+  if (kind === 'brass' && editId) {
+    const lot = byId(DB.brassLots, editId);
+    const gone = lot ? casesLost(lot) : 0;
+    const loaded = lot ? brassCommitted(lot) : 0;
+    if (d.initialQty < gone + loaded) {
+      return `${gone} case${gone === 1 ? '' : 's'} removed and ${loaded} sitting in loaded `
+        + `rounds already account for ${gone + loaded}. The lot cannot be smaller than that.`;
+    }
+  }
   if (kind === 'cull') {
     const l = byId(DB.brassLots, (cur().arg || {}).lot);
     if (!l) return 'That brass lot no longer exists.';
@@ -1038,7 +1208,9 @@ function validate(kind, d) {
       return `${bl.serial} is ${cartName(bl.cartridge)} brass and this recipe is `
         + `${cartName(rr.cartridge)}. Pick a lot in the right cartridge.`;
     }
-    const brassLot = bl;
+    // Editing a batch already loaded on this brass is not the moment to
+    // refuse: the rounds exist. Only a NEW batch is blocked.
+    const brassLot = editId ? null : bl;
     if (brassLot && !brassLot.retired) {
       const life = brassLife(brassLot);
       if (life.mean >= brassLot.expectedFirings && brassLot.expectedFirings > 0) {
@@ -1052,10 +1224,10 @@ function validate(kind, d) {
     // Refuse rather than go negative. A stock figure that can be negative is
     // not a stock figure, and silently allowing it is how the inventory stops
     // being worth reading.
-    const pv = drawPreview(d);
+    const pv = drawPreview(d, editId);
     const short = pv.rows.filter(r => r.short);
     if (short.length) {
-      const cap = maxRoundsFor(d);
+      const cap = maxRoundsFor(d, editId);
       const dp = (r) => (r.unit === 'lb' ? 3 : 0);
       return `Not enough ${short.map(r => esc(r.name)).join(' and ')}. `
         + short.map(r => `${r.name}: need ${r.need.toFixed(dp(r))}${r.unit}, `
@@ -1232,6 +1404,7 @@ VIEWS.brassDetail = (id) => {
   const pct = Math.min(100, l.expectedFirings ? life.mean / l.expectedFirings * 100 : 0);
   const hiPct = Math.min(100, l.expectedFirings ? life.hi / l.expectedFirings * 100 : 0);
   const bar = pct >= 100 ? 'var(--bad)' : hiPct >= 100 ? 'var(--warn)' : 'var(--ok)';
+  const an = annealState(l);
   return `<div class="card">
       <div class="spread mb8">
         <div><h2 class="m0">${esc(l.headstamp)}</h2>
@@ -1262,7 +1435,14 @@ VIEWS.brassDetail = (id) => {
         <dt>Committed</dt><dd class="mono">${brassCommitted(l)} loaded · ${brassAvailable(l)} free</dd>
         <dt>Origin</dt><dd>${esc(l.origin || '—')}</dd>
         <dt>Acquired</dt><dd>${fmtDate(l.acquired)}</dd>
-        <dt>Last anneal</dt><dd>${l.lastAnneal ? fmtDate(l.lastAnneal) : '<span class="chip warn">never</span>'}</dd>
+        <dt>Last anneal</dt><dd>${an.last
+          ? `${fmtDate(an.last.date)} <span class="dim">· ${an.since.toFixed(1)} firing${
+              an.since === 1 ? '' : 's'} since</span>`
+          : '<span class="chip warn">never</span>'}</dd>
+        ${an.every > 0 ? `<dt>Anneal interval</dt><dd class="mono">every ${an.every}</dd>` : ''}
+        ${l.trimTo ? `<dt>Trim to</dt><dd class="mono">${l.trimTo}"${
+          l.maxLength ? ` <span class="dim">· max ${l.maxLength}"</span>` : ''}</dd>` : ''}
+        ${l.weightSort ? `<dt>Weight sorted</dt><dd class="mono">${esc(l.weightSort)}</dd>` : ''}
         <dt>Lot cost</dt><dd class="mono">${l.cost ? money2(l.cost) : '—'}</dd>
         <dt>Amortised</dt><dd class="mono">${l.cost && l.initialQty && l.expectedFirings
           ? money(l.cost / (l.initialQty * l.expectedFirings)) + '/rd' : '—'}</dd>
@@ -1284,11 +1464,20 @@ VIEWS.brassDetail = (id) => {
           <span class="sub">${b.qty} rounds · ${fmtDate(b.date)}</span></span>
           <span class="chev">›</span></button>`).join('')
       : '<div class="empty"><p>Not loaded into any batch yet.</p></div>'}</div>
+    ${(l.anneals || []).length ? `<div class="card"><h2>Annealing</h2>
+      ${l.anneals.slice().reverse().map(a => `<div class="rowline">
+        <div class="spread small"><span>${fmtDate(a.date)}</span>
+          <span class="mono dim">at ${(+a.at || 0).toFixed(1)}f
+            <button class="linkbtn" data-act="unanneal" data-arg="${l.id}:${a.id}">undo</button></span></div>
+        ${a.note ? `<div class="tiny dim">${esc(a.note)}</div>` : ''}</div>`).join('')}
+    </div>` : ''}
     <div class="btnrow noprint">
       <button class="btn" data-act="cull" data-arg="${l.id}">Remove cases</button>
       <button class="btn" data-act="logfire" data-arg="${l.id}"
         title="For firings this app did not see — batches count themselves">+1 outside firing</button>
-      <button class="btn" data-act="loganneal" data-arg="${l.id}">Log anneal</button>
+      <button class="btn ${an.due ? 'primary' : ''}" data-act="loganneal" data-arg="${l.id}">Log anneal</button>
+      <button class="btn" data-act="edit" data-kind="brass" data-arg="${l.id}">Edit</button>
+      <button class="btn" data-act="retire" data-arg="${l.id}">${l.retired ? 'Return to service' : 'Retire lot'}</button>
       <button class="btn danger" data-act="delBrass" data-arg="${l.id}">Delete</button>
     </div>`;
 };
@@ -1302,7 +1491,7 @@ VIEWS.ammo = () => {
           <span class="grow">
             <span class="ttl mono">${esc(b.serial)}</span>
             <span class="sub">${esc(r ? r.name : 'recipe missing')}</span>
-            <span class="sub">${b.remaining} of ${b.qty} rounds · ${fmtDate(b.date)}</span>
+            <span class="sub">${roundsLeft(b)} of ${b.qty} rounds · ${fmtDate(b.date)}</span>
             <span class="sub mt5">${chips(batchChips(b))}</span>
           </span><span class="chev">›</span></button>`;
       }).join('')
@@ -1359,12 +1548,22 @@ VIEWS.ammoDetail = (id) => {
     <hr>
     <dl class="kv">
       <dt>Loaded</dt><dd>${fmtDate(b.date)}</dd>
-      <dt>Rounds</dt><dd class="mono">${b.remaining} of ${b.qty} remaining</dd>
+      <dt>Rounds</dt><dd class="mono">${roundsLeft(b)} of ${b.qty} remaining</dd>
+      ${roundsFired(b) ? `<dt>Fired</dt><dd class="mono">${roundsFired(b)}</dd>` : ''}
+      ${roundsAccounted(b) ? `<dt>Otherwise gone</dt><dd class="mono">${roundsAccounted(b)}</dd>` : ''}
       <dt>Storage</dt><dd>${esc(b.storage || '—')}</dd>
     </dl>
+    ${(b.adjust || []).length ? `<hr><div class="small muted">${(b.adjust || []).map(a =>
+      `<div class="spread"><span>${fmtDate(a.date)} · ${esc(ROUND_REASONS[a.reason] || a.reason)}${
+        a.note ? ' — ' + esc(a.note) : ''}</span>
+       <span class="mono">−${a.n}
+         <button class="linkbtn" data-act="unadjust" data-arg="${b.id}:${a.id}">undo</button></span></div>`
+      ).join('')}</div>` : ''}
     <div class="btnrow mt12 noprint">
       <button class="btn primary" data-act="label" data-arg="${b.id}">Label</button>
       <button class="btn" data-act="newSessionFor" data-arg="${b.id}">Log range session</button>
+      <button class="btn" data-act="adjustRounds" data-arg="${b.id}">Account for rounds</button>
+      <button class="btn" data-act="editBatch" data-arg="${b.id}">Edit</button>
       <button class="btn ${b.quarantine ? '' : 'danger'}" data-act="toggleQ" data-arg="${b.id}">
         ${b.quarantine ? 'Release' : 'Quarantine'}</button>
     </div>
@@ -1374,9 +1573,15 @@ VIEWS.ammoDetail = (id) => {
       <dt>Charge</dt><dd class="mono">${b.chargeActual ?? (r ? r.charge : '—')} gr</dd>
       ${b.chargeSd != null ? `<dt>Charge SD</dt><dd class="mono">${b.chargeSd} gr</dd>` : ''}
       <dt>COAL</dt><dd class="mono">${b.coalMean ?? (r ? r.coal : null) ?? '—'}"</dd>
+      ${(b.cbtoMean ?? (r ? r.cbto : null)) != null
+        ? `<dt>CBTO</dt><dd class="mono">${b.cbtoMean ?? r.cbto}"</dd>` : ''}
+      ${b.bump != null ? `<dt>Shoulder bump</dt><dd class="mono">${b.bump}"</dd>` : ''}
+      ${b.bushing ? `<dt>Bushing</dt><dd class="mono">${esc(b.bushing)}</dd>` : ''}
+      ${b.primerDepth != null ? `<dt>Primer depth</dt><dd class="mono">${b.primerDepth}"</dd>` : ''}
       ${b.runout != null ? `<dt>Runout TIR</dt><dd class="mono">${b.runout}"</dd>` : ''}
       ${b.press ? `<dt>Press / dies</dt><dd>${esc(b.press)}</dd>` : ''}
     </dl>
+    ${b.notes && !b.quarantine ? `<hr><p class="small muted m0">${esc(b.notes)}</p>` : ''}
     ${r ? `<hr><div class="small muted"><b>Source:</b> ${esc(r.source)}${
       r.page ? ' · ' + esc(r.page) : ''}${pct != null ? `<br>Published max ${r.sourceMax} gr —
       this ammunition is <b style="color:${pct > 100 ? 'var(--bad)' : pct > 97 ? 'var(--warn)' : 'var(--ok)'}">${
@@ -1411,13 +1616,19 @@ VIEWS.ammoDetail = (id) => {
         <div class="spread"><b class="small">${fmtDate(s.date)}</b>
           <span class="small dim">${esc(f ? f.name : '')}</span></div>
         <dl class="kv mt6">
+          <dt>Rounds</dt><dd class="mono">${s.rounds ?? '—'}</dd>
           ${s.vAvg != null ? `<dt>Velocity</dt><dd class="mono">${s.vAvg} fps</dd>` : ''}
           ${s.vSd != null ? `<dt>SD / ES</dt><dd class="mono">${s.vSd} / ${s.vEs ?? '—'}</dd>` : ''}
           ${s.group != null ? `<dt>Group @ ${s.distance}y</dt><dd class="mono">${s.group}"</dd>` : ''}
+          ${s.temp != null ? `<dt>Temperature</dt><dd class="mono">${s.temp}°F</dd>` : ''}
           <dt>Pressure signs</dt><dd>${s.pressureSigns === 'none'
             ? '<span class="chip ok">none</span>'
             : `<span class="chip bad">${esc(s.pressureSigns)}</span>`}</dd>
-        </dl>${s.notes ? `<p class="small muted mt6 m0">${esc(s.notes)}</p>` : ''}</div>`;
+        </dl>${s.notes ? `<p class="small muted mt6 m0">${esc(s.notes)}</p>` : ''}
+        <div class="btnrow mt8 noprint">
+          <button class="btn sm" data-act="editSession" data-arg="${s.id}">Edit</button>
+          <button class="btn sm danger" data-act="delSession" data-arg="${s.id}">Delete</button>
+        </div></div>`;
     }).join('') : '<div class="empty"><p>Nothing fired from this batch yet.</p></div>'}</div>
   <div class="btnrow noprint">
     <button class="btn danger" data-act="delBatch" data-arg="${b.id}">Delete batch</button>
@@ -1709,12 +1920,20 @@ VIEWS.data = () => {
 VIEWS.form = (arg) => {
   const kind = arg.kind;
   const spec = FORMS[kind];
+  const rec = arg.id ? byId(HOMES[kind].list(), arg.id) : null;
+  if (arg.id && !rec) return `<div class="empty">That record no longer exists.</div>`;
   const blockers = spec.fields.filter(f => f.hard && !f.ref().length);
-  if (blockers.length) {
+  if (blockers.length && !rec) {
     return `<div class="banner warn"><div><b>${esc(blockers[0].l)} required.</b>
       <span class="small">Add one before creating a ${esc(spec.title.toLowerCase())}.</span></div></div>`;
   }
-  return `<div id="formErr"></div>` + formHtml(kind, { kindSel: UI.formKind });
+  // Editing a batch shows what it would draw with itself excluded, so its own
+  // components read as available rather than as already spent.
+  const head = rec ? `<div class="card"><div class="small muted m0">Editing
+    <b class="mono">${esc(rec.serial || spec.title)}</b>. The serial does not change —
+    it is printed on labels that are already in boxes.</div></div>` : '';
+  return head + `<div id="formErr"></div>`
+    + formHtml(kind, { kindSel: rec ? rec.kind : UI.formKind, rec });
 };
 
 /* ==========================================================================
@@ -1777,7 +1996,7 @@ async function doSync() {
   UI.sync = { ...(UI.sync || {}), busy: true, msg: null };
   render();
   try {
-    const { queued, blocked } = BenchSync.push(CORE, DB, lotLeft);
+    const { queued, blocked } = BenchSync.push(CORE, DB, lotLeft, roundsLeft);
     save();                                   // ids first, network second
     const r = await CORE.sync({ trigger: 'manual' });
     UI.sync = {
@@ -1795,48 +2014,102 @@ async function doSync() {
   render();
 }
 
+/* ==========================================================================
+ * Saving, and the thing that was missing: saving again.
+ *
+ * Every form used to run one code path that only ever pushed a new record.
+ * Combined with guardedDelete below -- which quite correctly refuses to delete
+ * anything a batch points at -- that made a typo permanent. Record a brass lot
+ * as 100 cases when you counted 200, load one batch from it, and the lot was
+ * uneditable AND undeletable for as long as you owned it.
+ *
+ * So each kind declares FIELDS: the map from a submitted form to the record's
+ * own columns, and nothing else. Creating is that map plus the things only
+ * creation decides (an id, a serial, an empty cull list, the acquisition date).
+ * Editing is that same map applied over the record that already exists. There
+ * is one description of what a brass lot's fields are, so the two cannot drift.
+ *
+ * What editing deliberately does NOT touch: serials, because a serial is
+ * printed on a label in a box somewhere and changing it strands that label;
+ * ids; culls and adjustments, which are their own dated records; and anything
+ * derived, which by definition has no stored value to change.
+ * ========================================================================*/
+const FIELDS = {
+  firearm: (d) => ({ name: d.name, cartridge: d.cartridge, barrel: d.barrel,
+    twist: d.twist, sightHeight: d.sightHeight, zeroRange: d.zeroRange, notes: d.notes }),
+  component: (d) => ({ kind: d.kind, name: d.name, lot: d.lot, qty: d.qty,
+    unit: d.unit || 'ea', cost: d.cost || 0, vendor: d.vendor,
+    weightGr: d.weightGr, bcG1: d.bcG1, bcG7: d.bcG7 }),
+  recipe: (d) => ({ name: d.name, cartridge: d.cartridge, bullet: d.bullet,
+    powder: d.powder, primer: d.primer, charge: d.charge, coal: d.coal,
+    cbto: d.cbto, source: d.source, page: d.page, sourceMax: d.sourceMax, notes: d.notes }),
+  brass: (d) => ({ marks: d.marks, cartridge: d.cartridge, headstamp: d.headstamp,
+    maker: d.maker, initialQty: d.initialQty, firings: d.firings || 0,
+    expectedFirings: d.expectedFirings || 6, annealEvery: d.annealEvery,
+    cost: d.cost || 0, origin: d.origin, notes: d.notes,
+    trimTo: d.trimTo, maxLength: d.maxLength, weightSort: d.weightSort }),
+  batch: (d) => ({ recipe: d.recipe, brassLot: d.brassLot, bulletLot: d.bulletLot,
+    powderLot: d.powderLot, primerLot: d.primerLot, date: d.date || today(),
+    qty: d.qty, chargeActual: d.chargeActual, chargeSd: d.chargeSd,
+    coalMean: d.coalMean, cbtoMean: d.cbtoMean, runout: d.runout,
+    bump: d.bump, bushing: d.bushing, primerDepth: d.primerDepth,
+    press: d.press, storage: d.storage, notes: d.notes }),
+  session: (d) => ({ batch: d.batch, firearm: d.firearm, date: d.date || today(),
+    rounds: d.rounds, distance: d.distance, vAvg: d.vAvg, vSd: d.vSd, vEs: d.vEs,
+    group: d.group, temp: d.temp, pressureSigns: d.pressureSigns || 'none', notes: d.notes }),
+};
+
+/** The collection and detail screen for each kind, so edit can return to where
+ *  the record actually lives rather than to a list. */
+const HOMES = {
+  firearm: { list: () => DB.firearms, nav: 'firearms' },
+  component: { list: () => DB.componentLots, nav: 'inventory' },
+  recipe: { list: () => DB.recipes, nav: 'recipes' },
+  brass: { list: () => DB.brassLots, detail: 'brassDetail' },
+  batch: { list: () => DB.batches, detail: 'ammoDetail' },
+  session: { list: () => DB.sessions, detail: null },
+};
+
+/** Apply an edit. Shared by every kind: find it, overlay the field map, done. */
+function applyEdit(kind, id, d) {
+  const rec = byId(HOMES[kind].list(), id);
+  if (!rec) return ['err', null, 'That record no longer exists.'];
+  Object.assign(rec, FIELDS[kind](d));
+  if (kind === 'brass') rec.qty = brassOnHand(rec);   // kept in step for exports
+  const home = HOMES[kind];
+  const msg = 'Changes saved.';
+  if (kind === 'session') return ['goDetail', ['ammoDetail', rec.batch], msg];
+  return home.detail ? ['goDetail', [home.detail, rec.id], msg] : ['nav', home.nav, msg];
+}
+
 /* Creation: exactly one save path per kind. */
 const SAVERS = {
   firearm: (d) => {
-    DB.firearms.push({ id: uid('f'), name: d.name, cartridge: d.cartridge,
-      barrel: d.barrel, twist: d.twist, sightHeight: d.sightHeight,
-      zeroRange: d.zeroRange, notes: d.notes });
+    DB.firearms.push(Object.assign({ id: uid('f') }, FIELDS.firearm(d)));
     return ['nav', 'firearms', 'Firearm saved.'];
   },
   component: (d) => {
-    DB.componentLots.push({ id: uid('cl'), serial: Serial.shortCode('C', takenSerials()),
-      kind: d.kind, name: d.name, lot: d.lot, qty: d.qty,
-      unit: d.unit || 'ea', cost: d.cost || 0, vendor: d.vendor,
-      weightGr: d.weightGr, bcG1: d.bcG1, bcG7: d.bcG7 });
+    DB.componentLots.push(Object.assign(
+      { id: uid('cl'), serial: Serial.shortCode('C', takenSerials()) }, FIELDS.component(d)));
     return ['nav', 'inventory', 'Component lot saved.'];
   },
   recipe: (d) => {
-    DB.recipes.push({ id: uid('r'), name: d.name, cartridge: d.cartridge,
-      bullet: d.bullet, powder: d.powder, primer: d.primer, charge: d.charge,
-      coal: d.coal, cbto: d.cbto, source: d.source, page: d.page,
-      sourceMax: d.sourceMax, notes: d.notes });
+    DB.recipes.push(Object.assign({ id: uid('r') }, FIELDS.recipe(d)));
     return ['nav', 'recipes', 'Recipe saved.'];
   },
   brass: (d) => {
     const serial = Serial.shortCode('R', takenSerials());
     if (!serial) return ['err', null, 'Serial space exhausted.'];
-    const rec = { id: uid('bl'), serial, marks: d.marks, cartridge: d.cartridge,
-      headstamp: d.headstamp, maker: d.maker, initialQty: d.initialQty,
-      qty: d.initialQty, firings: d.firings || 0,
-      expectedFirings: d.expectedFirings || 6, cost: d.cost || 0, culls: [],
-      origin: d.origin, acquired: today(), lastAnneal: null, retired: false, notes: d.notes };
+    const rec = Object.assign({ id: uid('bl'), serial, qty: d.initialQty, culls: [],
+      acquired: today(), anneals: [], retired: false }, FIELDS.brass(d));
     DB.brassLots.push(rec);
     return ['goDetail', ['brassDetail', rec.id], `Brass lot ${serial} created.`];
   },
   batch: (d) => {
     const serial = Serial.batchSerial(d.date || today(), takenSerials());
     if (!serial) return ['err', null, 'No serial left for that date — 99 batches already.'];
-    const rec = { id: uid('ba'), serial, recipe: d.recipe, brassLot: d.brassLot,
-      bulletLot: d.bulletLot, powderLot: d.powderLot, primerLot: d.primerLot,
-      date: d.date || today(), qty: d.qty, remaining: d.qty,
-      chargeActual: d.chargeActual, chargeSd: d.chargeSd, coalMean: d.coalMean,
-      runout: d.runout, press: d.press, storage: d.storage,
-      quarantine: false, notes: d.notes };
+    const rec = Object.assign({ id: uid('ba'), serial, adjust: [], quarantine: false },
+      FIELDS.batch(d));
     DB.batches.push(rec);
     return ['goDetail', ['ammoDetail', rec.id], `Batch ${serial} created.`];
   },
@@ -1855,14 +2128,35 @@ const SAVERS = {
       `${d.n} case${d.n === 1 ? '' : 's'} removed — ${brassOnHand(l)} left.`];
   },
 
+  /* No decrement here any more. The rounds left in a box are derived from the
+   * sessions fired out of it, so logging one IS the decrement -- and deleting a
+   * mistyped one puts the rounds back, and un-ages the brass, for free. */
   session: (d) => {
-    DB.sessions.push({ id: uid('se'), batch: d.batch, firearm: d.firearm,
-      date: d.date || today(), rounds: d.rounds, distance: d.distance,
-      vAvg: d.vAvg, vSd: d.vSd, vEs: d.vEs, group: d.group, temp: d.temp,
-      pressureSigns: d.pressureSigns || 'none', notes: d.notes });
-    const b = byId(DB.batches, d.batch);
-    if (b) b.remaining = Math.max(0, b.remaining - (d.rounds || 0));
+    DB.sessions.push(Object.assign({ id: uid('se') }, FIELDS.session(d)));
     return ['goDetail', ['ammoDetail', d.batch], 'Session saved — batch is no longer untested.'];
+  },
+
+  anneal: (d) => {
+    const l = byId(DB.brassLots, (cur().arg || {}).lot);
+    if (!l) return ['err', null, 'That brass lot no longer exists.'];
+    (l.anneals = l.anneals || []).push({ id: uid('an'),
+      date: d.date || today(), note: d.note || '', at: brassLife(l).mean });
+    l.anneals.sort((a, b) => (a.date < b.date ? -1 : 1));
+    l.lastAnneal = l.anneals[l.anneals.length - 1].date;
+    return ['goDetail', ['brassDetail', l.id], 'Anneal logged.'];
+  },
+
+  /* Rounds that left the box without being fired. Recorded as a dated line
+   * rather than by editing a counter, so "where did the other twelve go" has
+   * an answer, and so brass wear -- which counts firings only -- is unaffected. */
+  adjust: (d) => {
+    const b = byId(DB.batches, (cur().arg || {}).batch);
+    if (!b) return ['err', null, 'That batch no longer exists.'];
+    (b.adjust = b.adjust || []).push({ id: uid('aj'), n: d.n,
+      reason: ROUND_REASONS[d.reason] ? d.reason : 'none',
+      date: d.date || today(), note: d.note || '' });
+    return ['goDetail', ['ammoDetail', b.id],
+      `${d.n} round${d.n === 1 ? '' : 's'} accounted for — ${roundsLeft(b)} left.`];
   },
 };
 
@@ -1894,6 +2188,38 @@ const ACTIONS = {
   new: (a) => { UI.marks = {}; UI.formKind = a === 'component' ? 'bullet' : null;
                 UI.cartNew = {}; go('form', { kind: a }); },
   newSessionFor: (a) => { UI.cartNew = {}; go('form', { kind: 'session', batch: a }); },
+
+  /* Editing. `marks` lives in UI state rather than on the form, so the colour
+   * pickers have to be seeded from the record or an edit would silently clear
+   * the code the lot is identified by. */
+  edit: (a, el) => {
+    const kind = el.dataset.kind;
+    const rec = byId(HOMES[kind].list(), a);
+    if (!rec) { toast('That record no longer exists.'); return; }
+    UI.marks = kind === 'brass' ? Object.assign({}, rec.marks) : {};
+    UI.formKind = kind === 'component' ? rec.kind : null;
+    UI.cartNew = {};
+    go('form', { kind, id: a, batch: rec.batch });
+  },
+  editBatch: (a) => ACTIONS.edit(a, { dataset: { kind: 'batch' } }),
+  editSession: (a) => ACTIONS.edit(a, { dataset: { kind: 'session' } }),
+
+  adjustRounds: (a) => { UI.cartNew = {}; go('form', { kind: 'adjust', batch: a }); },
+  unadjust: (a) => {
+    const [bid, aid] = String(a).split(':');
+    const b = byId(DB.batches, bid);
+    if (!b) return;
+    b.adjust = (b.adjust || []).filter(x => x.id !== aid);
+    save(); toast('Put back.'); render();
+  },
+  delSession: (a) => {
+    const s2 = byId(DB.sessions, a);
+    if (!s2) return;
+    // No counter to restore. The rounds and the brass wear both come back
+    // because both were derived from this record in the first place.
+    DB.sessions = DB.sessions.filter(x => x.id !== a);
+    save(); toast('Session deleted — rounds and brass wear returned.'); render();
+  },
 
   /* The app already knows the largest loadable count; making the user retype
    * it is busywork. Tapping the figure fills the field. */
@@ -1944,15 +2270,43 @@ const ACTIONS = {
     save(); toast(`Baseline +1 — ${l.serial} now at ${brassLife(l).mean.toFixed(2)} firings.`);
     render(); },
   cull: (a) => { UI.cartNew = {}; go('form', { kind: 'cull', lot: a }); },
-  loganneal: (a) => { const l = byId(DB.brassLots, a); l.lastAnneal = today();
-    save(); toast('Anneal logged.'); render(); },
+  loganneal: (a) => { UI.cartNew = {}; go('form', { kind: 'anneal', lot: a }); },
+  unanneal: (a) => {
+    const [lid, aid] = String(a).split(':');
+    const l = byId(DB.brassLots, lid);
+    if (!l) return;
+    l.anneals = (l.anneals || []).filter(x => x.id !== aid);
+    l.lastAnneal = l.anneals.length ? l.anneals[l.anneals.length - 1].date : null;
+    save(); toast('Anneal removed.'); render();
+  },
+  retire: (a) => {
+    const l = byId(DB.brassLots, a);
+    if (!l) return;
+    const loaded = brassCommitted(l);
+    if (!l.retired && loaded > 0) {
+      toast(`${loaded} case${loaded === 1 ? '' : 's'} are still in loaded rounds — fire or pull those first.`);
+      return;
+    }
+    l.retired = !l.retired;
+    save(); toast(l.retired ? 'Lot retired — it will not be offered for new batches.'
+                            : 'Lot back in service.');
+    render();
+  },
 
   delBrass: (a) => guardedDelete('brass', a),
   delRecipe: (a) => { guardedDelete('recipe', a); if (cur().v !== 'recipes') reset('recipes'); },
   delComponent: (a) => { guardedDelete('component', a); if (cur().v !== 'inventory') reset('inventory'); },
   delFirearm: (a) => { guardedDelete('firearm', a); if (cur().v !== 'firearms') reset('firearms'); },
-  delBatch: (a) => { DB.sessions = DB.sessions.filter(s => s.batch !== a);
-    DB.batches = DB.batches.filter(b => b.id !== a); save(); toast('Batch deleted.'); reset('ammo'); },
+  delBatch: (a) => {
+    const b = byId(DB.batches, a);
+    const n = DB.sessions.filter(s => s.batch === a).length;
+    // Deleting a batch takes its serial and every session fired from it. That
+    // is a lot to do on one tap of a button next to "Quarantine".
+    if (!confirm(`Delete batch ${b ? b.serial : ''}?`
+      + (n ? `\n\nThis also deletes ${n} range session${n === 1 ? '' : 's'} logged against it.` : '')
+      + '\n\nComponents and cases go back to their lots. This cannot be undone.')) return;
+    DB.sessions = DB.sessions.filter(s => s.batch !== a);
+    DB.batches = DB.batches.filter(x => x.id !== a); save(); toast('Batch deleted.'); reset('ammo'); },
 
   posAdd: (a) => { scheme().positions.push(a === 'head'
       ? { id: uid('p'), label: 'Case head', hint: 'around the primer', at: null, kind: 'head' }
@@ -2070,13 +2424,14 @@ document.addEventListener('submit', (e) => {
   e.preventDefault();
   const form = e.target;
   const kind = form.dataset.kind;
-  if (!kind || !SAVERS[kind]) return;
+  if (!kind || !(SAVERS[kind] || form.dataset.edit)) return;
 
   const d = readForm(form, kind);
+  const editId = form.dataset.edit || null;
   if (kind === 'session' && cur().arg && cur().arg.batch) d.batch = cur().arg.batch;
   if (kind === 'cull' && cur().arg && cur().arg.lot) d.lot = cur().arg.lot;
 
-  const err = validate(kind, d);
+  const err = validate(kind, d, editId);
   const box = document.getElementById('formErr');
   if (err) {
     if (box) box.innerHTML = `<div class="banner bad"><div>${esc(err)}</div></div>`;
@@ -2090,7 +2445,7 @@ document.addEventListener('submit', (e) => {
     }
   }
 
-  const [mode, target, msg] = SAVERS[kind](d);
+  const [mode, target, msg] = editId ? applyEdit(kind, editId, d) : SAVERS[kind](d);
   const wrote = save();
   toast(wrote ? msg : msg.replace(/\.$/, '') + ' — in memory only, not saved to this device.');
   if (mode === 'err') { if (box) box.innerHTML = `<div class="banner bad"><div>${esc(msg)}</div></div>`; return; }

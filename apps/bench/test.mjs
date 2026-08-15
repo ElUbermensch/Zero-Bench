@@ -634,6 +634,126 @@ section('storage warning');
   });
 }
 
+/* ================================ the safety checks read the actual ammunition */
+section('over max is judged on the charge that went in the case');
+{
+  // A recipe under its own published maximum, loaded over it. The old check
+  // compared recipe.charge to sourceMax and never looked at what was weighed.
+  await page.evaluate(() => {
+    DB.recipes[0].charge = 41.5; DB.recipes[0].sourceMax = 42.0;
+    DB.batches = [{ id: 'bx1', serial: 'B26H01-99A', recipe: DB.recipes[0].id,
+      brassLot: DB.brassLots[0].id, bulletLot: DB.componentLots.find(c => c.kind === 'bullet').id,
+      powderLot: DB.componentLots.find(c => c.kind === 'powder').id,
+      primerLot: DB.componentLots.find(c => c.kind === 'primer').id,
+      date: '2026-08-01', qty: 20, remaining: 20, chargeActual: 43.0, quarantine: false }];
+    save(); reset('ammo');
+  });
+  await page.waitForTimeout(150);
+  ok(await page.evaluate(() => isOverMax(DB.batches[0])),
+     '43.0 gr against a 42.0 gr cited max is over max, whatever the recipe intended');
+  ok(!(await page.evaluate(() => recipeOverMax(DB.recipes[0]))),
+     '...while the recipe itself is still within its own maximum — a different claim');
+
+  await page.click('[data-act="ammoDetail"]');
+  await page.waitForTimeout(200);
+  const det = await page.textContent('#view');
+  ok(det.includes('Charge exceeds the published maximum'), 'the detail screen says so');
+  ok(det.includes('43') && det.includes('as weighed'),
+     '...naming the charge actually thrown, and that it was weighed rather than intended');
+  ok(/102\.4%/.test(det), '...and the percentage is computed from it (102.4% of max)');
+  ok(det.includes('recipe called for 41.5'),
+     '...while still reporting what the recipe asked for, so the gap is visible');
+
+  await tapText('Label');
+  await page.waitForTimeout(300);
+  ok((await page.textContent('.lbl')).includes('OVER PUBLISHED MAX'),
+     'the box label carries the band, which is the copy that goes to the range');
+  await page.click('#back'); await page.waitForTimeout(150);
+
+  // Take the measured charge away and the recipe target governs again.
+  await page.evaluate(() => { DB.batches[0].chargeActual = null; save(); render(); });
+  ok(!(await page.evaluate(() => isOverMax(DB.batches[0]))),
+     'with nothing weighed, the recipe target governs and 41.5 is under max');
+}
+
+section('a batch that contradicts its recipe says so');
+{
+  await page.evaluate(() => {
+    DB.componentLots.push({ id: 'clx', serial: 'C-9', kind: 'powder', name: 'Hodgdon Varget',
+      lot: 'V-1', qty: 8, unit: 'lb', cost: 300 });
+    DB.batches[0].chargeActual = 41.52;
+    save();
+  });
+  // Naming is fuzzy, so check the matcher on its own terms first.
+  const m = await page.evaluate(() => ({
+    same: namesAgree('Hodgdon H4350', 'H4350'),
+    spaced: namesAgree('Berger 140gr Hybrid', 'Berger 140 gr Hybrid Target'),
+    diff: namesAgree('Hodgdon H4350', 'Hodgdon Varget'),
+    blank: namesAgree('', 'H4350'),
+    weight: namesAgree('Berger 140gr Hybrid', 'Berger 140gr VLD'),
+    catalogue: namesAgree('Fed GM210M', 'Federal 210M'),
+    maker: namesAgree('Lapua', 'Lapua'),
+  }));
+  ok(m.same === true, 'a maker prefix is not a mismatch: "Hodgdon H4350" matches "H4350"');
+  ok(m.spaced === true, '...nor is 140gr against 140 gr, or a trailing "Target"');
+  ok(m.diff === false, 'H4350 and Varget are a mismatch, which is the one that matters');
+  ok(m.blank === null, 'an unnamed component is an absence, not a mismatch');
+  ok(m.weight === false,
+     'a 140 Hybrid and a 140 VLD do not pass on the shared weight — different bullet, different seating');
+  ok(m.catalogue === true, 'GM210M and 210M are the same primer written two ways');
+  ok(m.maker === true, 'a name that is nothing but a maker still matches itself');
+
+  await page.evaluate(() => { DB.batches[0].powderLot = 'clx'; save(); reset('ammo'); });
+  await page.waitForTimeout(150);
+  const mm = await page.evaluate(() => batchMismatches(DB.batches[0]));
+  ok(mm.length === 1 && mm[0].what === 'Powder' && mm[0].severity === 'stop',
+     'loading Varget into an H4350 recipe is flagged, at stop severity');
+  await page.click('[data-act="ammoDetail"]');
+  await page.waitForTimeout(200);
+  const dt = await page.textContent('#view');
+  ok(dt.includes('does not match its recipe'), 'the detail screen leads with it');
+  ok(/recipe calls for <b>H4350<\/b>/.test(await page.innerHTML('#view'))
+     && dt.includes('Hodgdon Varget'),
+     '...naming both, because "mismatch" alone tells you nothing');
+  ok(dt.includes('Charge weights are not transferable'),
+     '...and why it matters, which is the whole point of the warning');
+  await tapText('Label');
+  await page.waitForTimeout(300);
+  ok((await page.textContent('.lbl')).includes('DOES NOT MATCH RECIPE'),
+     'the label carries it too');
+  await page.click('#back'); await page.waitForTimeout(150);
+  await page.evaluate(() => {
+    DB.batches[0].powderLot = DB.componentLots.find(c => c.kind === 'powder').id;
+    DB.componentLots = DB.componentLots.filter(c => c.id !== 'clx');
+    save(); render();
+  });
+  ok((await page.evaluate(() => batchMismatches(DB.batches[0]))).length === 0,
+     'putting the right powder back clears it — the warning is derived, not a flag');
+}
+
+section('the label prints the brass life, not the baseline');
+{
+  await page.evaluate(() => {
+    // A lot bought new: baseline 0 firings, 100 cases, one 40-round batch fired.
+    const l = DB.brassLots[0];
+    l.firings = 0; l.initialQty = 100; l.qty = 100; l.culls = [];
+    DB.batches[0].qty = 40; DB.batches[0].remaining = 0;
+    save(); reset('ammo');
+  });
+  await page.waitForTimeout(150);
+  await page.click('[data-act="ammoDetail"]');
+  await page.waitForTimeout(200);
+  await tapText('Label');
+  await page.waitForTimeout(300);
+  const lbl = await page.textContent('.lbl');
+  ok(/0\.4f/.test(lbl),
+     `40 of 100 cases fired prints 0.4f, the figure every other screen shows (${
+       (lbl.match(/[\d.]+f/) || [])[0]})`);
+  ok(!/·\s*0f/.test(lbl),
+     '...not 0f, which is what the baseline field says and what used to be printed');
+  await page.click('#back'); await page.waitForTimeout(150);
+}
+
 /* ===================================================================== label */
 section('label');
 {

@@ -214,10 +214,38 @@ const cartName = (id) => (byId(DB.cartridges, id) || {}).name || '—';
 const recipeOf = (b) => byId(DB.recipes, b.recipe);
 const sessionsFor = (id) => DB.sessions.filter(s => s.batch === id);
 const isUntested = (b) => sessionsFor(b.id).length === 0;
-const isOverMax = (b) => {
+
+/* The charge that is actually in the cases.
+ *
+ * The recipe's `charge` is an intention; `chargeActual` is what came off the
+ * scale. Four separate places already reached for "the measured one if there is
+ * one" and computed it inline -- and the one place that did NOT was the over-max
+ * safety check, which compared the recipe target to the published maximum and
+ * never looked at the powder that went in. Load a 41.5 gr recipe against a 42.0
+ * gr cited max, throw 43.0 into the cases, and the app reported "98.8% of max",
+ * showed no warning chip, and printed a label with no over-max band on it. */
+const chargeOf = (b) => {
   const r = recipeOf(b);
-  return !!(r && r.sourceMax > 0 && r.charge > r.sourceMax);
+  return +b.chargeActual || (r ? +r.charge : 0) || 0;
 };
+
+/** Fraction of the published maximum this batch actually represents, or null
+ *  when no maximum was cited. Over 1.0 is over max. */
+const maxFraction = (b) => {
+  const r = recipeOf(b);
+  if (!r || !(r.sourceMax > 0)) return null;
+  const c = chargeOf(b);
+  return c > 0 ? c / r.sourceMax : null;
+};
+
+const isOverMax = (b) => {
+  const f = maxFraction(b);
+  return f != null && f > 1;
+};
+
+/** A recipe can be over its own cited maximum before any batch exists. That is
+ *  a different claim from "this ammunition is over max" and gets its own name. */
+const recipeOverMax = (r) => !!(r && r.sourceMax > 0 && r.charge > r.sourceMax);
 
 const GRAINS_PER_LB = 7000;
 
@@ -234,7 +262,7 @@ function costPerRound(b) {
   if (bl && bl.qty > 0) p.bullet = bl.cost / bl.qty; else if (bl) p.known = false;
   if (pr && pr.qty > 0) p.primer = pr.cost / pr.qty; else if (pr) p.known = false;
   if (pw && pw.qty > 0 && r) {
-    p.powder = (pw.cost / (pw.qty * GRAINS_PER_LB)) * (+b.chargeActual || +r.charge || 0);
+    p.powder = (pw.cost / (pw.qty * GRAINS_PER_LB)) * chargeOf(b);
   } else if (pw) p.known = false;
   if (br && br.initialQty > 0 && br.expectedFirings > 0) {
     p.brass = br.cost / (br.initialQty * br.expectedFirings);
@@ -272,7 +300,7 @@ function costPerRound(b) {
 function batchDraw(b) {
   const r = recipeOf(b);
   const n = Math.max(0, +b.qty || 0);
-  const charge = +b.chargeActual || (r ? +r.charge : 0) || 0;
+  const charge = chargeOf(b);
   return { rounds: n, bullets: n, primers: n, powderGr: n * charge, cases: n };
 }
 
@@ -447,6 +475,109 @@ function drawPreview(d, exceptBatch) {
   return { rows, charge, n };
 }
 
+/* ==========================================================================
+ * Does the ammunition match the recipe it claims to be?
+ *
+ * The batch form offers every lot of the right KIND -- every powder you own,
+ * every brass lot of any cartridge -- while the recipe names its components as
+ * free text. Nothing connected the two, so a "6.5 CM / H4350 / 41.5 gr" batch
+ * could be built out of a Varget lot and .223 brass and save without complaint.
+ * Powder substitution at an unadjusted charge is the classic way to take the
+ * roof off a rifle; H4350 and Varget differ by roughly ten grains at the same
+ * pressure in this case.
+ *
+ * The comparison is free text against free text, so it cannot be exact. It is
+ * tokenised instead: case folded, "140gr" split into "140 gr", punctuation
+ * dropped, and the words that appear in every product name discarded. Two names
+ * match when one's tokens are a subset of the other's, or when they overlap by
+ * at least half the shorter name. "Hodgdon H4350" matches "H4350"; it does not
+ * match "Varget".
+ *
+ * Because the match is fuzzy, only the CARTRIDGE -- an id comparison, with no
+ * fuzziness in it at all -- is a hard refusal. A component-name mismatch is a
+ * loud, persistent warning on the batch and on its label rather than a block,
+ * because refusing on a string comparison would eventually refuse something
+ * legitimate and the answer to that is never "type it again".
+ * ========================================================================*/
+const NOISE = new Set(['gr', 'grain', 'grains', 'gn', 'the', 'and',
+  'bullet', 'bullets', 'powder', 'primer', 'primers', 'brass', 'case', 'cases',
+  'match', 'target', 'competition', 'premium', 'new', 'lot']);
+
+/* The maker is the least informative word in a component name. "Hodgdon H4350"
+ * and "Hodgdon Varget" share a token and are ten grains apart at the same
+ * pressure; treating that shared word as agreement is exactly the mistake the
+ * check exists to catch. Makers are stripped before comparison, and only what
+ * is left -- the thing that actually names the product -- is compared. */
+const MAKERS = new Set([
+  'hodgdon', 'imr', 'alliant', 'reloder', 'vihtavuori', 'vv', 'accurate',
+  'ramshot', 'norma', 'winchester', 'win', 'shooters', 'world', 'sw',
+  'berger', 'sierra', 'hornady', 'nosler', 'barnes', 'lapua', 'cutting', 'edge',
+  'cci', 'federal', 'fed', 'remington', 'rem', 'rws', 'ppu', 'wolf', 'tula',
+  'starline', 'peterson', 'adg', 'alpha', 'nammo', 'lehigh', 'speer',
+]);
+
+function nameTokens(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/(\d)\s*(gr|grain|grains|gn)\b/g, '$1 ')   // 140gr -> 140
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ')
+    .filter(t => t && !NOISE.has(t));
+}
+
+/** The tokens that actually identify the product. Falls back to the full set
+ *  when a name is nothing but a maker, so "Lapua" against "Lapua" still
+ *  agrees rather than comparing two empty sets. */
+function coreTokens(s) {
+  const all = nameTokens(s);
+  const core = all.filter(t => !MAKERS.has(t));
+  return new Set(core.length ? core : all);
+}
+
+/** true / false / null, where null means one of the names was blank -- an
+ *  unnamed component is an absence, not a mismatch, and saying "mismatch"
+ *  about it would be a lie. */
+function namesAgree(a, b) {
+  const A = coreTokens(a), B = coreTokens(b);
+  if (!A.size || !B.size) return null;
+  const shared = [...A].filter(t => B.has(t)).length;
+  // Strictly more than half, so a 140 gr Hybrid and a 140 gr VLD -- same
+  // weight, different bullet, different seating -- do not pass on the weight
+  // alone.
+  if (shared / Math.min(A.size, B.size) > 0.5) return true;
+  // Catalogue numbers run together differently in different catalogues:
+  // "GM210M" against "210M". Containment catches those without loosening the
+  // token rule for everything else.
+  const [x, y] = [[...A].sort().join(''), [...B].sort().join('')];
+  return x.includes(y) || y.includes(x);
+}
+
+/** Every way this batch contradicts its own recipe. Each entry is
+ *  {what, wanted, got, severity} — 'stop' for pressure-relevant, 'warn' else. */
+function batchMismatches(b) {
+  const r = recipeOf(b);
+  if (!r) return [];
+  const out = [];
+  const pairs = [
+    ['powderLot', 'Powder', r.powder, 'stop'],
+    ['bulletLot', 'Bullet', r.bullet, 'stop'],
+    ['primerLot', 'Primer', r.primer, 'warn'],
+  ];
+  for (const [key, what, wanted, severity] of pairs) {
+    const lot = byId(DB.componentLots, b[key]);
+    if (!lot) continue;
+    if (namesAgree(wanted, lot.name) === false) {
+      out.push({ what, wanted, got: lot.name, severity });
+    }
+  }
+  const brass = byId(DB.brassLots, b.brassLot);
+  if (brass && r.cartridge && brass.cartridge && brass.cartridge !== r.cartridge) {
+    out.push({ what: 'Cartridge', wanted: cartName(r.cartridge),
+               got: cartName(brass.cartridge), severity: 'stop' });
+  }
+  return out;
+}
+
 function brassChips(l) {
   const out = [];
   const life = brassLife(l);
@@ -462,6 +593,9 @@ function batchChips(b) {
   const out = [];
   if (b.quarantine) out.push(['bad', 'Quarantined']);
   if (isOverMax(b)) out.push(['bad', 'Over published max']);
+  const mm = batchMismatches(b);
+  if (mm.some(m => m.severity === 'stop')) out.push(['bad', 'Wrong component']);
+  else if (mm.length) out.push(['warn', 'Component mismatch']);
   if (isUntested(b)) out.push(['warn', 'Untested']);
   if (!out.length) out.push(['ok', 'Proven']);
   return out;
@@ -895,6 +1029,26 @@ function validate(kind, d) {
   }
   if (kind === 'batch' && d.qty <= 0) return 'Rounds loaded must be greater than zero.';
   if (kind === 'batch') {
+    // Cartridge is an id comparison with no fuzziness in it, so it is the one
+    // component check that refuses outright. Everything else in
+    // batchMismatches() is a free-text comparison and warns instead.
+    const rr = byId(DB.recipes, d.recipe);
+    const bl = byId(DB.brassLots, d.brassLot);
+    if (rr && bl && rr.cartridge && bl.cartridge && rr.cartridge !== bl.cartridge) {
+      return `${bl.serial} is ${cartName(bl.cartridge)} brass and this recipe is `
+        + `${cartName(rr.cartridge)}. Pick a lot in the right cartridge.`;
+    }
+    const brassLot = bl;
+    if (brassLot && !brassLot.retired) {
+      const life = brassLife(brassLot);
+      if (life.mean >= brassLot.expectedFirings && brassLot.expectedFirings > 0) {
+        return `${brassLot.serial} is at ${life.mean.toFixed(1)} firings against an `
+          + `expected life of ${brassLot.expectedFirings}. Retire the lot, or raise `
+          + `its expected life if you have inspected the cases.`;
+      }
+    }
+  }
+  if (kind === 'batch') {
     // Refuse rather than go negative. A stock figure that can be negative is
     // not a stock figure, and silently allowing it is how the inventory stops
     // being worth reading.
@@ -1165,14 +1319,30 @@ VIEWS.ammoDetail = (id) => {
   if (!b) return `<div class="empty">This batch no longer exists.</div>`;
   const r = recipeOf(b), c = costPerRound(b), sess = sessionsFor(b.id);
   const brass = byId(DB.brassLots, b.brassLot);
-  const pct = r && r.sourceMax > 0 ? (r.charge / r.sourceMax) * 100 : null;
+  const frac = maxFraction(b);
+  const pct = frac == null ? null : frac * 100;
+  const thrown = chargeOf(b);
+  // Name the charge for what it is. "41.5 gr" against a max reads very
+  // differently depending on whether anyone put it on a scale.
+  const chargeWord = b.chargeActual ? 'as weighed' : 'recipe target';
 
   let warn = '';
   if (b.quarantine) warn += `<div class="banner bad"><div><b>QUARANTINED — DO NOT FIRE</b>
     ${b.notes ? `<span class="small">${esc(b.notes)}</span>` : ''}</div></div>`;
   if (isOverMax(b)) warn += `<div class="banner bad"><div><b>Charge exceeds the published maximum.</b>
-    <span class="small">${r.charge} gr against a cited max of ${r.sourceMax} gr
+    <span class="small">${thrown} gr ${chargeWord}, against a cited max of ${r.sourceMax} gr
     (${pct.toFixed(1)}%). Work up from below and watch for pressure signs.</span></div></div>`;
+  const mism = batchMismatches(b);
+  if (mism.length) {
+    const stop = mism.some(m => m.severity === 'stop');
+    warn += `<div class="banner ${stop ? 'bad' : 'warn'}"><div><b>${
+      stop ? 'This ammunition does not match its recipe.' : 'Component names do not match the recipe.'}</b>
+      <span class="small">${mism.map(m =>
+        `${m.what}: the recipe calls for <b>${esc(m.wanted)}</b>, this batch was built with <b>${esc(m.got)}</b>.`
+      ).join(' ')} ${stop
+        ? 'Charge weights are not transferable between components. Do not fire this until you have confirmed which is right.'
+        : 'If the two are the same thing under different names, edit one to match.'}</span></div></div>`;
+  }
   if (isUntested(b) && !b.quarantine) warn += `<div class="banner warn"><div><b>Untested.</b>
     <span class="small">No range session recorded against this batch yet.</span></div></div>`;
 
@@ -1208,9 +1378,12 @@ VIEWS.ammoDetail = (id) => {
       ${b.press ? `<dt>Press / dies</dt><dd>${esc(b.press)}</dd>` : ''}
     </dl>
     ${r ? `<hr><div class="small muted"><b>Source:</b> ${esc(r.source)}${
-      r.page ? ' · ' + esc(r.page) : ''}${r.sourceMax > 0 ? `<br>Published max ${r.sourceMax} gr —
-      this load is <b style="color:${pct > 100 ? 'var(--bad)' : pct > 97 ? 'var(--warn)' : 'var(--ok)'}">${
-      pct.toFixed(1)}%</b> of max.` : '<br>No published maximum recorded.'}</div>` : ''}
+      r.page ? ' · ' + esc(r.page) : ''}${pct != null ? `<br>Published max ${r.sourceMax} gr —
+      this ammunition is <b style="color:${pct > 100 ? 'var(--bad)' : pct > 97 ? 'var(--warn)' : 'var(--ok)'}">${
+      pct.toFixed(1)}%</b> of max, ${chargeWord}.${
+      b.chargeActual && r.charge && +b.chargeActual !== +r.charge
+        ? ` The recipe called for ${r.charge} gr.` : ''}`
+      : '<br>No published maximum recorded.'}</div>` : ''}
   </div>
   <div class="card"><h2>Components</h2>
     ${lot('bulletLot')}${lot('powderLot')}${lot('primerLot')}
@@ -1273,6 +1446,7 @@ function labelHtml(b) {
   const qr = QR.toSvg(url, { ecc: 'M', quietZone: 2 });
   const band = b.quarantine ? 'DO NOT FIRE — QUARANTINED'
     : isOverMax(b) ? 'OVER PUBLISHED MAX'
+    : batchMismatches(b).some(m => m.severity === 'stop') ? 'DOES NOT MATCH RECIPE'
     : isUntested(b) ? 'UNTESTED — WORK UP' : '';
   const dots = brass ? scheme().positions.map(p => {
     const c = brass.marks[p.id] ? scheme().palette.find(x => x.id === brass.marks[p.id]) : null;
@@ -1284,7 +1458,13 @@ function labelHtml(b) {
     <div class="load">${esc(r ? r.bullet : '')}<br>${esc(r ? r.powder : '')}
       · <b>${b.chargeActual ?? (r ? r.charge : '')} gr</b>
       ${b.coalMean ? ` · COAL ${b.coalMean}"` : ''}<br>${esc(r ? r.primer : '')}</div>
-    ${brass ? `<div class="marks">${dots}<span class="ms">${esc(brass.headstamp)} · ${brass.firings}f</span></div>` : ''}
+    ${brass ? `<div class="marks">${dots}<span class="ms">${esc(brass.headstamp)} · ${
+      /* brass.firings is the BASELINE -- firings before the lot was recorded --
+       * not the lot's life. Printing it meant a lot bought new and fired four
+       * times went in the ammo box labelled "0f". This is the one number on the
+       * label a handloader uses to decide whether this is the last trip for
+       * these cases, so it prints the same figure every screen shows. */
+      brassLife(brass).mean.toFixed(1)}f</span></div>` : ''}
     <div class="btm"><div class="grow1">
       <div class="ser">${esc(b.serial)}</div>
       <div class="meta">${fmtDate(b.date)} · ${b.qty} rounds</div>
@@ -1350,7 +1530,7 @@ VIEWS.inventory = () => {
 
 VIEWS.recipes = () => {
   const body = DB.recipes.length ? DB.recipes.map(r => {
-    const over = r.sourceMax > 0 && r.charge > r.sourceMax;
+    const over = recipeOverMax(r);
     return `<div class="listitem static">
       <span class="grow"><span class="ttl">${esc(r.name)}</span>
         <span class="sub">${esc(cartName(r.cartridge))} · ${r.charge} gr${r.coal ? ' · COAL ' + r.coal + '"' : ''}</span>

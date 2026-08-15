@@ -10,12 +10,12 @@
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     },
     {
-      "//": "Same reasoning for the shells: they name the bundle, so a stale shell points at a stale bundle.",
+      "//": "Same reasoning for the shells: they name the bundle, so a stale shell points at a stale bundle. Zero is at /, Bench at /bench/.",
       "source": "/(index.html)?",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     },
     {
-      "source": "/zero/(index.html)?",
+      "source": "/bench/(index.html)?",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     }
   ]

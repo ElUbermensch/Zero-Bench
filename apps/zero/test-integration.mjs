@@ -23,11 +23,21 @@ const mock = await startMock({ ttlSec: 3600 });
 const OUT = 'dist-test';
 await buildZero({ url: mock.url, anonKey: 'anon-key', outdir: OUT, single: false });
 
+const MIME = { '.html': 'text/html', '.js': 'text/javascript',
+  '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
+/* Set true to make the harness DROP the connection instead of answering.
+ * A 404 is not the failure mode that matters: a service worker only reaches
+ * its offline fallback when fetch REJECTS, and a 404 resolves. Playwright's
+ * offline emulation does not apply to loopback, so the only honest way to
+ * reproduce "no signal" here is to kill the socket. */
+let deadNetwork = false;
 const server = http.createServer((req, res) => {
+  if (deadNetwork) { req.socket.destroy(); return; }
   const p = req.url.split('?')[0];
   const f = OUT + '/' + (p === '/' ? 'index.html' : p.slice(1));
-  if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'Content-Type': f.endsWith('.js') ? 'text/javascript' : 'text/html' });
+  if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
+  const ext = f.slice(f.lastIndexOf('.'));
+  res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
   res.end(fs.readFileSync(f));
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -238,6 +248,49 @@ console.log('\nlogbooks written by an earlier build');
   ok(await p2.evaluate(() => localStorage.getItem('sessions_v1') !== null),
      '...and copied forward to the bare key, so the migration happens once');
   await ctx2.close();
+}
+
+/* ============================ Zero owns the root, so its worker is the broad one */
+console.log('\nservice worker scope');
+{
+  const ctx3 = await browser.newContext();
+  const p3 = await ctx3.newPage();
+  await p3.goto(BASE);
+  await p3.waitForTimeout(900);
+
+  const scope = await p3.evaluate(() =>
+    navigator.serviceWorker.ready.then(r => r.scope).catch(() => 'none'));
+  ok(scope.endsWith('/'), `Zero's worker is registered at the root (${scope})`);
+
+  /* Bench lives at /bench/ on this same origin, INSIDE that scope. Bench
+   * registers a worker of its own and its narrower scope wins -- but only
+   * after Bench has been opened at least once. On a device that has opened
+   * Zero and never opened Bench, Zero's worker is the only one there, and its
+   * offline fallback would hand back Zero's shell for a /bench/ URL. Someone
+   * scanning an ammo box label at a range with no signal would get Zero.
+   *
+   * The guard in apps/zero/src/sw.js declines /bench/ outright. Assert on what
+   * comes back rather than on the transport: this harness has no Bench to
+   * serve, so a 404 is the correct answer and proves the request reached the
+   * network instead of Zero's cache. */
+  deadNetwork = true;                       // a range with no signal
+  const strayed = await p3.evaluate(async () => {
+    try {
+      const r = await fetch('/bench/index.html');
+      return r.ok ? 'body:' + (await r.text()).slice(0, 300) : `status:${r.status}`;
+    } catch (e) { return 'network-error'; }
+  });
+  deadNetwork = false;
+  // With the guard: Zero's worker declines, the browser tries the dead socket,
+  // fetch rejects. Without it: the worker catches that rejection and hands
+  // back its own cached shell -- Zero appearing where Bench should be.
+  const servedZero = strayed.startsWith('body:');
+  ok(!servedZero,
+     `...and does not answer for /bench/ out of its own cache (${strayed.slice(0, 60)})`);
+
+  errs.splice(0, errs.length,
+    ...errs.filter(e => !/status of 404|Failed to load|ERR_/.test(e)));
+  await ctx3.close();
 }
 
 console.log('\nhygiene');

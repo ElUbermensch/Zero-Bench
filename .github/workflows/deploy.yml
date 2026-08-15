@@ -1,6 +1,6 @@
 # Publishes both PWAs to GitHub Pages:
 #   /            -> Bench
-#   /zero/       -> Zero
+#   /bench/      -> Bench
 name: deploy
 
 on:

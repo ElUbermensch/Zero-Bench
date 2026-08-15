@@ -145,11 +145,32 @@ const DEFAULT_SCHEME = {
 const COLLECTIONS = ['cartridges', 'firearms', 'componentLots',
                      'brassLots', 'recipes', 'batches', 'sessions'];
 
+/* Where this copy of Bench actually lives, for the QR on every box label.
+ *
+ * This used to be `location.origin`, which was right when Bench sat at the root
+ * of the site. It does not any more -- Zero is at `/` because it is the app
+ * with existing users, and Bench moved to `/bench/`. An origin-only base URL
+ * would print labels pointing at `https://host/#/s/B26H01-01F`, which opens
+ * ZERO with a fragment it has never heard of. The label would look right, scan
+ * fine, and land on the wrong app, and every box printed until someone noticed
+ * would carry it.
+ *
+ * So the default is the directory this page was served from, which is correct
+ * at the root, in a subdirectory, and on a local file:// copy. It is only a
+ * DEFAULT -- Settings still lets you type the address of a deployment you want
+ * labels to point at, which is what you want when you print at a desk and scan
+ * on a phone. */
+const defaultBaseUrl = () => {
+  if (!location.origin || location.origin === 'null') return '';
+  const dir = location.pathname.replace(/[^/]*$/, '');   // strip the filename
+  return (location.origin + dir).replace(/\/$/, '');
+};
+
 const emptyDb = () => ({
   meta: {
     schema: SCHEMA,
     scheme: JSON.parse(JSON.stringify(DEFAULT_SCHEME)),
-    baseUrl: location.origin && location.origin !== 'null' ? location.origin : '',
+    baseUrl: defaultBaseUrl(),
     overheadPerRound: 0,
   },
   cartridges: [], firearms: [], componentLots: [],

@@ -85,7 +85,7 @@ for (const [app, files] of [
   ok(m.icons.some(i => i.purpose === 'maskable'), `${app} declares a maskable icon`,
      'without one, Android crops the icon into a circle and clips it');
   ok(m.start_url === './' && m.scope === './', `${app} uses relative start_url and scope`,
-     'absolute paths break when the app is served from a subdirectory (Zero is, at /zero/)');
+     'absolute paths break when the app is served from a subdirectory (Bench is, at /bench/)');
   ok(/__CACHE_VERSION__/.test(read(`${app}/src/sw.js`)),
      `${app} service worker takes its cache name from the build`,
      'a hand-bumped cache version is a deploy step someone forgets');

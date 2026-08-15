@@ -16,8 +16,16 @@ const ROOT = path.resolve('dist');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json',
   '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 
+/* Bench deploys to /bench/, not to the root, so the harness serves it there.
+ * Serving it at / would test a layout that is never shipped -- and the things
+ * that break in a subdirectory (an absolute path in the shell, a manifest
+ * scope, a service worker's reach) are exactly the things that look fine at
+ * the root. */
+const PREFIX = '/bench/';
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split('?')[0]);
+  if (!p.startsWith(PREFIX)) { res.writeHead(404); return res.end('outside /bench/'); }
+  p = p.slice(PREFIX.length - 1);
   if (p === '/' || p === '') p = '/index.html';
   const file = path.join(ROOT, p);
   if (!file.startsWith(ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -27,7 +35,8 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const BASE = `http://127.0.0.1:${server.address().port}/`;
+const ORIGIN = `http://127.0.0.1:${server.address().port}`;
+const BASE = ORIGIN + PREFIX;
 
 let pass = 0, fail = 0;
 const ok = (c, l) => { if (c) { pass++; console.log('  PASS  ' + l); } else { fail++; console.log('  FAIL  ' + l); } };
@@ -1269,27 +1278,44 @@ section('installable and offline');
      && (await page.evaluate(() => DB.brassLots.length)) === 1,
      '...with data intact');
 
-  // Both apps are served from one origin -- Bench at /, Zero at /zero/ -- so
-  // this worker's scope contains Zero's. Its offline fallback must not answer
-  // for Zero, or a phone with no signal shows Bench when you opened Zero.
+  // Zero owns the root of this origin. Bench's worker is registered from
+  // /bench/, so its scope is /bench/ and it is never consulted about anything
+  // above it -- which is what keeps a signal-less phone from being shown Bench
+  // when it asked for Zero. Assert the scope rather than trusting the layout.
+  const scope = await page.evaluate(() =>
+    navigator.serviceWorker.ready.then(r => r.scope).catch(() => 'none'));
+  ok(scope.endsWith('/bench/'),
+     `Bench's worker is confined to /bench/ (${scope})`);
+
   const errsBefore = errors.length;
   const strayed = await page.evaluate(async () => {
     try {
-      const r = await fetch('zero/index.html');
-      return r.ok ? (await r.text()).slice(0, 400) : `status:${r.status}`;
+      const r = await fetch('/index.html');           // Zero's territory
+      return r.ok ? 'body:' + (await r.text()).slice(0, 300) : `status:${r.status}`;
     } catch (e) { return 'network-error'; }
   });
-  // 'network-error' means this worker declined to handle it at all, which is
-  // the invariant that matters. Without the scope guard the worker intercepts
-  // and answers ('status:404' here, and Bench's own cached page on a real
-  // deploy where /zero/ is a sibling directory rather than a missing file).
-  ok(strayed === 'network-error',
-     `Bench's worker declines requests under /zero/ entirely (${strayed})`);
+  /* What must NOT come back is Bench's own page.
+   *
+   * The first version of this asserted `strayed === 'network-error'` on the
+   * reasoning that the context is offline. It is, but Chromium's offline
+   * emulation does not apply to loopback, so the request reaches the harness
+   * and gets an honest 404 -- there is no Zero in this harness to serve. That
+   * 404 is the proof, not a failure: it means the request went to the NETWORK
+   * rather than being answered out of Bench's cache.
+   *
+   * So the assertion is about the body, which is what a user would actually
+   * be looking at. Anything that is not Bench's shell is a pass; Bench's shell
+   * is the bug -- offline, on a phone, it is indistinguishable from Zero
+   * having been replaced by the wrong app. */
+  const servedBench = strayed.startsWith('body:') && /id="view"|Bench/.test(strayed);
+  ok(!servedBench,
+     `...so the root is not served out of Bench's cache (${strayed.slice(0, 60)})`);
   // That probe deliberately fetches with the network off, and the browser logs
   // the failed load. Drop exactly those entries rather than muting the hygiene
   // check, which would then miss a real error raised anywhere else.
   errors.splice(errsBefore, errors.length - errsBefore,
-    ...errors.slice(errsBefore).filter(e => !/ERR_INTERNET_DISCONNECTED/.test(e)));
+    ...errors.slice(errsBefore).filter(e =>
+      !/ERR_INTERNET_DISCONNECTED|status of 404/.test(e)));
   await shot('08-offline');
   await ctx.setOffline(false);
 }

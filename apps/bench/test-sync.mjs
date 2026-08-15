@@ -74,6 +74,7 @@ await page.evaluate(() => {
   DB.brassLots = [{ id: 'bl1', serial: 'R-7K2', marks: { neck: 'R', head: 'K' },
     cartridge: 'ca1', headstamp: 'LAPUA', maker: 'Lapua', initialQty: 200, qty: 196,
     firings: 1, expectedFirings: 8, cost: 239.98, origin: 'new', acquired: '2026-05-01',
+    trimTo: 1.910, maxLength: 1.920, weightSort: '±0.5', annealEvery: 2,
     lastAnneal: null, retired: false, culls: [{ id: 'c1', n: 4, reason: 'sep', date: '2026-07-14' }] }];
   DB.recipes = [
     { id: 'r1', name: '6.5CM / 140 Hybrid / H4350', cartridge: 'ca1',
@@ -118,6 +119,8 @@ ok(rows('brass_lots')[0].marks?.neck === 'R',
    '...carrying its colour code, which is what makes the lot identifiable');
 ok(rows('brass_lots')[0].qty_on_hand === 196 && rows('brass_lots')[0].qty_initial === 200,
    '...and both case counts, so the culls are reflected');
+ok(rows('brass_lots')[0].trim_to_in === 1.910 && rows('brass_lots')[0].anneal_every === 2,
+   "...and the lot's own prep spec, which is what a warning compares against");
 
 section('a component lot becomes a product AND a purchase');
 // This is the whole modelling difference. A recipe references the product; it

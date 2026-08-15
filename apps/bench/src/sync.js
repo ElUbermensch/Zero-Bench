@@ -143,6 +143,9 @@ const BenchSync = (() => {
         expected_firings: Math.max(1, Math.round(nn(b.expectedFirings) || 6)),
         cost_total: nn(b.cost) || 0,
         last_anneal_on: iso(b.lastAnneal),
+        trim_to_in: nn(b.trimTo), max_length_in: nn(b.maxLength),
+        weight_sort: b.weightSort || null,
+        anneal_every: b.annealEvery == null ? null : Math.max(0, Math.round(+b.annealEvery)),
         retired: !!b.retired, notes: b.notes || null,
       });
     }
@@ -213,7 +216,9 @@ const BenchSync = (() => {
         // there is no stored counter here to disagree with it.
         qty_remaining: Math.max(0, Math.round(roundsLeft ? roundsLeft(b) : (nn(b.qty) ?? 0))),
         charge_actual_gr: nn(b.chargeActual), charge_sd_gr: nn(b.chargeSd),
-        coal_mean_in: nn(b.coalMean), runout_in: nn(b.runout),
+        coal_mean_in: nn(b.coalMean), cbto_mean_in: nn(b.cbtoMean),
+        runout_in: nn(b.runout), bump_in: nn(b.bump),
+        bushing: b.bushing || null, primer_depth_in: nn(b.primerDepth),
         press: b.press || null, storage: b.storage || null,
         quarantined: !!b.quarantine, quarantine_reason: b.quarantineReason || null,
         notes: b.notes || null,

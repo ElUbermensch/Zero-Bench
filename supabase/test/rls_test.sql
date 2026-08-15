@@ -212,6 +212,34 @@ begin
    where id = 'aa000000-0000-0000-0000-00000000ce02';
 end $$;
 
+-- ================================== case prep reaches the profile (0007)
+do $$
+declare p record;
+begin
+  update public.batches set cbto_mean_in = 2.2455, bump_in = 0.0020,
+         bushing = '.289', primer_depth_in = 0.004, charge_actual_gr = 43.5
+   where id = 'aa000000-0000-0000-0000-00000000ba01';
+  select * into p from public.v_ballistic_profiles
+   where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
+  perform test.check(p.cbto_loaded_in = 2.2455,
+    'prep: the CBTO actually loaded reaches Zero, not just the recipe''s');
+  perform test.check(p.batch_bump_in = 0.0020 and p.bushing = '.289',
+    'prep: the sizing that produced this batch travels with it');
+  -- The view had the same fault the client did: it compared the RECIPE's
+  -- charge to the published maximum and ignored what was weighed.
+  perform test.check(p.over_published_max,
+    'over max: the view reads the charge that went in the case');
+
+  update public.batches set charge_actual_gr = null
+   where id = 'aa000000-0000-0000-0000-00000000ba01';
+  select * into p from public.v_ballistic_profiles
+   where batch_id = 'aa000000-0000-0000-0000-00000000ba01';
+  perform test.check(not p.over_published_max,
+    'over max: with nothing weighed it falls back to the recipe, which is under');
+  perform test.check(p.cbto_loaded_in = 2.2455,
+    'prep: ...and the loaded CBTO is unaffected by that');
+end $$;
+
 -- ==================================================== d2 / sigma conversion
 do $$
 begin

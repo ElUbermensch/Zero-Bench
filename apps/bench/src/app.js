@@ -1653,7 +1653,7 @@ VIEWS.label = (id) => {
 
 function labelHtml(b) {
   const r = recipeOf(b), brass = byId(DB.brassLots, b.brassLot);
-  const url = (DB.meta.baseUrl || '') + '/s/' + b.serial;
+  const url = (DB.meta.baseUrl || '') + '/#/s/' + b.serial;
   const qr = QR.toSvg(url, { ecc: 'M', quietZone: 2 });
   const band = b.quarantine ? 'DO NOT FIRE — QUARANTINED'
     : isOverMax(b) ? 'OVER PUBLISHED MAX'
@@ -2358,7 +2358,30 @@ document.addEventListener('change', (e) => {
         if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.brassLots)) {
           throw new Error('shape');
         }
-        Store.save(parsed); DB = loadDb(); toast('Imported.'); reset('lookup');
+        /* Import REPLACES the database. It used to do that on one tap, with no
+         * confirmation and no indication of what was about to go -- on a device
+         * where the file picker sits two buttons from "Erase all data", and
+         * where restoring last month's backup onto a phone carrying this
+         * month's loading destroys it silently.
+         *
+         * So it says what it is replacing and what with, in records, and asks.
+         * Counting both sides is the point: "12 batches" means nothing without
+         * "you have 47". */
+        const n = (o, k) => (Array.isArray(o[k]) ? o[k].length : 0);
+        const tally = (o) => COLLECTIONS.map(k => n(o, k)).reduce((a, b) => a + b, 0);
+        const mine = tally(DB), theirs = tally(parsed);
+        const detail = COLLECTIONS
+          .filter(k => n(DB, k) || n(parsed, k))
+          .map(k => `  ${k}: ${n(DB, k)} → ${n(parsed, k)}`).join('\n');
+        if (mine > 0 && !confirm(
+          `Replace everything on this device with this file?\n\n${detail}\n\n`
+          + `${mine} record${mine === 1 ? '' : 's'} here are discarded and `
+          + `${theirs} restored. This is not a merge, and it cannot be undone — `
+          + `export first if you are not sure.`)) {
+          render();
+          return;
+        }
+        Store.save(parsed); DB = loadDb(); toast(`Imported ${theirs} records.`); reset('lookup');
       } catch (err) { toast('That file is not a Bench export.'); render(); }
     };
     fr.readAsText(el.files[0]);
@@ -2454,6 +2477,44 @@ document.addEventListener('submit', (e) => {
 });
 
 /* -------------------------------------------------------------- start-up */
+
+/* The QR on every box label, honoured.
+ *
+ * The label prints a QR and the words "the QR opens this record", and until now
+ * nothing read the URL: scanning a box landed you on the Identify screen with
+ * the serial thrown away, and the printed serial underneath -- the fallback --
+ * was the only route that actually worked.
+ *
+ * The link is a FRAGMENT (#/s/SERIAL) rather than a path. A path needs the host
+ * to rewrite /s/* onto index.html, which is a deploy setting that can be wrong
+ * or missing, and which fails on a device that has not installed the service
+ * worker yet -- the exact device someone is scanning a box with for the first
+ * time. A fragment is never sent to the server, so it works on any static host,
+ * offline, and from a file:// copy.
+ *
+ * It is consumed on arrival: the stack becomes Identify -> the record, so Back
+ * behaves, and the address bar is cleaned so a later reload does not drag you
+ * back to a box you have long since finished.
+ */
+function openDeepLink() {
+  const raw = (location.hash || '').replace(/^#/, '') || location.pathname || '';
+  const m = /(?:^|\/)s\/([^/?#]+)/.exec(decodeURIComponent(raw));
+  if (!m) return false;
+  const found = findBySerial(m[1]);
+  if (location.hash && history.replaceState) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  if (!found) {
+    // Say so rather than silently showing the home screen: a serial that
+    // resolves to nothing on THIS device usually means the wrong device.
+    toast(`Nothing on this device carries serial ${m[1]}.`);
+    return false;
+  }
+  stack = [{ v: 'lookup' }, { v: found[0], arg: found[1] }];
+  return true;
+}
+
+openDeepLink();
 render();
 
 /* The service worker only exists over http(s); opening the file directly is a

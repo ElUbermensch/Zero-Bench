@@ -1042,6 +1042,69 @@ section('label');
   await shot('07-label');
 }
 
+section('the QR on the label opens the record');
+{
+  const serial = await page.evaluate(() => DB.batches[0].serial);
+  const encoded = await page.evaluate(() => {
+    go('label', DB.batches[0].id);
+    return (DB.meta.baseUrl || '') + '/#/s/' + DB.batches[0].serial;
+  });
+  await page.waitForTimeout(200);
+  ok(/#\/s\//.test(encoded),
+     'the label encodes a fragment, which needs no host rewrite and works offline');
+
+  // Scan the box: a COLD load straight at the link. A hash-only goto is a
+  // same-document navigation and never re-runs start-up, which would make this
+  // assert on whatever screen the previous section left behind.
+  await page.goto('about:blank');
+  await page.goto(BASE + '#/s/' + encodeURIComponent(serial));
+  await page.waitForTimeout(600);
+  const v = await page.textContent('#view');
+  ok(v.includes(serial), 'opening the link lands on that batch, not on the Identify screen');
+  ok((await page.evaluate(() => location.hash)) === '',
+     '...and the link is consumed, so a later reload does not drag you back to it');
+  await page.click('#back');
+  await page.waitForTimeout(200);
+  ok((await page.textContent('#view')).includes('By serial'),
+     'Back goes to Identify rather than out of the app');
+
+  // A serial from someone else's bench resolves to nothing here, and says so.
+  await page.goto('about:blank');
+  await page.goto(BASE + '#/s/B26Z99-99Z');
+  await page.waitForTimeout(600);
+  ok((await page.textContent('body')).includes('Nothing on this device carries serial'),
+     'an unknown serial says so instead of silently showing the home screen');
+}
+
+section('import cannot quietly replace a bench');
+{
+  await page.evaluate(() => reset('data'));
+  await page.waitForTimeout(200);
+  const outcome = await page.evaluate(async () => {
+    const asked = [];
+    const real = window.confirm;
+    window.confirm = (m) => { asked.push(m); return false; };
+    const before = JSON.stringify(DB);
+    const file = new File([JSON.stringify({ meta: { schema: 3 }, cartridges: [],
+      firearms: [], componentLots: [], brassLots: [], recipes: [], batches: [], sessions: [] })],
+      'bench.json', { type: 'application/json' });
+    const input = document.getElementById('importFile');
+    const dt = new DataTransfer(); dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 400));
+    const after = JSON.stringify(DB);
+    window.confirm = real;
+    return { asked, unchanged: before === after };
+  });
+  ok(outcome.asked.length === 1, 'importing over an existing bench asks first');
+  ok(/Replace everything/.test(outcome.asked[0] || ''), '...saying that it replaces rather than merges');
+  ok(/batches: \d+ → 0/.test(outcome.asked[0] || ''),
+     '...and counting both sides, because "0 batches" means nothing without "you have some"');
+  ok(/cannot be undone/.test(outcome.asked[0] || ''), '...and that it is irreversible');
+  ok(outcome.unchanged, 'declining leaves the bench exactly as it was');
+}
+
 /* =============================================================== persistence */
 section('persistence across a real reload');
 {

@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 import { loadConfig } from '../../tools/config.mjs';
+import { FACE_CSS, FONT_FILES } from '../../packages/fonts/face-css.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const at = (...p) => path.join(HERE, ...p);
@@ -42,10 +43,23 @@ export async function buildZero(o) {
   const bundle = fs.readFileSync(path.join(outdir, 'bundle.js'));
   const hash = crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 12);
 
+  fs.mkdirSync(path.join(outdir, 'fonts'), { recursive: true });
+  for (const f of FONT_FILES) {
+    fs.copyFileSync(at('../../packages/fonts', f), path.join(outdir, 'fonts', f));
+  }
   fs.mkdirSync(path.join(outdir, 'icons'), { recursive: true });
-  fs.writeFileSync(path.join(outdir, 'index.html'), fs.readFileSync(at('src/shell.html')));
+  /* The faces go in the HEAD rather than in the bundle: the browser can start
+   * fetching them while the JavaScript is still downloading, and they are
+   * plain CSS with no reason to sit inside a 1.5MB script. One source
+   * (packages/fonts) feeds both apps, so the two cannot declare different
+   * faces for the same family. */
+  fs.writeFileSync(path.join(outdir, 'index.html'),
+    fs.readFileSync(at('src/shell.html'), 'utf8')
+      .replace('</head>', () => `<style>\n${FACE_CSS}\n</style>\n</head>`));
   fs.writeFileSync(path.join(outdir, 'sw.js'),
-    fs.readFileSync(at('src/sw.js'), 'utf8').replace('__CACHE_VERSION__', `zero-${hash}`));
+    fs.readFileSync(at('src/sw.js'), 'utf8')
+      .replace('__CACHE_VERSION__', `zero-${hash}`)
+      .replace('__FONT_URLS__', JSON.stringify(FONT_FILES.map(f => './fonts/' + f))));
   fs.copyFileSync(at('src/manifest.webmanifest'), path.join(outdir, 'manifest.webmanifest'));
   for (const f of fs.readdirSync(at('src/icons'))) {
     fs.copyFileSync(at('src/icons', f), path.join(outdir, 'icons', f));

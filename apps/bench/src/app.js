@@ -1366,6 +1366,7 @@ function render() {
   document.getElementById('title').innerHTML =
     esc(t) + (s ? `<div class="sub">${esc(s)}</div>` : '');
   document.getElementById('back').classList.toggle('hidden', stack.length < 2);
+  paintSyncChip();
   const warn = Store.persistent ? '' : `<div class="banner bad noprint"><div>
       <b>Not saving to this device.</b><span class="small">This browser is blocking
       local storage, so records live in memory and vanish when the page reloads.
@@ -1391,6 +1392,34 @@ function render() {
     setTimeout(() => d.remove(), 2800);
     UI.toast = null;
   }
+}
+
+/* The header chip. Short label, long aria-label: the visible text has to fit
+ * beside a title on a phone, but a screen reader gets the whole sentence.
+ *
+ * The chip navigates; it never syncs. A control that fires a network write
+ * from a spot the thumb rests on while scrolling is a control that fires by
+ * accident, and this one is present on every screen. */
+function paintSyncChip() {
+  const el = document.getElementById('syncchip');
+  if (!el) return;
+  if (!CORE) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const st = UI.sync || {};
+  const pending = CORE.isSignedIn() ? CORE.pendingCount() : 0;
+  let text, label, cls;
+  if (!CORE.isSignedIn()) {
+    text = 'Sign in'; label = 'Not signed in — set up cloud sync with Zero'; cls = 'act';
+  } else if (st.busy) {
+    text = '⇅'; label = 'Syncing'; cls = 'busy';
+  } else if (pending) {
+    text = '⇅ ' + pending; label = `${pending} record${pending === 1 ? '' : 's'} waiting to send`; cls = 'wait';
+  } else {
+    text = '⇅'; label = 'Signed in — everything sent'; cls = '';
+  }
+  el.textContent = text;
+  el.setAttribute('aria-label', label);
+  el.className = 'syncchip' + (cls ? ' ' + cls : '');
 }
 
 /** Empty state with a single call to action pointing at the ONE page that
@@ -1437,7 +1466,14 @@ VIEWS.lookup = () => {
     result = matches.map(brassRow).join('');
   }
 
-  return `<div class="card">
+  /* Signed out, the sign-in block sits ABOVE the tool: it is the one thing a
+   * new user has to do once, and burying it is what made "where is the sync
+   * button" a question in the first place. Signed in, it drops below the tool
+   * as a status readout with the sync button on it. */
+  const signedOut = !!CORE && !CORE.isSignedIn();
+
+  return `${signedOut ? syncCard() : ''}
+  <div class="card">
     <div class="casewrap mb12">${caseSvg(preview)}</div>
     ${pickers}
     <div class="row spread">
@@ -1456,7 +1492,8 @@ VIEWS.lookup = () => {
       <button class="btn primary" data-act="serialgo">Find</button>
     </div>
     <div id="serialMsg" class="small mt8"></div>
-  </div>`;
+  </div>
+  ${signedOut ? '' : syncCard({ compact: true })}`;
 };
 
 function brassRow(l) {
@@ -2038,23 +2075,45 @@ VIEWS.settings = () => {
 };
 
 /* ------------------------------------------------------------ cloud sync */
-VIEWS.sync = () => {
-  if (!CORE) return empty('No backend is configured in this build, so Bench stores everything on this device.');
-  const st = UI.sync || {};
-  const signedIn = CORE.isSignedIn();
 
-  if (!signedIn) {
+/* The sign-in form and the sync button, as one block that both the Identify
+ * screen and the Cloud sync page render.
+ *
+ * They used to live only on the Cloud sync page, which is two taps deep under
+ * More, and the result was the obvious one: a user who had never opened that
+ * menu had no way to know an account existed, and no way to find the sync
+ * button once they did. Zero puts exactly this on its home screen, so Bench
+ * now does too -- same fields, same order, same wording, so signing in on one
+ * app teaches you the other.
+ *
+ * Placement differs by state, deliberately. Signed OUT it goes above the
+ * identify tool, because it is a setup step that has to be seen once. Signed
+ * IN it goes below, because it is then a status readout and the tool is what
+ * the screen is for. Both are the same markup; only the caller's position
+ * changes.
+ *
+ * There is exactly one element with each of these ids at any moment: only one
+ * view renders at a time, so the Identify copy and the Cloud sync copy are
+ * never in the document together. */
+function syncCard(opts) {
+  if (!CORE) return '';
+  const o = opts || {};
+  const st = UI.sync || {};
+
+  if (!CORE.isSignedIn()) {
     return `<div class="card">
-      <h2>Sign in</h2>
+      <h2>Sync with Zero</h2>
       <p class="small muted">One account for Bench and Zero. Your batches become
         selectable loads in Zero, and the groups they shoot come back here.</p>
       <label class="f"><span>Email</span>
-        <input type="email" id="sy-email" autocapitalize="none" autocomplete="username"></label>
+        <input type="email" id="sy-email" autocapitalize="none" autocomplete="username"
+          inputmode="email" spellcheck="false" placeholder="you@example.com"></label>
       <label class="f"><span>Password</span>
         <input type="password" id="sy-pw" autocomplete="current-password"></label>
       <div class="row g8 mt10">
-        <button class="btn primary" data-act="syIn" style="flex:1">Sign in</button>
-        <button class="btn" data-act="syUp" style="flex:1">Create account</button>
+        <button class="btn primary" data-act="syIn" style="flex:1" ${st.busy ? 'disabled' : ''}>
+          ${st.busy ? 'Signing in…' : 'Sign in'}</button>
+        <button class="btn" data-act="syUp" style="flex:1" ${st.busy ? 'disabled' : ''}>Create account</button>
       </div>
       ${st.err ? `<div class="banner bad mt10"><div class="small">${esc(st.err)}</div></div>` : ''}
       <p class="tiny dim mt10">Offline writes queue and go on the next sync, so a
@@ -2063,17 +2122,28 @@ VIEWS.sync = () => {
   }
 
   const pending = CORE.pendingCount();
-  const rejected = CORE.rejectedList ? CORE.rejectedList() : [];
-  const blocked = st.blocked || [];
   return `<div class="card">
     <div class="spread"><b class="small">${esc(CORE.getUser()?.email || 'signed in')}</b>
-      <button class="btn sm" data-act="syOut">Sign out</button></div>
+      ${o.compact ? `<button class="btn sm" data-act="nav" data-arg="sync">Details</button>`
+                  : `<button class="btn sm" data-act="syOut">Sign out</button>`}</div>
     <div class="tiny dim mt6">${pending ? `${pending} record${pending === 1 ? '' : 's'} waiting to send`
       : 'everything sent'}${st.at ? ` · last sync ${st.at}` : ''}</div>
     <button class="btn primary wide mt10" data-act="sySync" ${st.busy ? 'disabled' : ''}>
       ${st.busy ? 'Syncing…' : '⇅ Sync now'}</button>
     ${st.msg ? `<div class="banner ${st.ok ? 'ok' : 'bad'} mt10"><div class="small">${esc(st.msg)}</div></div>` : ''}
-  </div>
+  </div>`;
+}
+
+VIEWS.sync = () => {
+  if (!CORE) return empty('No backend is configured in this build, so Bench stores everything on this device.');
+  const st = UI.sync || {};
+  const signedIn = CORE.isSignedIn();
+
+  if (!signedIn) return syncCard();
+
+  const rejected = CORE.rejectedList ? CORE.rejectedList() : [];
+  const blocked = st.blocked || [];
+  return `${syncCard()}
 
   ${blocked.length ? `<div class="card"><h2>Not sent</h2>
     <p class="small muted">These could not be represented in the shared schema. Everything
@@ -2264,13 +2334,21 @@ function doSerialLookup() {
 async function doAuth(mode) {
   const email = (document.getElementById('sy-email') || {}).value || '';
   const pw = (document.getElementById('sy-pw') || {}).value || '';
+  /* Rendered before the await, not just set: without it the buttons stay live
+   * during the request and a second tap fires a second sign-in. */
   UI.sync = { busy: true };
+  render();
   const r = mode === 'up' ? await CORE.signUp(email.trim(), pw)
                           : await CORE.signIn(email.trim(), pw);
   UI.sync = r.ok
     ? (r.needsConfirmation ? { err: 'Account created — confirm the email, then sign in.' } : {})
     : { err: r.error?.msg || r.error?.error_description || r.error?.message || 'Sign-in failed.' };
   render();
+  /* Sync immediately on a successful sign-in. Signing in is the user saying
+   * "connect this to my account"; making them then find and press a second
+   * button before anything moves is the gap that made the feature feel absent.
+   * A confirmation-pending signup has no session yet, so it is skipped. */
+  if (r.ok && !r.needsConfirmation) await doSync();
 }
 
 /* Map the whole bench onto the shared schema, queue it, and push.
@@ -2285,13 +2363,36 @@ async function doSync() {
   try {
     const { queued, blocked } = BenchSync.push(CORE, DB, lotLeft, roundsLeft);
     save();                                   // ids first, network second
-    const r = await CORE.sync({ trigger: 'manual' });
+
+    /* Pulled rows are applied through this handler. Passing one is also what
+     * tells zero-core the rows were consumed -- without it the cursor stays
+     * put, deliberately, so nothing is skipped for whoever wires a handler up
+     * later. Everything the handler changes is saved once at the end rather
+     * than per row: one write, and nothing half-applied if a later table
+     * throws. */
+    const pulled = { added: 0, updated: 0, removed: 0 };
+    const r = await CORE.sync({
+      trigger: 'manual',
+      apply: (table, rows) => {
+        const s = BenchSync.applyPulled(DB, table, rows, { ensureCartridge, uid });
+        if (s) { pulled.added += s.added; pulled.updated += s.updated; pulled.removed += s.removed; }
+      },
+    });
+    if (pulled.added || pulled.updated || pulled.removed) save();
+
+    const fromOther = [
+      pulled.added ? `${pulled.added} new` : '',
+      pulled.updated ? `${pulled.updated} updated` : '',
+      pulled.removed ? `${pulled.removed} removed` : '',
+    ].filter(Boolean).join(', ');
+
     UI.sync = {
       busy: false, blocked,
       ok: r.ok,
       at: new Date().toLocaleTimeString(),
       msg: r.ok
         ? `Sent ${queued} record${queued === 1 ? '' : 's'}, pulled ${r.stats.pulled}.`
+          + (fromOther ? ` Firearms from Zero: ${fromOther}.` : '')
           + (blocked.length ? ` ${blocked.length} could not be represented — see below.` : '')
         : 'Sync failed: ' + r.reason,
     };
@@ -2362,6 +2463,12 @@ function applyEdit(kind, id, d) {
   const rec = byId(HOMES[kind].list(), id);
   if (!rec) return ['err', null, 'That record no longer exists.'];
   Object.assign(rec, FIELDS[kind](d));
+  /* Firearms are the one collection that syncs BOTH ways, so an edit here has
+   * to be distinguishable from a record that merely exists. Without a local
+   * modification time Bench re-pushed every firearm on every sync, and since
+   * push runs before pull that overwrote edits made in Zero with Bench's stale
+   * copy -- then read the stale value back and called it agreement. */
+  if (kind === 'firearm') rec.mtime = Date.now();
   if (kind === 'brass') rec.qty = brassOnHand(rec);   // kept in step for exports
   const home = HOMES[kind];
   const msg = 'Changes saved.';
@@ -2372,7 +2479,7 @@ function applyEdit(kind, id, d) {
 /* Creation: exactly one save path per kind. */
 const SAVERS = {
   firearm: (d) => {
-    DB.firearms.push(Object.assign({ id: uid('f') }, FIELDS.firearm(d)));
+    DB.firearms.push(Object.assign({ id: uid('f'), mtime: Date.now() }, FIELDS.firearm(d)));
     return ['nav', 'firearms', 'Firearm saved.'];
   },
   component: (d) => {
@@ -2500,6 +2607,16 @@ function guardedDelete(kind, id) {
   }[kind]();
   if (uses) { toast(`Still used by ${uses} batch${uses === 1 ? '' : 'es'} — not deleted.`); render(); return; }
   const arr = { brass: 'brassLots', recipe: 'recipes', component: 'componentLots', firearm: 'firearms' }[kind];
+  /* Firearms are the one collection that comes BACK from the server, so a
+   * local delete has to be published as a tombstone. Without it the row is
+   * still there on the next pull, nothing local matches its id any more, and
+   * the apply handler faithfully recreates the firearm the user just deleted.
+   * The other collections are push-only, so there is nothing to resurrect
+   * them; when one of them gains an inverse, it gains a tombstone here too. */
+  if (kind === 'firearm' && CORE) {
+    const rec = byId(DB.firearms, id);
+    if (rec && rec.remote) { try { CORE.remove('firearms', rec.remote); } catch (e) {} }
+  }
   DB[arr] = DB[arr].filter(x => x.id !== id);
   save();
   toast('Deleted.');
@@ -2850,6 +2967,19 @@ function openDeepLink() {
 
 openDeepLink();
 render();
+
+/* Sync on launch when a session already exists.
+ *
+ * The manual button stays -- a user who wants to know that something happened
+ * right now needs a control that says so -- but the common case should not
+ * require one. Deferred behind the first paint so a slow or dead network never
+ * delays the app opening, and guarded on navigator.onLine so a phone that is
+ * plainly offline does not spend a request finding that out. Errors land in
+ * UI.sync like any other sync and are shown on the card; they never throw into
+ * the boot path. */
+if (CORE && CORE.isSignedIn() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+  setTimeout(() => { doSync().catch(() => {}); }, 800);
+}
 
 /* The service worker only exists over http(s); opening the file directly is a
  * supported way to use this app and must not throw. */

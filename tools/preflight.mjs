@@ -98,7 +98,8 @@ ok(embedded.includes('//#region zero-core'), 'Zero embeds zero-core in a generat
 ok(/__SUPABASE_CONFIG__/.test(embedded), 'Zero takes its backend from the build, not a hand-edited constant');
 
 const wf = read('.github/workflows/test.yml');
-for (const t of ['rls_test.sql', 'rls_test2.sql', 'rls_test3.sql', 'rls_test4.sql']) {
+for (const t of ['rls_test.sql', 'rls_test2.sql', 'rls_test3.sql', 'rls_test4.sql',
+                 'rls_test5.sql']) {
   ok(wf.includes(t), `CI runs supabase/test/${t}`, 'a suite that CI does not run is a suite that rots');
 }
 const deploy = read('.github/workflows/deploy.yml');
@@ -201,6 +202,27 @@ if (has('apps/bench/src/shell.html') && has('apps/zero/Zero.jsx')) {
        : 'neither app depends on a network font to render',
      'a blocking @import to an unreachable host stalls rendering, so the app looks '
      + 'different at a range than it does at home. Self-host the woff2 and precache it.');
+
+  /* Sign-in has to be on the first screen in BOTH apps.
+   *
+   * Zero always put its sync panel on the home list. Bench put the same block
+   * behind More > Cloud sync, two taps deep, and the result was a user asking
+   * where the sync button was -- reasonably, because there was no way to learn
+   * the feature existed without opening a menu that promises "more" of what
+   * you already have. One account serves both apps, so whichever app the user
+   * opens first has to be able to establish it.
+   *
+   * Source-level, and deliberately shallow: it checks that the home view
+   * renders the block, not what the block looks like. The rendered behaviour
+   * -- fields visible with nothing tapped, sign-in actually moving records --
+   * is apps/bench/test-sync-ui.mjs, which needs a backend to exist at all. */
+  const app = has('apps/bench/src/app.js') ? read('apps/bench/src/app.js') : '';
+  const benchHome = /VIEWS\.lookup[\s\S]{0,4000}?syncCard\(/.test(app);
+  const zeroHome = /<SessionsList[\s\S]{0,2000}?<SyncPanel/.test(zero);
+  ok(benchHome && zeroHome,
+     'both apps offer sign-in on their first screen'
+     + (benchHome && zeroHome ? '' : ` (bench ${benchHome ? 'does' : 'does NOT'}, zero ${zeroHome ? 'does' : 'does NOT'})`),
+     'a sync feature nobody can find is a sync feature nobody uses');
 }
 
 /* ─────────────────────────────────────────────── safe areas on notched phones */

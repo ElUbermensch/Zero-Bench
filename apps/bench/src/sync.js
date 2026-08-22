@@ -47,9 +47,11 @@ const BenchSync = (() => {
   /* What is left of a component lot, derived the same way the app derives it.
    * Passed in rather than recomputed so there is one definition of "left". */
   function buildRows(DB, left, roundsLeft) {
-    const out = [];       // [{table, row}] in FK-safe order
+    const out = [];       // [{table, row, mark}] in FK-safe order
     const blocked = [];   // [{what, why}]
-    const add = (table, row) => out.push({ table, row });
+    /* `mark` is the local record to stamp as sent once the row is queued. Only
+     * the two-way collection needs it; everything else passes nothing. */
+    const add = (table, row, mark) => out.push({ table, row, mark });
 
     /* ---------------------------------------------------- profile + scheme */
     // The marking scheme is what makes a colour code mean anything, so it
@@ -63,12 +65,25 @@ const BenchSync = (() => {
                        why: 'a firearm needs a name and a cartridge' });
         continue;
       }
+      /* Firearms sync BOTH ways, so only what changed here since this device
+       * last agreed with the server goes up. Pushing every firearm every time
+       * is not just noise: push runs before pull, so an untouched local copy
+       * would overwrite a newer edit made in Zero, and the pull would then
+       * read the stale value back as though it were the truth. A record with
+       * no syncedAt has never been up -- including one that came from an
+       * import -- so it goes.
+       *
+       * Everything else in this file is push-only and has no such hazard: the
+       * server cannot contradict it, so there is nothing to lose by re-sending
+       * it and no local modification time to maintain. */
+      const dirty = !f.remote || !f.syncedAt || Number(f.mtime || 0) > Number(f.syncedAt);
+      if (!dirty) continue;
       add('firearms', {
         id: rid(f), name: f.name, cartridge: cartName(f.cartridge),
         barrel_in: nn(f.barrel), twist: f.twist || null,
         sight_height_in: nn(f.sightHeight), zero_range_yd: nn(f.zeroRange),
         notes: f.notes || null,
-      });
+      }, f);
     }
 
     /* -------------------------------------------- components: product + lot */
@@ -271,7 +286,7 @@ const BenchSync = (() => {
     const { rows, blocked } = buildRows(DB, left, roundsLeft);
     let queued = 0;
     const me = core.getUser && core.getUser();
-    for (const { table, row } of rows) {
+    for (const { table, row, mark } of rows) {
       if (table === 'profiles') {
         // profiles.id IS the auth user id; letting the outbox mint a random
         // one would write a row that RLS then refuses, forever.
@@ -281,12 +296,109 @@ const BenchSync = (() => {
         continue;
       }
       core.upsert(table, row);
+      /* Stamped at QUEUE time, like the remote id: the outbox is durable, so
+       * queued means delivered unless the server refuses it -- and a refusal
+       * is visible in the rejected list rather than silently re-pushing the
+       * same row on every sync forever. The caller persists. */
+      if (mark) mark.syncedAt = Date.now();
       queued++;
     }
     return { queued, blocked };
   }
 
-  return { buildRows, push, uuid };
+  /* ========================================================================
+   * The shared schema → BENCH.
+   *
+   * Push was one-way for a long time and it showed: a firearm entered in Zero
+   * had to be entered again in Bench, with the same name, the same chambering
+   * and a second chance to get one of them wrong. Two apps over one account
+   * that make you type the same rifle twice are two apps, not one product.
+   *
+   * FIREARMS FIRST, and for now only firearms. It is the record both apps
+   * genuinely own -- Bench needs it because a batch is fired from it, Zero
+   * needs it because a group is attributed to it -- and it is small enough
+   * that the mapping is honest in both directions. The rest of the schema is
+   * not symmetric: a Bench component lot is two rows there, a recipe resolves
+   * names to keys, and inventing a Bench lot from a purchase row would create
+   * records the user never entered. Those stay push-only until each one has a
+   * defensible inverse.
+   *
+   * WHY THIS DOES NOT CLOBBER: each app writes only the columns it owns, and
+   * PostgREST updates only the columns present in the payload. Bench sends
+   * barrel/twist/sight height/zero range; Zero sends barrel life and the
+   * starting round count; neither sends the other's. Name, cartridge and notes
+   * are shared, and there last write wins -- which is the honest answer for a
+   * field two apps both edit and there is no third place to arbitrate.
+   *
+   * `helpers.ensureCartridge` is injected rather than reached for: Bench's
+   * cartridges live in app.js, and a function in this file that silently
+   * depends on load order is how the whole app once failed to boot.
+   * ======================================================================*/
+  function applyFirearms(DB, rows, helpers) {
+    const stat = { added: 0, updated: 0, removed: 0 };
+    if (!Array.isArray(rows) || !rows.length) return stat;
+    DB.firearms = DB.firearms || [];
+
+    for (const row of rows) {
+      if (!row || !row.id) continue;
+      const local = DB.firearms.find(f => f.remote === row.id) || null;
+
+      /* A tombstone. Removing the local record is right -- it is the same
+       * firearm, deleted deliberately on another device -- but only when
+       * nothing here still points at it, because a session that loses its
+       * firearm loses the attribution that made it worth recording. */
+      if (row.deleted_at) {
+        if (local) {
+          const used = (DB.sessions || []).some(s => s.firearm === local.id);
+          if (!used) {
+            DB.firearms = DB.firearms.filter(f => f !== local);
+            stat.removed++;
+          }
+        }
+        continue;
+      }
+
+      if (!row.name) continue;                 // not representable; leave it alone
+      const patch = {
+        name: row.name,
+        cartridge: helpers.ensureCartridge(row.cartridge) || (local ? local.cartridge : null),
+        barrel: nn(row.barrel_in),
+        twist: row.twist || '',
+        sightHeight: nn(row.sight_height_in),
+        zeroRange: nn(row.zero_range_yd),
+        notes: row.notes || '',
+      };
+
+      if (local) {
+        const before = JSON.stringify([local.name, local.cartridge, local.barrel,
+          local.twist, local.sightHeight, local.zeroRange, local.notes]);
+        Object.assign(local, patch);
+        const after = JSON.stringify([local.name, local.cartridge, local.barrel,
+          local.twist, local.sightHeight, local.zeroRange, local.notes]);
+        if (before !== after) stat.updated++;
+      } else {
+        /* A local id is minted here, not taken from the remote row: every
+         * other Bench record references firearms by the short local id, and
+         * swapping the id scheme for imported rows would be a second kind of
+         * key in the same collection. The remote id is kept in `remote`, which
+         * is exactly what push already does for records created here. */
+        DB.firearms.push(Object.assign({ id: helpers.uid('f'), remote: row.id }, patch));
+        stat.added++;
+      }
+    }
+    return stat;
+  }
+
+  /* The apply handler zero-core calls with each table's pulled rows. Unknown
+   * tables are ignored rather than refused: the cursor only advances for a
+   * sync that HAS a handler, and a handler that throws on a table it does not
+   * know would abort every table after it. */
+  function applyPulled(DB, table, rows, helpers) {
+    if (table === 'firearms') return applyFirearms(DB, rows, helpers);
+    return null;
+  }
+
+  return { buildRows, push, applyPulled, applyFirearms, uuid };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = BenchSync;

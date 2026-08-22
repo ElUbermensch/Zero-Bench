@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { loadConfig } from '../../tools/config.mjs';
+import { FACE_CSS, FONT_FILES } from '../../packages/fonts/face-css.mjs';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -19,7 +20,11 @@ const conf = `const SHARED_SUPABASE = ${JSON.stringify({ url: cfg.url, anonKey: 
 const js = [conf, read('src/qr.js'), core, read('src/sync.js'), read('src/app.js')].join('\n');
 if (/<\/script|<!--/i.test(js)) throw new Error('payload would close the inline script');
 // replace via a FUNCTION: a string replacement expands $' and $& inside the payload
-const out = shell.replace('<!--APP-->', () => '<script>\n' + js + '\n<\/script>');
+/* The faces go in ahead of everything else in the stylesheet, so a rule can
+ * rely on them. Injected rather than pasted into shell.html so the two apps
+ * cannot end up declaring different faces for the same family. */
+const withFaces = shell.replace('<style>', () => '<style>\n' + FACE_CSS);
+const out = withFaces.replace('<!--APP-->', () => '<script>\n' + js + '\n<\/script>');
 fs.mkdirSync('dist', { recursive: true });
 fs.writeFileSync('dist/index.html', out);
 fs.copyFileSync('src/manifest.webmanifest', 'dist/manifest.webmanifest');
@@ -27,9 +32,15 @@ fs.copyFileSync('src/manifest.webmanifest', 'dist/manifest.webmanifest');
 // depends on remembering to bump a version string.
 const hash = crypto.createHash('sha256').update(out).digest('hex').slice(0, 12);
 fs.writeFileSync('dist/sw.js',
-  read('src/sw.js').replace('__CACHE_VERSION__', `bench-${hash}`));
+  read('src/sw.js')
+    .replace('__CACHE_VERSION__', `bench-${hash}`)
+    .replace('__FONT_URLS__', JSON.stringify(FONT_FILES.map(f => './fonts/' + f))));
 // Icons are committed under src/ rather than generated: dist/ is gitignored, so
 // a fresh clone would otherwise build a PWA with no icons at all.
+fs.mkdirSync('dist/fonts', { recursive: true });
+for (const f of FONT_FILES) {
+  fs.copyFileSync(path.join('../../packages/fonts', f), path.join('dist/fonts', f));
+}
 fs.mkdirSync('dist/icons', { recursive: true });
 for (const f of fs.readdirSync('src/icons')) fs.copyFileSync('src/icons/' + f, 'dist/icons/' + f);
 console.log('dist/index.html', (out.length / 1024).toFixed(1), 'KB · cache bench-' + hash

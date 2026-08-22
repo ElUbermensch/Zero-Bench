@@ -10,9 +10,12 @@
  * worse than an error: the whole point of the relay is that it is current.
  */
 const CACHE = '__CACHE_VERSION__';
+/* FONT_FILES is spliced in by the build: the faces have to be precached or an
+ * offline launch falls back to a system face, which is the exact difference
+ * self-hosting them was meant to remove. */
 const SHELL = ['./', './index.html', './bundle.js', './manifest.webmanifest',
                './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
-               './icons/icon-maskable-512.png'];
+               './icons/icon-maskable-512.png'].concat(__FONT_URLS__);
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -14,11 +14,19 @@ export function startMock(opts = {}) {
     refreshTokens: new Map(),    // refresh_token -> userId
     rows: new Map(),             // table -> Map(id -> row)
     clock: 1_000_000,            // server clock, ms; tests advance it by hand
-    hits: { refresh: 0, signin: 0, push: {}, pull: {} },
+    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {} },
     failRefresh: false,
     ttlSec: opts.ttlSec ?? 3600,
     pushOrder: [],               // tables in the order they were pushed to
     lastPush: {},                // table -> the exact payload the client sent
+    /* Columns the real schema declares NOT NULL, for the tables the clients
+     * write both ways. An upsert is INSERT ... ON CONFLICT: Postgres forms the
+     * insert tuple before it detects the conflict, so a payload missing one of
+     * these is refused even when the row already exists. That is not a detail
+     * -- it is why a delete cannot be expressed as an upsert of
+     * {id, deleted_at}, which is exactly the bug this mock failed to catch
+     * until it learned the constraint. */
+    notNull: { firearms: ['name', 'cartridge'] },
     // tables whose rows must reference an existing parent row
     fk: { shots: ['session_id', 'range_sessions'],
           groups: ['session_id', 'range_sessions'],
@@ -257,6 +265,25 @@ export function startMock(opts = {}) {
           return json(res, 204, null);
         }
 
+        /* PATCH, which is how a tombstone travels.
+         *
+         * It cannot be an upsert of {id, deleted_at}: Postgres builds the
+         * insert tuple before it detects the conflict, so a partial row fails
+         * the table's NOT NULL columns and the delete is refused outright.
+         * That bug shipped and was invisible here until this mock learned to
+         * answer PATCH -- so the shape is modelled, filter and all, rather
+         * than waved through. */
+        if (req.method === 'PATCH') {
+          const idFilter = (u.searchParams.get('id') || '').replace(/^eq\./, '');
+          state.hits.patch[t] = (state.hits.patch[t] || 0) + 1;
+          const row = table(t).get(idFilter);
+          // RLS: another account's row is invisible, not forbidden. PostgREST
+          // answers a filter matching nothing with 204 and no rows changed.
+          if (!row || row.user_id !== a.userId) return json(res, 204, null);
+          Object.assign(row, payload, { updated_at: stamp() });
+          return json(res, 204, null);
+        }
+
         if (req.method === 'GET') {
           state.hits.pull[t] = (state.hits.pull[t] || 0) + 1;
           const gt = (u.searchParams.get('updated_at') || '').replace(/^gt\./, '');
@@ -296,6 +323,33 @@ export function startMock(opts = {}) {
           state.pushOrder.push(t);
           const incoming = Array.isArray(payload) ? payload : [payload];
           state.lastPush[t] = incoming;   // verbatim, before any merging
+
+          /* PostgREST builds ONE column list for a bulk insert, so every
+           * object in the array has to carry the same keys; a mixed array is
+           * refused outright with PGRST102. Modelled here because the client
+           * hits it naturally -- a tombstone is {id, deleted_at} and an edit
+           * is a whole row -- and a mock that quietly accepted the mixture
+           * would have every test pass against a request the real server
+           * rejects. */
+          if (incoming.length > 1) {
+            const sig = (r) => Object.keys(r).sort().join(',');
+            const first = sig(incoming[0]);
+            if (incoming.some(r => sig(r) !== first)) {
+              return json(res, 400, { code: 'PGRST102',
+                message: 'All object keys must match' });
+            }
+          }
+          const required = state.notNull[t];
+          if (required) {
+            for (const row of incoming) {
+              const missing = required.filter(c => row[c] === undefined || row[c] === null);
+              if (missing.length) {
+                return json(res, 400, { code: '23502',
+                  message: `null value in column "${missing[0]}" of relation "${t}" `
+                           + 'violates not-null constraint' });
+              }
+            }
+          }
           const fk = state.fk[t];
           const saved = [];
           for (const row of incoming) {

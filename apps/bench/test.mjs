@@ -1081,6 +1081,67 @@ section('a stored round count is migrated, not discarded');
   await page.waitForTimeout(150);
 }
 
+/* ================================================== the shell holds its shape */
+section('the tab bar sits at the bottom on every screen');
+{
+  /* The bar was `position:fixed; bottom:0`, which pins it to the VIEWPORT --
+   * and on iOS the viewport moves: Safari hides its bottom toolbar once a page
+   * scrolls, so a long screen grew the viewport and dropped the bar while a
+   * short screen kept the toolbar and left it high. Two different results from
+   * one stylesheet.
+   *
+   * It is the last row of a 100dvh flex column now, so it is at the bottom of
+   * whatever space exists regardless of what the browser does. That is testable
+   * where the old arrangement was not: assert it on a screen with far too
+   * little content to scroll AND on one with far too much, and require the same
+   * answer from both. */
+  const geom = async (label) => {
+    await page.waitForTimeout(200);
+    return page.evaluate(() => {
+      const n = document.querySelector('nav.tabs').getBoundingClientRect();
+      const m = document.querySelector('main');
+      const h = document.querySelector('header').getBoundingClientRect();
+      return {
+        gapBelow: Math.round(innerHeight - n.bottom),
+        headerTop: Math.round(h.top),
+        scroller: m.scrollHeight > m.clientHeight,
+        bodyScrolls: document.body.scrollHeight > innerHeight + 1,
+        navOverlapsMain: Math.round(n.top) < Math.round(m.getBoundingClientRect().bottom) - 1,
+      };
+    });
+  };
+
+  // Empties and then floods a collection, so it snapshots first — later
+  // sections assert on the bench built above.
+  const lotsBefore = await page.evaluate(() => JSON.stringify(DB.componentLots));
+  await page.evaluate(() => { DB.componentLots = []; save(); reset('inventory'); });
+  const short = await geom('short');
+  await page.evaluate(() => {
+    // Far more than fits, so the middle genuinely scrolls.
+    DB.componentLots = Array.from({ length: 60 }, (_, i) => ({
+      id: 'z' + i, serial: 'C-' + i, kind: 'bullet', name: 'Filler ' + i,
+      qty: 100, unit: 'ea', cost: 10, weightGr: 140 }));
+    save(); reset('inventory');
+  });
+  const long = await geom('long');
+
+  ok(short.gapBelow === 0, `on a screen too short to scroll, the bar is at the bottom (gap ${short.gapBelow}px)`);
+  ok(long.gapBelow === 0, `on a screen long enough to scroll, likewise (gap ${long.gapBelow}px)`);
+  ok(short.gapBelow === long.gapBelow,
+     'the bar does not move between the two, which is the whole complaint');
+  ok(short.headerTop === 0 && long.headerTop === 0, 'the header stays put in both');
+  ok(long.scroller, 'the long screen scrolls its MIDDLE');
+  ok(!long.bodyScrolls && !short.bodyScrolls,
+     '...and the page itself never scrolls, so browser chrome cannot move under us');
+  ok(!short.navOverlapsMain && !long.navOverlapsMain,
+     'the bar sits below the content rather than covering it — nothing hides under it');
+
+  await page.evaluate((prev) => {
+    DB.componentLots = JSON.parse(prev); save(); reset('lookup');
+  }, lotsBefore);
+  await page.waitForTimeout(150);
+}
+
 /* ============================================ every field must be readable */
 section('no field is invisible');
 {

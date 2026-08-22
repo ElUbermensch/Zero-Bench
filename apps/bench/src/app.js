@@ -2135,6 +2135,30 @@ VIEWS.data = () => {
  * actually disagrees. Reached only by URL, so it costs nothing in the UI.
  * ========================================================================*/
 VIEWS.diag = () => {
+  /* The first version of this read the nav's rect DURING render, before the
+   * tab buttons had been rebuilt -- so it measured a 1px-tall bar and reported
+   * `nav top 712` against an innerHeight of 713. A diagnostic that lies is
+   * worse than no diagnostic, so the bar's numbers are filled in after paint,
+   * from the DOM, once layout has settled. */
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const n = document.querySelector('nav.tabs');
+    const box = document.getElementById('diag-nav');
+    if (!n || !box) return;
+    const b = n.getBoundingClientRect();
+    const line = (k, v) => `<div class="spread small rowline"><span class="dim">${esc(k)}</span>
+      <span class="mono">${esc(String(v))}</span></div>`;
+    const gap = Math.round(window.innerHeight - b.bottom);
+    box.innerHTML =
+      line('nav top', Math.round(b.top) + 'px') +
+      line('nav bottom', Math.round(b.bottom) + 'px') +
+      line('nav height', Math.round(b.height) + 'px') +
+      line('GAP BELOW NAV', gap + 'px') +
+      line('nav padding-bottom', getComputedStyle(n).paddingBottom) +
+      `<div class="tiny mt6" style="color:${gap === 0 ? 'var(--ok)' : 'var(--bad)'}">${
+        gap === 0 ? 'The bar reaches the bottom of the viewport. Anything visible below it belongs to the browser, not to this page.'
+                  : 'The bar stops ' + gap + 'px short of the viewport bottom — that IS the bug.'}</div>`;
+  }));
+
   const cs = getComputedStyle(document.documentElement);
   const nav = document.querySelector('nav.tabs');
   const r = nav ? nav.getBoundingClientRect() : null;
@@ -2158,13 +2182,13 @@ VIEWS.diag = () => {
     ${row('--safe-r', cs.getPropertyValue('--safe-r').trim() || '(unset)')}
   </div>
   <div class="card"><h2>The tab bar</h2>
-    ${row('nav top', r ? px(r.top) : 'no nav')}
-    ${row('nav bottom', r ? px(r.bottom) : '—')}
-    ${row('nav height', r ? px(r.height) : '—')}
-    ${row('gap below nav', r ? px(window.innerHeight - r.bottom) : '—')}
-    ${row('nav computed padding-bottom', nav ? getComputedStyle(nav).paddingBottom : '—')}
-    <div class="tiny dim mt6">A gap below the bar of anything other than 0px is the
-      bug: it means <b>bottom:0</b> is not the bottom of the screen.</div>
+    <div id="diag-nav"><div class="small dim">measuring…</div></div>
+  </div>
+  <div class="card"><h2>Browser chrome</h2>
+    ${row('screen minus viewport', px((window.screen ? window.screen.height : 0) - window.innerHeight))}
+    <div class="tiny dim mt6">Anything here above 0 is space the BROWSER has taken —
+      an address bar, a toolbar. No CSS in this page can paint it. In a home-screen
+      app it should be 0 and the safe-area values above should be non-zero.</div>
   </div>
   <div class="card"><h2>Page</h2>
     ${row('body scrollHeight', px(document.body.scrollHeight))}

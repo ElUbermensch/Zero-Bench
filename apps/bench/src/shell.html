@@ -29,7 +29,14 @@
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);
+/* Short screens must still fill the window.
+ *
+ * With no content the page was shorter than the viewport, so the area between
+ * the end of the content and the fixed tab bar painted as bare canvas. 100dvh
+ * tracks the DYNAMIC viewport, which is the one that changes as Safari shows
+ * and hides its toolbar -- 100vh would freeze at the large size and leave the
+ * page overflowing whenever the toolbar is visible. */
+body{min-height:100dvh;background:var(--bg);color:var(--ink);
   font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   padding-bottom:calc(66px + var(--safe-b));-webkit-font-smoothing:antialiased}
 h1,h2,h3{margin:0 0 .4em;line-height:1.25;font-weight:650}

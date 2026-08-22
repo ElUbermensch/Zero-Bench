@@ -116,6 +116,26 @@ if (has('vercel.json')) {
   ok(JSON.stringify(v.headers || []).includes('must-revalidate'),
      'vercel.json stops service workers being served stale',
      'a cached sw.js can pin a returning user to an old build indefinitely');
+
+  /* Vercel validates vercel.json against a schema that forbids unknown
+   * properties, and it does so at DEPLOY time -- the file is fine locally, the
+   * build never starts, and the error names a JSON path rather than a cause.
+   *
+   * This caught us with `"//"` keys used as comments inside `headers` entries.
+   * JSON has no comments; that convention is tolerated by some tools and not
+   * by this one. The reasoning those keys carried now lives in DEPLOY.md,
+   * where a human deploying will actually read it.
+   *
+   * Checked structurally rather than by grepping for "//", so a stray key of
+   * any name is caught. */
+  const HEADER_KEYS = new Set(['source', 'headers', 'has', 'missing']);
+  const strays = [];
+  (v.headers || []).forEach((h, i) => {
+    Object.keys(h).forEach(k => { if (!HEADER_KEYS.has(k)) strays.push(`headers[${i}].${k}`); });
+  });
+  ok(strays.length === 0,
+     `vercel.json carries no properties the schema will reject${strays.length ? ' — ' + strays.join(', ') : ''}`,
+     'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
 }
 
 const pkg = JSON.parse(read('package.json'));

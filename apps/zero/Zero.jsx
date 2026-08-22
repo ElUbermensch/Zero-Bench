@@ -990,14 +990,22 @@ const S = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
+  /* viewport-fit=cover extends the page under the status bar and the home
+   * indicator. Those insets have to be paid back or the sticky header rides up
+   * under the clock. Left/right matter in landscape, where the notch eats a
+   * side. */
+  --safe-t:env(safe-area-inset-top,0px);
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
   --bg:#0f1117;--surf:#1a1d27;--surf2:#252836;--bdr:#353848;
   --ink:#f0f2f8;--dim:#9099b0;--acc:#e8943a;
   --red:#f06060;--green:#3db87a;
   --fh:'DM Sans',sans-serif;--fm:'Space Mono',monospace;
 }
 body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;-webkit-font-smoothing:antialiased}
-.app{max-width:430px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column}
-.hdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:11px 15px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
+.app{max-width:430px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
+.hdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:calc(11px + var(--safe-t)) calc(15px + var(--safe-r)) 11px calc(15px + var(--safe-l));display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
 .htitle{font-family:var(--fh);font-size:17px;font-weight:700;letter-spacing:.01em}
 .hsub{font-family:var(--fm);font-size:9px;color:var(--dim);letter-spacing:.12em;margin-top:1px}
 .badd{background:var(--acc);color:#0f1117;border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}

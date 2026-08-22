@@ -290,19 +290,71 @@ It cleans up after itself and cannot see your own rows.
 
 ---
 
-## What is not deployed yet
+## Where the two apps live
 
-**Bench does not talk to the backend.** It is a complete, working reloading log that
-stores everything locally on the device it runs on. What that means concretely:
+`tools/build-site.mjs` assembles one directory that every host serves:
 
-- Bench's own data does not sync between your phone and anything else
-- Zero's **⇣ Bench** picker will find no batches, because nothing is writing them
+```
+site/            Zero
+site/bench/      Bench
+```
 
-Zero itself is fully wired — sessions, groups, the leaderboard and pair fire all use the
-backend today. Wiring Bench means mapping its local model onto the schema that is already
-built and tested for it (`v_ballistic_profiles` exists and Zero reads it correctly; there
-is simply nothing on the other end yet).
+Zero is at the root because it is the app with existing users. They are bookmarked
+at the origin, their home screens point there, and the PWA they installed has that
+scope. Serving Bench at `/` would send every returning shooter to a reloading app
+they have never seen, with their logbook apparently gone — it is still in
+localStorage, which is per-origin, so nothing is lost, but they would have no way
+to know that.
 
-Deploying now is still worth it: it proves the backend, gets both apps on your home
-screen, and makes pair fire usable this weekend. Bench keeps working exactly as it does
-now, and gains sync later without a migration.
+Two consequences follow from that layout, and both are easy to get wrong:
+
+**The service worker guard belongs to whichever app is at the root.** Zero's worker
+has a scope that contains `/bench/`, and its offline fallback would happily answer
+for Bench on a phone that has only ever opened Zero. `apps/zero/src/sw.js` declines
+anything under `/bench/`. Bench's worker needs no such guard — it is scoped to
+`/bench/` and cannot reach above it.
+
+**Bench's label QR uses the directory it was served from,** not the origin. An
+origin-only base URL would print labels pointing at `host/#/s/SERIAL`, which opens
+Zero with a fragment it has never heard of. The label would look right, scan fine,
+and land on the wrong app.
+
+## Cache headers, and why vercel.json looks the way it does
+
+`vercel.json` sets `Cache-Control: public, max-age=0, must-revalidate` on three
+paths. The reasoning, which cannot live in the file itself:
+
+- **`/(.*)sw.js`** — a service worker must never be served stale. The bundle is
+  content-hashed *by the worker*, so if the worker script itself is cached, a
+  returning user is pinned to an old build indefinitely with no way to tell.
+- **`/(index.html)?`** and **`/bench/(index.html)?`** — the shells name the bundle,
+  so a stale shell points at a stale bundle. Same failure, one step removed.
+
+JSON has no comments. An earlier version of this file carried `"//"` keys inside the
+`headers` entries as a comment convention; Vercel validates `vercel.json` against a
+schema that forbids unknown properties, and rejected the deploy with
+`headers[0] should NOT have additional property //`. The check happens at deploy
+time, so the file looks fine locally and the build simply never starts.
+`tools/preflight.mjs` now fails on any property the schema does not recognise.
+
+## Vercel
+
+The project deploys from `vercel.json`: build command and output directory come from
+there, so leave Build Command and Output Directory unset in the dashboard, and leave
+Root Directory empty (or `./`).
+
+Two environment variables are required, on Production **and** Preview:
+
+```
+SUPABASE_URL       https://<ref>.supabase.co
+SUPABASE_ANON_KEY  sb_publishable_...
+```
+
+Variables never apply retroactively — they affect new deployments only. Set them
+before the first build, or redeploy after adding them. A build without them still
+succeeds and prints `⚠ NO BACKEND`, shipping apps that ask every user to type a
+server address. That line in the build log is the thing to check.
+
+The publishable key is public by design and ships in the client bundle, which is why
+RLS does all the access control. The secret / `service_role` key must never appear
+in an environment variable, the repository, or any bundle.

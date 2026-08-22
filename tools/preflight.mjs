@@ -116,6 +116,53 @@ if (has('vercel.json')) {
   ok(JSON.stringify(v.headers || []).includes('must-revalidate'),
      'vercel.json stops service workers being served stale',
      'a cached sw.js can pin a returning user to an old build indefinitely');
+
+  /* Vercel validates vercel.json against a schema that forbids unknown
+   * properties, and it does so at DEPLOY time -- the file is fine locally, the
+   * build never starts, and the error names a JSON path rather than a cause.
+   *
+   * This caught us with `"//"` keys used as comments inside `headers` entries.
+   * JSON has no comments; that convention is tolerated by some tools and not
+   * by this one. The reasoning those keys carried now lives in DEPLOY.md,
+   * where a human deploying will actually read it.
+   *
+   * Checked structurally rather than by grepping for "//", so a stray key of
+   * any name is caught. */
+  const HEADER_KEYS = new Set(['source', 'headers', 'has', 'missing']);
+  const strays = [];
+  (v.headers || []).forEach((h, i) => {
+    Object.keys(h).forEach(k => { if (!HEADER_KEYS.has(k)) strays.push(`headers[${i}].${k}`); });
+  });
+  ok(strays.length === 0,
+     `vercel.json carries no properties the schema will reject${strays.length ? ' — ' + strays.join(', ') : ''}`,
+     'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
+}
+
+/* ─────────────────────────────────────────────── safe areas on notched phones */
+section('safe areas');
+/* `viewport-fit=cover` is an opt-in: it says "let my page under the status bar
+ * and the home indicator, I will handle the insets". Setting it and then not
+ * paying an inset back is strictly worse than never setting it -- the content
+ * simply sits under the hardware. Bench shipped with only the BOTTOM inset
+ * compensated, so on every notched phone the header rode up under the clock.
+ *
+ * Checked in source rather than in a browser: Playwright cannot synthesise a
+ * device notch, so a rendered test would pass on a machine with no insets and
+ * catch nothing on the one device that matters. */
+for (const [name, file] of [['Zero', 'apps/zero/src/shell.html'],
+                            ['Bench', 'apps/bench/src/shell.html']]) {
+  if (!has(file)) continue;
+  const shell = read(file);
+  const covers = /viewport-fit\s*=\s*cover/.test(shell);
+  if (!covers) { ok(true, `${name} does not opt into the display cutout`); continue; }
+  // Zero's stylesheet lives in Zero.jsx; Bench's is in its shell.
+  const css = shell + (name === 'Zero' && has('apps/zero/Zero.jsx') ? read('apps/zero/Zero.jsx') : '');
+  ok(/safe-area-inset-top/.test(css),
+     `${name} pays back the TOP inset it opted into`,
+     'viewport-fit=cover without safe-area-inset-top puts the header under the status bar');
+  ok(/safe-area-inset-bottom/.test(css),
+     `${name} pays back the bottom inset`,
+     'the home indicator overlaps whatever sits at the bottom of the screen');
 }
 
 const pkg = JSON.parse(read('package.json'));

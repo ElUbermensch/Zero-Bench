@@ -138,6 +138,33 @@ if (has('vercel.json')) {
      'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
 }
 
+/* ─────────────────────────────────────────────── safe areas on notched phones */
+section('safe areas');
+/* `viewport-fit=cover` is an opt-in: it says "let my page under the status bar
+ * and the home indicator, I will handle the insets". Setting it and then not
+ * paying an inset back is strictly worse than never setting it -- the content
+ * simply sits under the hardware. Bench shipped with only the BOTTOM inset
+ * compensated, so on every notched phone the header rode up under the clock.
+ *
+ * Checked in source rather than in a browser: Playwright cannot synthesise a
+ * device notch, so a rendered test would pass on a machine with no insets and
+ * catch nothing on the one device that matters. */
+for (const [name, file] of [['Zero', 'apps/zero/src/shell.html'],
+                            ['Bench', 'apps/bench/src/shell.html']]) {
+  if (!has(file)) continue;
+  const shell = read(file);
+  const covers = /viewport-fit\s*=\s*cover/.test(shell);
+  if (!covers) { ok(true, `${name} does not opt into the display cutout`); continue; }
+  // Zero's stylesheet lives in Zero.jsx; Bench's is in its shell.
+  const css = shell + (name === 'Zero' && has('apps/zero/Zero.jsx') ? read('apps/zero/Zero.jsx') : '');
+  ok(/safe-area-inset-top/.test(css),
+     `${name} pays back the TOP inset it opted into`,
+     'viewport-fit=cover without safe-area-inset-top puts the header under the status bar');
+  ok(/safe-area-inset-bottom/.test(css),
+     `${name} pays back the bottom inset`,
+     'the home indicator overlaps whatever sits at the bottom of the screen');
+}
+
 const pkg = JSON.parse(read('package.json'));
 ok(/embed-core\.mjs --check/.test(pkg.scripts.test),
    'npm test fails if the embedded zero-core has drifted');

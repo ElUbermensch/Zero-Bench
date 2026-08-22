@@ -12,11 +12,37 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
+/* Type stack, shared with Zero so the two apps read as one product.
+ *
+ * Zero loads 'DM Sans' and 'Space Mono' with an @import from Google Fonts.
+ * Bench does NOT copy that, deliberately: adding the import here hung this
+ * app's own test suite, because the headless browser cannot reach
+ * fonts.googleapis.com and a blocking @import stalls rendering until it gives
+ * up. That is not a test artefact -- it is exactly what happens on a range
+ * with no signal, which is the condition this app was built for.
+ *
+ * So both apps declare the same tokens and Bench resolves them to the system
+ * stack. Zero currently resolves them to the webfont when it can reach the
+ * network and to a generic fallback when it cannot, which means Zero looks
+ * different at the bench than it does at the range. Self-hosting the two woff2
+ * files and precaching them would settle it for both apps at once; until then
+ * the honest thing is not to add a second app's worth of the same fragility. */
 :root{
-  --bg:#16181c; --panel:#1e2127; --panel2:#252932; --line:#333944;
-  --ink:#e8eaed; --ink2:#9aa3b0; --ink3:#6c7480;
-  --brass:#c9a227; --ok:#2f9e44; --warn:#e8a317; --bad:#e03131;
-  --r:12px; --tap:44px;
+  --fh:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --fm:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  /* Greys taken from Zero, value for value, because the two apps are used in
+   * the same session and were visibly different products: Bench's background
+   * was #16181c against Zero's #0f1117, with every surface and border a little
+   * off from its counterpart. Zero is the app people already know, so its
+   * palette is the one that wins.
+   *
+   * The accent deliberately does NOT match. Brass here, orange in Zero, is the
+   * one thing that tells you at a glance which app you are looking at -- and
+   * with both installed side by side on a home screen, that is worth keeping. */
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#252836; --line:#353848;
+  --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
+  --brass:#c9a227; --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
+  --r:9px; --tap:44px;
   /* The viewport meta says viewport-fit=cover, which deliberately extends the
    * page UNDER the status bar and the home indicator. That only works if the
    * insets are paid back. Only the bottom one was, so on any notched phone the
@@ -57,13 +83,13 @@ html,body{margin:0;padding:0}
 html{height:100%}
 body{height:100dvh;display:flex;flex-direction:column;overflow:hidden;
   background:var(--bg);color:var(--ink);
-  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  font:15px/1.5 var(--fh);
   -webkit-font-smoothing:antialiased}
 h1,h2,h3{margin:0 0 .4em;line-height:1.25;font-weight:650}
 h2{font-size:16px}
 p{margin:0 0 .7em}
 button,input,select,textarea{font:inherit;color:inherit}
-code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code,.mono{font-family:var(--fm)}
 
 header{flex:0 0 auto;z-index:30;background:rgba(22,24,28,.94);
   backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
@@ -102,12 +128,17 @@ main{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain
  * under both behaviours without having to detect which one is in play. */
 /* Last row of the column rather than a fixed overlay, so it is always at the
  * bottom of the space the browser gave us -- above Safari's toolbar when there
- * is one, at the screen edge when there is not. The inset padding keeps the
- * icons clear of the home indicator in a home-screen app, where --safe-b is
- * non-zero; in Safari it resolves to 0 and costs nothing. */
+ * is one, at the screen edge when there is not.
+ *
+ * NO home-indicator reserve. Reserving var(--safe-b) is the textbook thing to
+ * do and it looked wrong: 34px of bar-coloured space under the icons that
+ * reads as padding rather than as safety margin, on a bar only 57px tall. iOS
+ * draws the indicator over the bar instead, which is what every native tab bar
+ * on the platform does. The trade is that the labels sit close to the
+ * indicator; the gain is that the bar looks deliberate. */
 nav.tabs{flex:0 0 auto;z-index:40;display:flex;
   background:rgba(30,33,39,.97);
-  border-top:1px solid var(--line);padding-bottom:var(--safe-b)}
+  border-top:1px solid var(--line)}
 /* The strip under the bar.
  *
  * On iOS in standalone mode with viewport-fit=cover, `bottom:0` anchors to the

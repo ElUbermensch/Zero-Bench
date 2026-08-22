@@ -159,6 +159,48 @@ if (has('apps/bench/src/shell.html') && has('apps/zero/Zero.jsx')) {
   ok(b === z,
      `both tab bars treat the home indicator the same way (bench ${b ? 'reserves' : 'does not'}, zero ${z ? 'reserves' : 'does not'})`,
      'one bar sitting higher than the other is the kind of thing users read as unfinished');
+
+  /* The greys have to match value for value. They drifted once already --
+   * Bench's background was #16181c against Zero's #0f1117, with every surface
+   * and border slightly off -- and side by side that reads as two products
+   * rather than one. The ACCENT is deliberately excluded: brass in Bench,
+   * orange in Zero, is what tells you which app you are in. */
+  const varOf = (css, name) => {
+    const m = css.match(new RegExp('--' + name + '\\s*:\\s*([^;}]+)'));
+    return m ? m[1].trim().toLowerCase() : null;
+  };
+  const PAIRS = [['bg', 'bg'], ['panel', 'surf'], ['panel2', 'surf2'],
+                 ['line', 'bdr'], ['ink', 'ink'], ['ink2', 'dim']];
+  const off = PAIRS.filter(([bn, zn]) => varOf(bench, bn) !== varOf(zero, zn))
+    .map(([bn, zn]) => `--${bn} ${varOf(bench, bn)} vs --${zn} ${varOf(zero, zn)}`);
+  ok(off.length === 0,
+     'the two palettes agree, value for value'
+     + (off.length ? ' — ' + off.join('; ') : ''));
+
+  /* A webfont pulled from a third-party host is a network dependency, and both
+   * of these apps are built to work at a range with no signal. Zero has one:
+   * an @import from Google Fonts. Proving it matters cost nothing -- adding the
+   * same import to Bench hung Bench's own suite, because a blocking @import to
+   * an unreachable host stalls rendering until it times out, which is precisely
+   * what a phone with no reception does.
+   *
+   * This does not fail the build; the import predates the second app and
+   * removing it changes a look people already know. It reports, so the cost
+   * stays visible until the fonts are self-hosted and precached. */
+  /* Comments are stripped first. The prose explaining WHY a network font is a
+   * problem mentions fonts.googleapis.com, and matching that would have this
+   * check report the very file that documents the decision not to do it. */
+  const decomment = (css) => css.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const remoteFonts = [['Zero', zero], ['Bench', bench]]
+    .filter(([, css]) => /@import\s+url\(\s*['"]?https?:|<link[^>]+(googleapis|gstatic)/
+      .test(decomment(css)))
+    .map(([n]) => n);
+  soft(remoteFonts.length === 0,
+     remoteFonts.length
+       ? `${remoteFonts.join(' and ')} load${remoteFonts.length === 1 ? 's' : ''} a webfont over the network`
+       : 'neither app depends on a network font to render',
+     'a blocking @import to an unreachable host stalls rendering, so the app looks '
+     + 'different at a range than it does at home. Self-host the woff2 and precache it.');
 }
 
 /* ─────────────────────────────────────────────── safe areas on notched phones */

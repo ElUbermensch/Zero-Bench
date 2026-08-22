@@ -27,11 +27,22 @@ const ok = (c, l, hint) => {
 const note = (l) => { warn++; console.log('  \x1b[33mNOTE\x1b[0m  ' + l); };
 const section = (s) => console.log('\n' + s);
 
-const H = (tok) => ({
-  apikey: cfg.anonKey,
-  Authorization: 'Bearer ' + (tok || cfg.anonKey),
-  'Content-Type': 'application/json',
-});
+/* Headers exactly as zero-core sends them: `apikey` always, and an
+ * Authorization bearer ONLY once there is a session token.
+ *
+ * This used to fall back to `Authorization: Bearer <anonKey>` when there was no
+ * session, which no part of either app ever does. Supabase's newer publishable
+ * keys (sb_publishable_...) are documented as not valid in an Authorization
+ * header at all, save for the narrow case of exactly matching `apikey` -- so
+ * the verifier was exercising a header combination the product never sends,
+ * against a rule that only applies to the verifier. A tool that checks a live
+ * backend has to make the same requests the client makes, or a pass means
+ * nothing and a failure sends you looking for a problem that is not there. */
+const H = (tok) => {
+  const h = { apikey: cfg.anonKey, 'Content-Type': 'application/json' };
+  if (tok) h.Authorization = 'Bearer ' + tok;
+  return h;
+};
 const get = (p, tok) => fetch(cfg.url + p, { headers: H(tok) });
 const rpc = (fn, body, tok) => fetch(`${cfg.url}/rest/v1/rpc/${fn}`, {
   method: 'POST', headers: H(tok), body: JSON.stringify(body || {}) });

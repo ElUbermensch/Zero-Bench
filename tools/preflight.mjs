@@ -138,6 +138,29 @@ if (has('vercel.json')) {
      'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
 }
 
+/* ──────────────────────────────────────────── the two bars must agree */
+section('the two apps look like one product');
+/* Bench reserved var(--safe-b) below its tab icons and Zero reserved nothing,
+ * which sat Bench's row a third of an inch higher than Zero's. Nothing caught
+ * it: each app's own suite only ever sees its own bar, and a headless viewport
+ * has no insets to reserve in the first place.
+ *
+ * Whether to sit above the home indicator is a decision the two apps have to
+ * make the SAME way. This does not care which way -- only that they agree. */
+if (has('apps/bench/src/shell.html') && has('apps/zero/Zero.jsx')) {
+  const bench = read('apps/bench/src/shell.html');
+  const zero = read('apps/zero/Zero.jsx');
+  const reserves = (css, sel) => {
+    const rule = (css.match(new RegExp(sel + '\\{[^}]*\\}')) || [''])[0];
+    return /padding-bottom\s*:\s*[^;}]*safe-area-inset-bottom|padding-bottom\s*:\s*[^;}]*--safe-b/.test(rule);
+  };
+  const b = reserves(bench, 'nav\\.tabs');
+  const z = reserves(zero, '\\.tabbar');
+  ok(b === z,
+     `both tab bars treat the home indicator the same way (bench ${b ? 'reserves' : 'does not'}, zero ${z ? 'reserves' : 'does not'})`,
+     'one bar sitting higher than the other is the kind of thing users read as unfinished');
+}
+
 /* ─────────────────────────────────────────────── safe areas on notched phones */
 section('safe areas');
 /* `viewport-fit=cover` is an opt-in: it says "let my page under the status bar

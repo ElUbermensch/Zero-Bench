@@ -177,6 +177,24 @@ const emptyDb = () => ({
   brassLots: [], recipes: [], batches: [], sessions: [],
 });
 
+/* Declared here, above loadDb() and migrate(), because both call them.
+ *
+ * They used to live further down the file. `const` is not hoisted the way a
+ * function declaration is -- it sits in the temporal dead zone until its own
+ * line runs -- and `let DB = loadDb()` runs at module evaluation, BEFORE those
+ * lines. So the moment a stored database was old enough to need migrating,
+ * loadDb -> migrate -> uid() threw `Cannot access 'uid' before initialization`
+ * at the top level: render() never ran, no listener ever attached, and the app
+ * was a blank page. Nothing was saved either, so it re-crashed on every reload
+ * -- a permanent brick, and only for users who already had data.
+ *
+ * Every test passed, because a fresh install has nothing to migrate and the
+ * migration test called loadDb() from the console after the script had already
+ * finished evaluating. The one thing never exercised was the actual path: a
+ * page LOAD with an old database already on disk. */
+const uid = (p) => p + Math.random().toString(36).slice(2, 9);
+const today = () => new Date().toISOString().slice(0, 10);
+
 /** Forgiving load: fills in anything a older/partial save is missing rather
  *  than discarding records because one key moved. */
 function loadDb() {
@@ -247,7 +265,6 @@ let DB = loadDb();
 const save = () => Store.save(DB);
 const scheme = () => DB.meta.scheme;
 
-const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 /* 41.2 + 0.3 is 41.499999999999996 in binary floating point, and a charge
  * weight printed to fifteen places on a box label is not a charge weight. */
 const round3 = (n) => Math.round((+n || 0) * 1000) / 1000;
@@ -737,7 +754,6 @@ const esc = (s) => String(s == null ? '' : s)
 const money = (n) => '$' + (Number.isFinite(n) ? n : 0).toFixed(3);
 const money2 = (n) => '$' + (Number.isFinite(n) ? n : 0).toFixed(2);
 const chips = (list) => list.map(([k, t]) => `<span class="chip ${k}">${esc(t)}</span>`).join(' ');
-const today = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (s) => s
   ? new Date(s + 'T12:00:00').toLocaleDateString(undefined,
       { year: 'numeric', month: 'short', day: 'numeric' })

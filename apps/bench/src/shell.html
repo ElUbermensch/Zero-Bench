@@ -109,10 +109,29 @@ dl.kv dd.mono{font-variant-numeric:tabular-nums}
 label.f{display:block;margin-bottom:11px}
 label.f>span{display:block;font-size:12.5px;color:var(--ink2);margin-bottom:4px}
 .fhint{display:block;font-size:11.5px;color:var(--ink3);margin-top:4px}
-input[type=text],input[type=number],input[type=date],select,textarea{
-  width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+/* Every text-ish input, defined by EXCLUSION rather than by listing types.
+ *
+ * The old selector enumerated text/number/date and therefore missed email and
+ * password -- which are the only two fields on the sign-in screen. Those fell
+ * back to the browser default (a white box) while inheriting the app's
+ * near-white text colour, so the sign-in form was light grey on white and
+ * effectively invisible. Listing the handful of inputs that must NOT be styled
+ * is a shorter and more honest list than trying to enumerate the ones that
+ * must, and it does not silently break the next time a field type is added. */
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):not([type=button]):not([type=submit]),
+select,textarea{
+  width:100%;background:var(--panel2);color:var(--ink);
+  border:1px solid var(--line);border-radius:9px;
   padding:10px 11px;min-height:var(--tap);outline:none}
 input:focus,select:focus,textarea:focus{border-color:var(--brass)}
+/* Safari paints its own background on an autofilled field and ignores `color`
+ * there. -webkit-text-fill-color and an inset shadow are the only properties
+ * it honours -- without them, a remembered email reappears as dark-on-yellow. */
+input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{
+  -webkit-text-fill-color:var(--ink);
+  -webkit-box-shadow:0 0 0 1000px var(--panel2) inset;
+  caret-color:var(--ink)}
+::placeholder{color:var(--ink3);opacity:1}
 textarea{min-height:70px;resize:vertical}
 input.cb{width:20px;height:20px;min-height:0;flex:none}
 input[type=range]{min-height:0;padding:0;background:none;border:0}

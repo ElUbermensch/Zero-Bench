@@ -1011,7 +1011,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;
 .badd{background:var(--acc);color:#0f1117;border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}
 .bback{background:none;border:none;color:var(--acc);font-family:var(--fh);font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:3px;letter-spacing:.01em}
 .content{flex:1;overflow-y:auto;padding-bottom:74px}
-.tabbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:var(--surf);border-top:1px solid var(--bdr);display:flex;z-index:100}
+.tabbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:var(--surf);border-top:1px solid var(--bdr);display:flex;z-index:100;padding-bottom:var(--safe-b)}
 .tab{flex:1;padding:8px 4px 10px;display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;cursor:pointer;color:var(--dim);transition:color .15s}
 .tab.on{color:var(--acc)}
 .tabi{font-size:17px}

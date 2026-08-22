@@ -45,8 +45,27 @@ try { root = await get('/rest/v1/'); } catch (e) {
   console.error(`\n  Could not reach ${cfg.url} — ${e.message}\n`);
   process.exit(1);
 }
+/* A 401 here is the single most common setup failure and the old message
+ * guessed at three causes without distinguishing them. The server says which
+ * one it is; print it, plus enough of the key to compare against the dashboard
+ * without putting the whole thing in a terminal someone may screenshot. */
+if (root.status === 401) {
+  let why = '';
+  try { const b = await root.clone().json(); why = b.message || b.msg || b.error || ''; }
+  catch { try { why = (await root.clone().text()).slice(0, 200); } catch {} }
+  const k = String(cfg.anonKey || '');
+  const shape = /^sb_publishable_/.test(k) ? 'a new-style publishable key'
+    : /^sb_secret_/.test(k) ? 'a SECRET key — this must never be used here or shipped to a client'
+    : /^ey[A-Za-z0-9_-]+\./.test(k) ? 'a legacy JWT key'
+    : 'an unrecognised format';
+  console.log(`        → server said: ${why || '(no message)'}`);
+  console.log(`        → key looks like ${shape}, ${k.length} chars, `
+    + `starts ${k.slice(0, 12)}… ends …${k.slice(-4)}`);
+  console.log(`        → project ref in the URL: ${(cfg.url.match(/\/\/([^.]+)\./) || [])[1] || '?'}`);
+  console.log('        → compare both against Supabase → Project Settings → API Keys.');
+}
 ok(root.status !== 401, 'the publishable key is accepted',
-   'that key does not belong to this project, or it is the wrong kind of key');
+   'the key and the URL must come from the SAME project, and it must be the publishable/anon key');
 ok(root.status < 500, 'the API is awake',
    'a 5xx here usually means the project is PAUSED — restore it in the dashboard');
 

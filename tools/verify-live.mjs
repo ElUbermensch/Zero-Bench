@@ -51,8 +51,21 @@ console.log(`\nVerifying ${cfg.url}`);
 
 /* ─────────────────────────────────────────────────────── reachable at all */
 section('the project answers');
+/* Probe a TABLE, not the PostgREST root.
+ *
+ * `/rest/v1/` returns the OpenAPI description of the entire schema, which is
+ * introspection, and Supabase requires a secret key for it: a publishable key
+ * is refused there with "Secret API key required". This check therefore
+ * reported every correctly-configured project as having a bad key -- and since
+ * it is the first check that runs, it sent people hunting through the
+ * dashboard for a problem that did not exist.
+ *
+ * A plain table read is what the apps actually do, and it separates the three
+ * states cleanly: 401 means the key is genuinely wrong, 404 means the schema
+ * was never applied, and 200 with an empty array is the correct answer for a
+ * valid key with RLS doing its job. */
 let root;
-try { root = await get('/rest/v1/'); } catch (e) {
+try { root = await get('/rest/v1/range_sessions?select=id&limit=1'); } catch (e) {
   console.error(`\n  Could not reach ${cfg.url} — ${e.message}\n`);
   process.exit(1);
 }
@@ -79,6 +92,8 @@ ok(root.status !== 401, 'the publishable key is accepted',
    'the key and the URL must come from the SAME project, and it must be the publishable/anon key');
 ok(root.status < 500, 'the API is awake',
    'a 5xx here usually means the project is PAUSED — restore it in the dashboard');
+ok(root.status !== 404, 'the schema is present',
+   'migration 0001 has not been applied to this project');
 
 /* ───────────────────────────────────────────────── migrations actually ran */
 section('schema');

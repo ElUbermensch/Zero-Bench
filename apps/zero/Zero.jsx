@@ -3310,14 +3310,24 @@ export default function App() {
   const [relayName, setRelayName] = useState('');
   const [showJoin, setShowJoin] = useState(false);
 
+  /* Which collections could not be READ at boot.
+   *
+   * Every read below is wrapped in a catch, so a truncated value, a corrupt
+   * JSON blob, or a QuotaExceededError thrown by the legacy-key migration
+   * leaves that collection silently empty. "Empty because there is none" and
+   * "empty because it could not be read" then look identical to the rest of
+   * the app -- and the IDB mirror below used to treat them identically, which
+   * is how a single unreadable key could destroy the backup for all of them. */
+  const bootFailed = useRef({});
+
   useEffect(() => {
     (async () => {
-      try { const r = await window.storage.get('sessions_v1'); if (r) setSessions(JSON.parse(r.value)); } catch {}
-      try { const r = await window.storage.get('matches_v1'); if (r) setMatches(JSON.parse(r.value)); } catch {}
-      try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(JSON.parse(r.value)); } catch {}
-      try { const r = await window.storage.get('deleted_builtins_v1'); if (r) setDeletedBuiltins(JSON.parse(r.value)); } catch {}
-      try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(JSON.parse(r.value)); } catch {}
-      try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(JSON.parse(r.value)); } catch {}
+      try { const r = await window.storage.get('sessions_v1'); if (r) setSessions(JSON.parse(r.value)); } catch { bootFailed.current.sessions = true; }
+      try { const r = await window.storage.get('matches_v1'); if (r) setMatches(JSON.parse(r.value)); } catch { bootFailed.current.matches = true; }
+      try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(JSON.parse(r.value)); } catch { bootFailed.current.customTargets = true; }
+      try { const r = await window.storage.get('deleted_builtins_v1'); if (r) setDeletedBuiltins(JSON.parse(r.value)); } catch { bootFailed.current.deletedBuiltins = true; }
+      try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(JSON.parse(r.value)); } catch { bootFailed.current.firearms = true; }
+      try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(JSON.parse(r.value)); } catch { bootFailed.current.ammo = true; }
       try { const r = await window.storage.get('backup_meta_v1'); if (r) setBackupMeta(JSON.parse(r.value)); } catch {}
       try { const r = await window.storage.get(SYNC_CFG_KEY); if (r) setSyncCfg(JSON.parse(r.value)); } catch {}
       try { const r = await window.storage.get('relay_name_v1'); if (r) setRelayName(JSON.parse(r.value)); } catch {}
@@ -3356,14 +3366,36 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
-  // Mirror writes: debounced snapshot of all five keys to IndexedDB. The
-  // non-empty guard is load-bearing — after an eviction the app boots empty,
-  // and an unguarded write here would overwrite the one good copy left.
+  /* Mirror writes: a debounced snapshot of every collection to IndexedDB.
+   *
+   * The old guard was an OR across all six collections, so it passed as soon as
+   * ANY of them was non-empty -- and then wrote the empty ones over the good
+   * snapshot. Concretely: sessions_v1 fails to parse while rifles_v1 loads
+   * fine, the guard sees firearms.length and lets the write through, and 1.5s
+   * later the mirror's session history is replaced with []. The restore prompt
+   * above requires sessions AND firearms AND matches AND targets to all be
+   * empty, so it never fires. Both copies of a shooting log, gone, silently.
+   *
+   * The mirror is now merged per collection rather than replaced wholesale: any
+   * collection that failed to READ at boot keeps whatever the previous snapshot
+   * held. A collection the user genuinely emptied still mirrors as empty --
+   * bootFailed distinguishes the two cases, which a length check never could. */
   useEffect(() => {
     if (!ready) return;
     if (!(sessions.length || firearms.length || matches.length || customTargets.length || deletedBuiltins.length)) return;
-    const t = setTimeout(() => {
-      idbWriteSnapshot({ savedAt: Date.now(), sessions, matches, customTargets, deletedBuiltins, firearms, ammo });
+    const t = setTimeout(async () => {
+      const prev = (await idbReadSnapshot()) || {};
+      const keep = (name, cur) =>
+        (bootFailed.current[name] && Array.isArray(prev[name]) ? prev[name] : cur);
+      await idbWriteSnapshot({
+        savedAt: Date.now(),
+        sessions: keep('sessions', sessions),
+        matches: keep('matches', matches),
+        customTargets: keep('customTargets', customTargets),
+        deletedBuiltins: keep('deletedBuiltins', deletedBuiltins),
+        firearms: keep('firearms', firearms),
+        ammo: keep('ammo', ammo),
+      });
     }, 1500);
     return () => clearTimeout(t);
   }, [ready, sessions, matches, customTargets, deletedBuiltins, firearms, ammo]);

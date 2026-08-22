@@ -2122,6 +2122,60 @@ VIEWS.data = () => {
     </div>`;
 };
 
+/* ==========================================================================
+ * #/diag — what the browser actually thinks the viewport is.
+ *
+ * The tab bar sat at the bottom on one screen and short of it on another, with
+ * identical CSS. Chromium cannot reproduce it: a headless viewport has no
+ * display cutout, no home indicator, and no dynamic toolbar, so `bottom:0` is
+ * always the physical bottom there and every measurement I could take said the
+ * layout was correct.
+ *
+ * Rather than guess a fourth time, this prints the numbers from the device that
+ * actually disagrees. Reached only by URL, so it costs nothing in the UI.
+ * ========================================================================*/
+VIEWS.diag = () => {
+  const cs = getComputedStyle(document.documentElement);
+  const nav = document.querySelector('nav.tabs');
+  const r = nav ? nav.getBoundingClientRect() : null;
+  const vv = window.visualViewport;
+  const row = (k, v) => `<div class="spread small rowline"><span class="dim">${esc(k)}</span>
+    <span class="mono">${esc(String(v))}</span></div>`;
+  const px = (n) => (n == null ? '—' : Math.round(n) + 'px');
+
+  return `<div class="card"><h2>Viewport</h2>
+    ${row('window.innerHeight', px(window.innerHeight))}
+    ${row('documentElement.clientHeight', px(document.documentElement.clientHeight))}
+    ${row('visualViewport.height', px(vv && vv.height))}
+    ${row('visualViewport.offsetTop', px(vv && vv.offsetTop))}
+    ${row('screen.height', px(window.screen && window.screen.height))}
+    ${row('devicePixelRatio', window.devicePixelRatio)}
+  </div>
+  <div class="card"><h2>Safe areas, as resolved</h2>
+    ${row('--safe-t', cs.getPropertyValue('--safe-t').trim() || '(unset)')}
+    ${row('--safe-b', cs.getPropertyValue('--safe-b').trim() || '(unset)')}
+    ${row('--safe-l', cs.getPropertyValue('--safe-l').trim() || '(unset)')}
+    ${row('--safe-r', cs.getPropertyValue('--safe-r').trim() || '(unset)')}
+  </div>
+  <div class="card"><h2>The tab bar</h2>
+    ${row('nav top', r ? px(r.top) : 'no nav')}
+    ${row('nav bottom', r ? px(r.bottom) : '—')}
+    ${row('nav height', r ? px(r.height) : '—')}
+    ${row('gap below nav', r ? px(window.innerHeight - r.bottom) : '—')}
+    ${row('nav computed padding-bottom', nav ? getComputedStyle(nav).paddingBottom : '—')}
+    <div class="tiny dim mt6">A gap below the bar of anything other than 0px is the
+      bug: it means <b>bottom:0</b> is not the bottom of the screen.</div>
+  </div>
+  <div class="card"><h2>Page</h2>
+    ${row('body scrollHeight', px(document.body.scrollHeight))}
+    ${row('scrollable', document.body.scrollHeight > window.innerHeight ? 'yes' : 'no')}
+    ${row('display-mode standalone', String(matchMedia('(display-mode: standalone)').matches))}
+    ${row('navigator.standalone', String(navigator.standalone))}
+    <div class="tiny dim mt6">Take this on a screen that looks WRONG and one that
+      looks RIGHT. The value that differs is the cause.</div>
+  </div>`;
+};
+
 VIEWS.form = (arg) => {
   const kind = arg.kind;
   const spec = FORMS[kind];
@@ -2746,6 +2800,10 @@ document.addEventListener('submit', (e) => {
  */
 function openDeepLink() {
   const raw = (location.hash || '').replace(/^#/, '') || location.pathname || '';
+  if (/(^|\/)diag\/?$/.test(raw)) {
+    stack = [{ v: 'lookup' }, { v: 'diag' }];
+    return true;
+  }
   const m = /(?:^|\/)s\/([^/?#]+)/.exec(decodeURIComponent(raw));
   if (!m) return false;
   const found = findBySerial(m[1]);

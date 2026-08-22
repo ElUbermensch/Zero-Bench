@@ -96,11 +96,48 @@ await page.evaluate(() => {
 });
 await page.waitForTimeout(200);
 
+/* Contrast on the one form a user meets before they have any data.
+ *
+ * The input rule used to enumerate text/number/date and so missed email and
+ * password -- the only two fields here. They fell back to a white browser
+ * default while inheriting the app's near-white text, so the sign-in screen
+ * was unreadable. It is the FIRST screen anyone sees, on a phone, often
+ * outdoors, and it was the last one anything tested. */
+const relLum = (c) => {
+  const [r, g, b] = c.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => {
+    const x = v / 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a, b) => {
+  const [x, y] = [relLum(a), relLum(b)].sort((m, n) => n - m);
+  return (x + 0.05) / (y + 0.05);
+};
+
 section('the sync screen exists once a backend is configured');
 ok((await page.textContent('#view')).includes('Cloud sync'),
    'Cloud sync appears in More when the build has a backend');
 await page.click('button:has-text("Cloud sync")');
 await page.waitForTimeout(300);
+const readable = await page.evaluate(() => {
+  const out = {};
+  for (const id of ['sy-email', 'sy-pw']) {
+    const el = document.getElementById(id);
+    if (!el) { out[id] = null; continue; }
+    const cs = getComputedStyle(el);
+    let bg = cs.backgroundColor, n = el;
+    while (/rgba\(0, 0, 0, 0\)|transparent/.test(bg) && n.parentElement) {
+      n = n.parentElement; bg = getComputedStyle(n).backgroundColor;
+    }
+    out[id] = { color: cs.color, bg };
+  }
+  return out;
+});
+for (const [id, v] of Object.entries(readable)) {
+  ok(v && contrast(v.color, v.bg) >= 4.5,
+     `${id} is legible against its own background (${v ? contrast(v.color, v.bg).toFixed(1) : 'missing'}:1)`);
+}
+
 await page.fill('#sy-email', 'jaxon@example.com');
 await page.fill('#sy-pw', 'hunter2');
 await page.click('button:has-text("Create account")');

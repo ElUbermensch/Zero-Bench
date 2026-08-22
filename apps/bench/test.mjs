@@ -982,6 +982,59 @@ section('annealing is an interval, not a single date');
      'an interval of zero turns the nag off for people who do not anneal');
 }
 
+section('an old database survives an actual page LOAD');
+{
+  /* The migration test below calls loadDb() from the console, which runs long
+   * after the script has finished evaluating. The path a real user takes is
+   * different and was never covered: the page LOADS with an old database
+   * already in localStorage, so loadDb() -> migrate() runs during module
+   * evaluation.
+   *
+   * migrate() called uid() and today(), which were declared with `const`
+   * further down the file. `const` is not hoisted like a function declaration;
+   * it sits in the temporal dead zone until its own line executes. So the
+   * migration threw `Cannot access 'uid' before initialization` at the top
+   * level: render() never ran, nothing bound, blank page -- and because
+   * nothing was saved, it re-crashed on every reload. A permanent brick,
+   * reachable only by users who already had data, which is the worst possible
+   * population to break.
+   *
+   * This seeds an old database and RELOADS, which is the only way to catch it. */
+  const before = errors.length;
+  // Replaces the whole database and reloads, so it snapshots first and puts it
+  // back afterwards -- every later section asserts on the bench built above.
+  const snapshot = await page.evaluate(() => localStorage.getItem('reloading.Bench'));
+  await page.evaluate(() => {
+    localStorage.setItem('reloading.Bench', JSON.stringify({
+      meta: { schema: 2 },
+      cartridges: [{ id: 'c1', name: '6.5 Creedmoor' }], firearms: [], componentLots: [],
+      brassLots: [{ id: 'l1', serial: 'R-1', marks: {}, cartridge: 'c1', headstamp: 'LAPUA',
+                    initialQty: 100, qty: 100, firings: 0, expectedFirings: 6, culls: [],
+                    lastAnneal: '2026-06-01' }],
+      recipes: [], sessions: [],
+      batches: [{ id: 'b1', serial: 'B1', brassLot: 'l1', qty: 100, remaining: 40, date: '2026-07-01' }],
+    }));
+  });
+  await page.reload();
+  await page.waitForTimeout(700);
+
+  const fresh = errors.slice(before);
+  ok(fresh.length === 0,
+     'loading with a schema-2 database on disk throws nothing'
+     + (fresh.length ? ' — ' + fresh[0] : ''));
+  ok((await page.innerHTML('#view')).length > 50,
+     '...and the app actually renders rather than showing a blank shell');
+  ok((await page.evaluate(() => DB.meta.schema)) === 3, '...having migrated on the way in');
+  ok((await page.evaluate(() => DB.brassLots[0].anneals.length)) === 1,
+     '...including the parts of the migration that need uid() and today()');
+  ok((await page.evaluate(() => DB.batches[0].adjust.length)) === 1,
+     '...and the adjustment carried over from the stored round count');
+
+  await page.evaluate((snap) => { localStorage.setItem('reloading.Bench', snap); }, snapshot);
+  await page.reload();
+  await page.waitForTimeout(600);
+}
+
 section('a stored round count is migrated, not discarded');
 {
   // This one replaces the whole database to stand up a schema-2 bench, so it
@@ -1026,6 +1079,67 @@ section('a stored round count is migrated, not discarded');
      'a single anneal date becomes the first entry in the history');
   await page.evaluate((snap) => { Store.save(JSON.parse(snap)); DB = loadDb(); render(); }, snapshot);
   await page.waitForTimeout(150);
+}
+
+/* ============================================ every field must be readable */
+section('no field is invisible');
+{
+  /* The sign-in form was light grey on white: the input rule listed
+   * text/number/date and so missed email and password, which fell back to a
+   * white browser default while inheriting near-white text.
+   *
+   * Asserting on the two known fields would fix today and miss the next field
+   * type someone adds. This walks EVERY input on every screen that has one and
+   * computes real contrast from the resolved colours, so a field that is
+   * unreadable for any reason -- unstyled, wrong variable, inherited white --
+   * fails regardless of which type it is. */
+  const relLum = (c) => {
+    const [r, g, b] = c.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => {
+      const x = v / 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => {
+    const [x, y] = [relLum(a), relLum(b)].sort((m, n) => n - m);
+    return (x + 0.05) / (y + 0.05);
+  };
+
+  const screens = ['sync', 'settings', 'data'];
+  const found = [];
+  for (const v of screens) {
+    await page.evaluate(x => reset(x), v);
+    await page.waitForTimeout(200);
+    const fields = await page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll('#view input, #view select, #view textarea').forEach(el => {
+        const t = (el.getAttribute('type') || 'text').toLowerCase();
+        if (['checkbox','radio','range','file','button','submit'].includes(t)) return;
+        if (el.offsetParent === null) return;                 // not visible
+        const cs = getComputedStyle(el);
+        // Walk up for an effective background: transparent means "whatever is
+        // behind me", and what is behind me is what the text sits on.
+        let bg = cs.backgroundColor, node = el;
+        while (/rgba\(0, 0, 0, 0\)|transparent/.test(bg) && node.parentElement) {
+          node = node.parentElement; bg = getComputedStyle(node).backgroundColor;
+        }
+        out.push({ t, id: el.id || el.name || el.placeholder || '(unnamed)',
+                   color: cs.color, bg });
+      });
+      return out;
+    });
+    for (const f of fields) found.push({ ...f, screen: v });
+  }
+
+  ok(found.length >= 2, `found ${found.length} visible fields to check`);
+  const bad = found.filter(f => ratio(f.color, f.bg) < 4.5);
+  ok(bad.length === 0,
+     'every visible field has readable contrast'
+     + (bad.length ? ' — ' + bad.map(f =>
+         `${f.screen}/${f.id} (${f.t}) ${ratio(f.color, f.bg).toFixed(1)}:1`).join(', ') : ''));
+
+  // The sign-in form only exists when the build has a backend, which this
+  // suite deliberately does not have. Its fields are checked in test-sync.mjs,
+  // against a build pointed at the mock.
 }
 
 /* ===================================================================== label */

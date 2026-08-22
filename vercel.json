@@ -3,17 +3,24 @@
   "buildCommand": "npm run build:site",
   "outputDirectory": "site",
   "framework": null,
+  "redirects": [
+    { "source": "/bench", "destination": "/bench/", "permanent": false }
+  ],
   "headers": [
     {
-      "source": "/(.*)sw.js",
+      "source": "/sw.js",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     },
     {
-      "source": "/(index.html)?",
+      "source": "/bench/sw.js",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     },
     {
-      "source": "/bench/(index.html)?",
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    },
+    {
+      "source": "/bench/index.html",
       "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
     }
   ]

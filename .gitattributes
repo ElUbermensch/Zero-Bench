@@ -1,0 +1,23 @@
+# Line endings.
+#
+# `git push` on Windows warns "LF will be replaced by CRLF the next time Git
+# touches it". That warning is harmless for the JS and SQL in this repo, but it
+# is not harmless for supabase/run_tests.sh: a shell script committed with CRLF
+# fails on Linux with `bad interpreter: /bin/bash^M`, and CI is Linux. The
+# failure reads as a missing interpreter rather than as a line-ending problem,
+# which is what makes it worth pinning rather than remembering.
+#
+# `text=auto` lets Git normalise to LF in the repository while leaving the
+# working copy to whatever the platform prefers. The `.sh` rule is stricter: LF
+# everywhere, including in the checkout, because that file is executed by bash
+# no matter which machine it was checked out on.
+
+* text=auto
+*.sh text eol=lf
+
+# Binary, so Git never tries to normalise them.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

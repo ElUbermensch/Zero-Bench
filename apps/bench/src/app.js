@@ -3037,6 +3037,14 @@ if (CORE && CORE.isSignedIn() && (typeof navigator === 'undefined' || navigator.
  * supported way to use this app and must not throw. */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    /* The build id rides in the query string. The worker is the one file whose
+     * job is to notice a new build, which makes it the one file a stale cache
+     * ruins completely -- and a stale copy WAS being served from the bare URL
+     * while the same path with any query returned the current one. A URL that
+     * changes every build cannot be answered from a cache of the last one.
+     * Scope is taken from the path, so the query changes nothing about it. */
+    navigator.serviceWorker
+      .register('sw.js?v=' + encodeURIComponent(typeof BUILD_ID === 'string' ? BUILD_ID : 'dev'))
+      .catch(() => {});
   });
 }

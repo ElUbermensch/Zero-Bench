@@ -1599,6 +1599,25 @@ section('the build says which build it is');
   const id = await page.evaluate(() => (typeof BUILD_ID === 'string' ? BUILD_ID : null));
   ok(typeof id === 'string' && id.length > 4, `and it is injected at build time (${id})`);
   ok(more.includes(id), '...the same one the screen shows');
+
+  /* The worker is registered at a URL that changes every build. A cache
+   * anywhere in the chain -- browser, CDN, proxy -- can hold `sw.js`, and
+   * holding THAT file means an installed app never learns a new build exists.
+   * Observed in production: the bare URL served a previous deployment's worker
+   * while the same path with any query string served the current one. */
+  const swUrl = await page.evaluate(async () => {
+    const rs = await navigator.serviceWorker.getRegistrations();
+    return rs.map(r => (r.active || r.installing || r.waiting)?.scriptURL).find(Boolean) || null;
+  });
+  ok(!!swUrl && /sw\.js\?v=/.test(swUrl), `the worker is registered with a build query (${swUrl})`);
+  ok(!!swUrl && swUrl.includes(encodeURIComponent(id).slice(0, 8)),
+     '...carrying this build, so a new build cannot be answered from the old one');
+  const scope = await page.evaluate(async () => {
+    const rs = await navigator.serviceWorker.getRegistrations();
+    return rs[0]?.scope || null;
+  });
+  ok(!!scope && scope.endsWith('/bench/'),
+     `and the query does not move the scope, which comes from the path (${scope})`);
 }
 
 /* ================================================================== hygiene */

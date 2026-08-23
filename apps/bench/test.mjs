@@ -62,6 +62,15 @@ const fill = async (name, value) => {
   await page.fill(`[name="${name}"]`, String(value));
 };
 const submit = async () => { await page.click('#frm button[type=submit]'); await page.waitForTimeout(200); };
+/* Destructive actions take two taps -- see the confirmation test below. Tests
+ * that are about what a delete DOES, rather than about the asking, go through
+ * here so the confirmation is exercised everywhere without being restated. */
+const destroy = async (selector) => {
+  await page.click(selector);
+  await page.waitForTimeout(160);
+  await page.click(selector);
+  await page.waitForTimeout(250);
+};
 
 await page.goto(BASE);
 await page.waitForTimeout(400);
@@ -178,6 +187,90 @@ section('cartridges');
   await submit();
   const after = await page.evaluate(() => DB.cartridges.map(c => c.name));
   ok(after.length === 2, `case and spacing variants reuse the existing cartridge (${after.join(' | ')})`);
+}
+
+/* ======================================================== editing a firearm */
+/* A firearm was the one record with no way back into it. Everything about it
+ * is the kind of thing that gets corrected -- a scope swap changes the sight
+ * height, a rebarrel changes the twist -- and the only route was delete and
+ * retype, which is also the route that loses the shared id and the sessions
+ * attributed to it. */
+section('a firearm can be corrected');
+{
+  await page.evaluate(() => reset('firearms'));
+  await page.waitForTimeout(150);
+
+  const before = await page.evaluate(() => DB.firearms.length);
+  ok(await page.locator('[data-act="edit"][data-kind="firearm"]').first().isVisible(),
+     'every firearm offers an Edit button');
+
+  await page.click('[data-act="edit"][data-kind="firearm"]');
+  await page.waitForTimeout(200);
+  const prefilled = await page.inputValue('[name="name"]');
+  ok(prefilled.length > 0, `the form opens pre-filled, not blank (${prefilled})`);
+  const sh = await page.inputValue('[name="sightHeight"]');
+  ok(sh === '1.75', `...including the numbers (sight height ${sh})`);
+
+  await fill('name', 'Bolt gun, rebarrelled');
+  await fill('twist', '1:7.5');
+  await submit();
+  await page.waitForTimeout(200);
+
+  const rec = await page.evaluate(() =>
+    DB.firearms.map(f => ({ name: f.name, twist: f.twist, sight: f.sightHeight })));
+  ok(rec.some(f => f.name === 'Bolt gun, rebarrelled' && f.twist === '1:7.5'),
+     'the edit is saved');
+  ok((await page.evaluate(() => DB.firearms.length)) === before,
+     'as an edit, not a second firearm');
+  ok(rec.some(f => f.sight === 1.75 || f.sight === '1.75'),
+     'fields the form did not touch are untouched');
+
+  /* An edit has to mark the record dirty or it will never be pushed: the
+   * sync only sends what changed here since the last agreement. */
+  const stamped = await page.evaluate(() =>
+    DB.firearms.some(f => f.name === 'Bolt gun, rebarrelled' && f.mtime > 0));
+  ok(stamped, 'and stamps a local modification time, so the sync will carry it');
+}
+
+/* ==================================================== deleting takes two taps */
+section('a delete asks first');
+{
+  await page.evaluate(() => reset('firearms'));
+  await page.waitForTimeout(150);
+  const before = await page.evaluate(() => DB.firearms.length);
+
+  const del = page.locator('[data-act="delFirearm"]').first();
+  const label = await del.textContent();
+  await del.click();
+  await page.waitForTimeout(200);
+
+  ok((await page.evaluate(() => DB.firearms.length)) === before,
+     'the first tap deletes nothing');
+  const armed = await page.locator('[data-act="delFirearm"]').first().textContent();
+  ok(armed !== label && /again/i.test(armed),
+     `the button changes to say what the next tap does (${label.trim()} → ${armed.trim()})`);
+
+  await page.locator('[data-act="delFirearm"]').first().click();
+  await page.waitForTimeout(250);
+  ok((await page.evaluate(() => DB.firearms.length)) === before - 1,
+     'the second tap deletes');
+
+  /* Leaving the screen must disarm it. A confirmation that survives a
+   * navigation is a delete waiting for an unrelated tap in the same place. */
+  const remaining = await page.evaluate(() => DB.firearms.length);
+  if (remaining > 0) {
+    await page.locator('[data-act="delFirearm"]').first().click();
+    await page.waitForTimeout(150);
+    await page.click('[data-act="tab"][data-arg="lookup"]');
+    await page.waitForTimeout(150);
+    await page.click('[data-act="tab"][data-arg="more"]');
+    await page.click('[data-act="nav"][data-arg="firearms"]');
+    await page.waitForTimeout(200);
+    const back = await page.locator('[data-act="delFirearm"]').first().textContent();
+    ok(!/again/i.test(back), 'walking away disarms it');
+    ok((await page.evaluate(() => DB.firearms.length)) === remaining,
+       '...and nothing was deleted on the way');
+  }
 }
 
 /* ============================================================ full workflow */
@@ -837,8 +930,7 @@ section('rounds left come from the sessions, so a typo is fixable');
   ok(Math.abs(await page.evaluate(() => brassLife(DB.brassLots[0]).mean) - 0.1) < 1e-9,
      '...and the brass wear with it — both were derived from the same record');
 
-  await page.click(`[data-act="delSession"][data-arg="${sid}"]`);
-  await page.waitForTimeout(250);
+  await destroy(`[data-act="delSession"][data-arg="${sid}"]`);
   ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 100
      && (await page.evaluate(() => brassLife(DB.brassLots[0]).mean)) === 0,
      'deleting it puts everything back, with no restore code to forget');
@@ -863,8 +955,7 @@ section('rounds that left without being fired');
   ok(dv.includes('Pulled down') && dv.includes('seating depth test'),
      'the batch says where they went, rather than just showing a smaller number');
   ok(dv.includes('Otherwise gone'), '...and separates them from rounds actually fired');
-  await page.click('[data-act="unadjust"]');
-  await page.waitForTimeout(200);
+  await destroy('[data-act="unadjust"]');
   ok((await page.evaluate(() => roundsLeft(DB.batches[0]))) === 100, 'and it can be undone');
 }
 

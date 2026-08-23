@@ -43,7 +43,7 @@ const ZeroCore = (() => {
     OUTBOX_CHANGED:      'outbox:changed',      // { pending, rejected }
     OUTBOX_REJECTED:     'outbox:rejected',     // { table, ids, status, error }
     DATA_CHANGED:        'data:changed',        // { table, ids, origin }
-    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants }
+    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants, face }
     RELAY_ENDED:         'relay:ended',         // { relayId }
     RELAY_ERROR:         'relay:error',         // { phase, error }
   });
@@ -805,7 +805,11 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.SYNC_ERROR, { phase: 'select', table: view, error: { status: res.status, body: error } });
-        return { ok: false, error };
+        /* The status travels with the failure. "Could not reach the backend"
+         * is the same sentence for a missing view (404 -- migrations not
+         * applied), an expired session (401) and a policy refusal (403), and
+         * those need three different things done about them. */
+        return { ok: false, status: res.status, error };
       }
       return { ok: true, data: await res.json() };
     }
@@ -884,12 +888,31 @@ const ZeroCore = (() => {
       const id = await ensureIdentity();
       if (!id.ok) return { ok: false, error: id.error };
       const d = Number((opts || {}).distanceYd);
-      const r = await rpc('join_relay', {
+      /* PostgREST resolves an RPC by the KEYS in the body, so sending
+       * p_target_name to a server that predates migration 0009 is not ignored
+       * -- it is a 404 (PGRST202, "could not find the function"), and joining
+       * a relay stops working entirely. A front end can reach a phone before
+       * its operator has run the migration; that must not take pair fire down
+       * on a match morning. So: try with it, and if the server does not know
+       * that shape, try again without.
+       *
+       * The retry is narrow on purpose. Only a 404/PGRST202 qualifies -- a
+       * refusal, a throttle or a bad code must not be silently retried. */
+      const send = (extra) => rpc('join_relay', Object.assign({
         p_code: String(code || '').trim(),
         p_name: name || 'Guest',
         p_role: role === 'shooter' ? 'shooter' : 'coach',
         p_distance_yd: Number.isFinite(d) && d > 0 ? d : null,
-      });
+      }, extra));
+
+      /* YOUR target, for the same reason as YOUR distance: the coach's
+       * combined plot is only honest if everyone is on the same paper, and the
+       * relay by itself only ever knew the starter's. */
+      let r = await send({ p_target_name: (opts || {}).targetName || null });
+      const unknownShape = !r.ok && (r.status === 404 ||
+        /PGRST202|could not find the function/i.test(JSON.stringify(r.error || '')));
+      if (unknownShape) r = await send({});
+
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
       // join_relay returns a RESULT, not an exception: a bad code is ok:false,
       // which is how the server-side throttle can record the failed attempt.
@@ -905,6 +928,22 @@ const ZeroCore = (() => {
                role: res.role || 'coach' };
     }
 
+    /* The paper, fetched ONCE. relay_state deliberately strips target_rings
+     * from every poll -- it is static geometry and re-sending it every 2.5s to
+     * every participant for a whole match is waste -- so this is the only way
+     * anyone but the starter ever sees it.
+     *
+     * A server without migration 0009 has no such function and answers 404.
+     * That is not an error worth showing: the app simply draws the bare grid
+     * it drew before, which is exactly what it did for the last month. */
+    async function fetchRelayFace() {
+      if (!relay) return null;
+      const r = await rpc('relay_face', { p_relay: relay.id });
+      if (!r.ok) { relay.face = null; return null; }
+      relay.face = r.data || null;
+      return relay.face;
+    }
+
     function startRelay(meta) {
       stopRelay();
       relay = Object.assign({
@@ -913,6 +952,10 @@ const ZeroCore = (() => {
         shots: new Map(), messages: new Map(), participants: [],
         backoff: RELAY_POLL_MS, stopped: false, timer: null,
       }, meta);
+      /* Deliberately not awaited: the first poll must not wait on geometry.
+       * The plot draws a bare grid until it lands, then redraws with paper. */
+      fetchRelayFace().then(() => { if (relay) pollRelayOnce().catch(() => {}); })
+                      .catch(() => {});
       pumpRelay();
       attachRelayResume();
       return relay;
@@ -958,6 +1001,9 @@ const ZeroCore = (() => {
       emit(EVENTS.RELAY_STATE, {
         relay: st.relay, shots, messages,
         participants: relay.participants, serverTime: st.server_time,
+        /* Cached, not re-fetched. Consumers get it in the same shape on every
+         * tick so they do not have to hold it themselves. */
+        face: relay.face || null,
       });
 
       if (st.relay && st.relay.status === 'ended') {
@@ -1102,7 +1148,11 @@ const ZeroCore = (() => {
       ? { id: relay.id, code: relay.code, isHost: relay.isHost,
           name: relay.name, role: relay.role, slot: relay.slot,
           canShoot: relay.role === 'shooter',
-          shotCount: relay.shots.size, participants: relay.participants }
+          shotCount: relay.shots.size, participants: relay.participants,
+          /* The paper, or null against a server without relay_face. Exposed
+           * here as well as on the state event so a consumer can ask at any
+           * time rather than waiting for the next poll. */
+          face: relay.face || null }
       : null);
 
     function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }

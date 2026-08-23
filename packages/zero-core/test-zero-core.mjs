@@ -513,6 +513,35 @@ section('a table whose queue holds more than one row shape');
 }
 
 /* ============================================================== live relay */
+/* ================== a client newer than the server it is talking to */
+/* Migration 0009 adds a parameter to join_relay and a relay_face function. A
+ * phone updates itself; a database does not. PostgREST resolves an RPC by the
+ * keys in the body, so the new client's join would 404 against a server that
+ * has not been migrated -- pair fire simply stops working, on a match morning,
+ * for a reason nobody on the firing line can diagnose. */
+section('joining a server that predates the target-overlay migration');
+{
+  mock.state.legacyRelayRpc = true;
+  const host = mkClient(), partner = mkClient();
+  const made = await host.createRelay({ hostName: 'Old Server', targetName: 'SR', distanceYd: 200 });
+  ok(made.ok, 'going live still works');
+
+  const j = await partner.joinRelay(made.relay.code, 'Pete', 'shooter',
+                                    { distanceYd: 200, targetName: 'SR' });
+  ok(j.ok, 'and joining still works — the client retries without the new argument');
+  ok(j.slot === 2, '...with a real firing point, not a degraded seat');
+
+  const st = await partner.pollRelayOnce();
+  ok(st.ok, 'the relay polls normally');
+  /* No face, and that is the correct outcome: the plot falls back to the bare
+   * grid it drew before, rather than the app failing. */
+  ok(partner.relayInfo() && !partner.relayInfo().face,
+     'there is simply no target geometry, which the plot handles by drawing a grid');
+
+  host.stopRelay(); partner.stopRelay();
+  mock.state.legacyRelayRpc = false;
+}
+
 section('live relay');
 {
   const host = mkClient(), coach = mkClient(), stranger = mkClient();

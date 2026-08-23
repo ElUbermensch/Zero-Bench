@@ -1314,6 +1314,76 @@ section('label');
   ok(fitv.sh <= fitv.h && fitv.sw <= fitv.w,
      `label content fits its 2.5x1.5in box (${fitv.sw}x${fitv.sh} in ${fitv.w}x${fitv.h})`);
   await page.locator('.lbl .qr').first().screenshot({ path: 'shots/qr.png' });
+
+  /* The marking scheme prints as a DRAWING OF A CASE, not a row of dots.
+   *
+   * The label is read at a bench with a box open and a case in the other hand.
+   * The question is "is this the brass in this box", which means matching a
+   * band at a position -- and a row of circles turns that into a counting
+   * exercise, with no place at all to show a mark on the case head. */
+  const caseOnLabel = await page.locator('.lbl svg.case').count();
+  ok(caseOnLabel === 1, `the label draws the case, not a row of dots (${caseOnLabel})`);
+  ok((await page.locator('.lbl .marks i').count()) === 0, 'the dot row is gone');
+
+  const marked = await page.evaluate(() => {
+    const sc = scheme();
+    const lot = DB.brassLots.find(l => l.id === DB.batches[0].brassLot);
+    const want = sc.positions.map(p => lot.marks[p.id]).filter(Boolean)
+      .map(id => sc.palette.find(c => c.id === id).hex.toLowerCase());
+    const got = [...document.querySelectorAll('.lbl svg.case rect[fill]')]
+      .map(r => r.getAttribute('fill').toLowerCase())
+      .filter(f => f !== 'none');
+    return { want, got, code: codeOf(lot.marks) };
+  });
+  ok(marked.want.length > 0 && marked.want.every(h => marked.got.includes(h)),
+     `every mark is painted in its own colour at its own position (${marked.want.join(', ')})`);
+
+  const labelText = await page.textContent('.lbl');
+  ok(labelText.includes(marked.code),
+     `the letter code prints too (${marked.code}) — a mono printer turns every colour into a grey`);
+
+  /* Backgrounds are dropped when printing unless the page asks otherwise, and
+   * this label has one that carries a safety meaning. A quarantine banner that
+   * prints white is worse than none: the label looks complete. */
+  const adj = await page.evaluate(() =>
+    getComputedStyle(document.querySelector('.lbl')).printColorAdjust
+    || getComputedStyle(document.querySelector('.lbl')).webkitPrintColorAdjust);
+  ok(adj === 'exact', `the label forces colours to print (${adj})`);
+
+  /* And with a warning band, which adds a sixth of an inch of padding at the
+   * top. The fit above has two pixels of slack; a banner eats sixteen. This is
+   * the case that actually clips, and it is the label you least want clipped. */
+  await page.evaluate(() => { DB.batches[0].quarantine = 'seating depth suspect'; save(); render(); });
+  await page.waitForTimeout(250);
+  const fitBand = await page.evaluate(() => {
+    const el = document.querySelector('.lbl');
+    const r = el.getBoundingClientRect();
+    return { h: Math.round(r.height), sh: el.scrollHeight, banded: el.classList.contains('hasband') };
+  });
+  ok(fitBand.banded, 'a quarantined batch prints with its warning band');
+  ok(fitBand.sh <= fitBand.h,
+     `...and still fits the label (${fitBand.sh} in ${fitBand.h})`);
+  await shot('07b-label-banded');
+  await page.evaluate(() => { delete DB.batches[0].quarantine; save(); render(); });
+  await page.waitForTimeout(200);
+
+  /* A sheet of eight. Each case drawing carries its own <clipPath id>, and the
+   * bands are painted through it -- so if two labels on one page shared an id,
+   * every case after the first would clip against the wrong path and the marks
+   * would land somewhere else or vanish. Eight labels, eight distinct ids. */
+  await page.click('[data-act="printSheet"]');
+  await page.waitForTimeout(300);
+  const sheet = await page.evaluate(() => {
+    const cases = [...document.querySelectorAll('#sheet .lbl svg.case')];
+    const ids = cases.map(c => c.querySelector('clipPath')?.id).filter(Boolean);
+    const used = cases.map(c => c.querySelector('g[clip-path]')?.getAttribute('clip-path'));
+    return { n: cases.length, unique: new Set(ids).size,
+             matched: cases.every((c, i) => used[i] === `url(#${ids[i]})`) };
+  });
+  ok(sheet.n === 8, `the sheet prints eight labels (${sheet.n})`);
+  ok(sheet.unique === 8, `each case drawing has its own clip id (${sheet.unique} distinct)`);
+  ok(sheet.matched, '...and each one clips against its own, not a neighbour\'s');
+
   await shot('07-label');
 }
 

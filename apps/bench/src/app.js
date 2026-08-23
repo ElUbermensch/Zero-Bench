@@ -1801,17 +1801,33 @@ function labelHtml(b) {
     : isOverMax(b) ? 'OVER PUBLISHED MAX'
     : batchMismatches(b).some(m => m.severity === 'stop') ? 'DOES NOT MATCH RECIPE'
     : isUntested(b) ? 'UNTESTED — WORK UP' : '';
-  const dots = brass ? scheme().positions.map(p => {
-    const c = brass.marks[p.id] ? scheme().palette.find(x => x.id === brass.marks[p.id]) : null;
-    return `<i style="background:${c ? c.hex : 'transparent'};${c ? '' : 'border-style:dashed'}"></i>`;
-  }).join('') : '';
+  /* The marking scheme, drawn ON A CASE rather than as a row of dots.
+   *
+   * A row of coloured circles is a legend for a code, not the thing itself.
+   * The label is read at a bench with a box open and a case in the other hand,
+   * and the question being asked is "is this the brass in this box" -- which
+   * means matching a band at a POSITION, not a colour in a sequence. Two
+   * positions the same colour in a different order are two different lots, and
+   * dots in a row make that a counting exercise. The drawing puts each mark
+   * where it actually is on the case, including the head, which has no place
+   * in a row at all.
+   *
+   * Same renderer as the Identify screen and the brass list, so what is
+   * printed and what is matched against on the phone cannot drift. */
+  const caseDiagram = brass ? caseSvg(brass.marks, { mini: true }) : '';
   return `<div class="lbl ${band ? 'hasband' : ''}">
     ${band ? `<div class="band">${esc(band)}</div>` : ''}
     <div class="cart">${esc(r ? cartName(r.cartridge) : '')}</div>
     <div class="load">${esc(r ? r.bullet : '')}<br>${esc(r ? r.powder : '')}
       · <b>${b.chargeActual ?? (r ? r.charge : '')} gr</b>
       ${b.coalMean ? ` · COAL ${b.coalMean}"` : ''}<br>${esc(r ? r.primer : '')}</div>
-    ${brass ? `<div class="marks">${dots}<span class="ms">${esc(brass.headstamp)} · ${
+    ${brass ? `<div class="marks"><span class="ms">${
+      /* The letter code prints beside the drawing, and that is not redundancy:
+       * a mono laser or a thermal printer renders every colour as a grey, and
+       * a label whose entire content is colour becomes unreadable on exactly
+       * the printers most likely to be in a reloading room. The code survives
+       * black and white. */
+      esc(codeOf(brass.marks))} · ${esc(brass.headstamp)} · ${
       /* brass.firings is the BASELINE -- firings before the lot was recorded --
        * not the lot's life. Printing it meant a lot bought new and fired four
        * times went in the ammo box labelled "0f". This is the one number on the
@@ -1821,6 +1837,12 @@ function labelHtml(b) {
     <div class="btm"><div class="grow1">
       <div class="ser">${esc(b.serial)}</div>
       <div class="meta">${fmtDate(b.date)} · ${b.qty} rounds</div>
+      ${/* The case sits here, beside the QR, because that is where the space
+           already was: the QR is half an inch tall and the two lines next to it
+           are not, so the drawing costs the label no height at all. Given its
+           own row it overflowed a 1.5in label by exactly its own height -- and
+           a label that does not fit is one that prints clipped. */
+        caseDiagram}
     </div><div class="qr">${qr}</div></div>
   </div>`;
 }

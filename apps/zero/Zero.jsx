@@ -1176,7 +1176,7 @@ const ZeroCore = (() => {
     OUTBOX_CHANGED:      'outbox:changed',      // { pending, rejected }
     OUTBOX_REJECTED:     'outbox:rejected',     // { table, ids, status, error }
     DATA_CHANGED:        'data:changed',        // { table, ids, origin }
-    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants }
+    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants, face }
     RELAY_ENDED:         'relay:ended',         // { relayId }
     RELAY_ERROR:         'relay:error',         // { phase, error }
   });
@@ -1938,7 +1938,11 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.SYNC_ERROR, { phase: 'select', table: view, error: { status: res.status, body: error } });
-        return { ok: false, error };
+        /* The status travels with the failure. "Could not reach the backend"
+         * is the same sentence for a missing view (404 -- migrations not
+         * applied), an expired session (401) and a policy refusal (403), and
+         * those need three different things done about them. */
+        return { ok: false, status: res.status, error };
       }
       return { ok: true, data: await res.json() };
     }
@@ -2017,12 +2021,31 @@ const ZeroCore = (() => {
       const id = await ensureIdentity();
       if (!id.ok) return { ok: false, error: id.error };
       const d = Number((opts || {}).distanceYd);
-      const r = await rpc('join_relay', {
+      /* PostgREST resolves an RPC by the KEYS in the body, so sending
+       * p_target_name to a server that predates migration 0009 is not ignored
+       * -- it is a 404 (PGRST202, "could not find the function"), and joining
+       * a relay stops working entirely. A front end can reach a phone before
+       * its operator has run the migration; that must not take pair fire down
+       * on a match morning. So: try with it, and if the server does not know
+       * that shape, try again without.
+       *
+       * The retry is narrow on purpose. Only a 404/PGRST202 qualifies -- a
+       * refusal, a throttle or a bad code must not be silently retried. */
+      const send = (extra) => rpc('join_relay', Object.assign({
         p_code: String(code || '').trim(),
         p_name: name || 'Guest',
         p_role: role === 'shooter' ? 'shooter' : 'coach',
         p_distance_yd: Number.isFinite(d) && d > 0 ? d : null,
-      });
+      }, extra));
+
+      /* YOUR target, for the same reason as YOUR distance: the coach's
+       * combined plot is only honest if everyone is on the same paper, and the
+       * relay by itself only ever knew the starter's. */
+      let r = await send({ p_target_name: (opts || {}).targetName || null });
+      const unknownShape = !r.ok && (r.status === 404 ||
+        /PGRST202|could not find the function/i.test(JSON.stringify(r.error || '')));
+      if (unknownShape) r = await send({});
+
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
       // join_relay returns a RESULT, not an exception: a bad code is ok:false,
       // which is how the server-side throttle can record the failed attempt.
@@ -2038,6 +2061,22 @@ const ZeroCore = (() => {
                role: res.role || 'coach' };
     }
 
+    /* The paper, fetched ONCE. relay_state deliberately strips target_rings
+     * from every poll -- it is static geometry and re-sending it every 2.5s to
+     * every participant for a whole match is waste -- so this is the only way
+     * anyone but the starter ever sees it.
+     *
+     * A server without migration 0009 has no such function and answers 404.
+     * That is not an error worth showing: the app simply draws the bare grid
+     * it drew before, which is exactly what it did for the last month. */
+    async function fetchRelayFace() {
+      if (!relay) return null;
+      const r = await rpc('relay_face', { p_relay: relay.id });
+      if (!r.ok) { relay.face = null; return null; }
+      relay.face = r.data || null;
+      return relay.face;
+    }
+
     function startRelay(meta) {
       stopRelay();
       relay = Object.assign({
@@ -2046,6 +2085,10 @@ const ZeroCore = (() => {
         shots: new Map(), messages: new Map(), participants: [],
         backoff: RELAY_POLL_MS, stopped: false, timer: null,
       }, meta);
+      /* Deliberately not awaited: the first poll must not wait on geometry.
+       * The plot draws a bare grid until it lands, then redraws with paper. */
+      fetchRelayFace().then(() => { if (relay) pollRelayOnce().catch(() => {}); })
+                      .catch(() => {});
       pumpRelay();
       attachRelayResume();
       return relay;
@@ -2091,6 +2134,9 @@ const ZeroCore = (() => {
       emit(EVENTS.RELAY_STATE, {
         relay: st.relay, shots, messages,
         participants: relay.participants, serverTime: st.server_time,
+        /* Cached, not re-fetched. Consumers get it in the same shape on every
+         * tick so they do not have to hold it themselves. */
+        face: relay.face || null,
       });
 
       if (st.relay && st.relay.status === 'ended') {
@@ -2235,7 +2281,11 @@ const ZeroCore = (() => {
       ? { id: relay.id, code: relay.code, isHost: relay.isHost,
           name: relay.name, role: relay.role, slot: relay.slot,
           canShoot: relay.role === 'shooter',
-          shotCount: relay.shots.size, participants: relay.participants }
+          shotCount: relay.shots.size, participants: relay.participants,
+          /* The paper, or null against a server without relay_face. Exposed
+           * here as well as on the state event so a consumer can ask at any
+           * time rather than waiting for the next poll. */
+          face: relay.face || null }
       : null);
 
     function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }
@@ -2959,6 +3009,64 @@ function relaySeries(shots, participants) {
  * centroid. Re-centring makes two groups easy to compare for size and lies
  * about where either of them actually sits, which is the more important fact
  * when a coach is deciding whether to call a sight change. */
+/* Should the two strings be drawn on one target face?
+ *
+ * In competition a pair is nearly always on the same face at the same
+ * distance, and a coach calls corrections off the rings and the grid rather
+ * than off a bare square — which is what they got, because relay_state strips
+ * the geometry from every poll and nothing ever fetched it. Migration 0009
+ * adds relay_face() for the paper and relay_participants.target_name for the
+ * comparison.
+ *
+ * "Nearly always" is why this is a check rather than an assumption. Inches are
+ * only a shared frame if the paper and the line are shared: the same 2 inches
+ * left is a different ring on a different face, and a different number of
+ * minutes at a different distance. Drawn onto one picture anyway, a coach
+ * reads a correction off geometry that was never fired at — worse than the
+ * bare grid, because it looks authoritative.
+ *
+ * Only SHOOTERS are compared. A coach standing behind the line has neither a
+ * target nor a distance of their own and must not be able to veto the overlay
+ * by existing.
+ */
+function relayOverlay(participants, face, relay) {
+  const shooters = (participants || []).filter(p => p.role === 'shooter');
+  const rings = face && Array.isArray(face.target_rings?.rings) ? face.target_rings : null;
+  const name = face?.target_name || relay?.target_name || null;
+
+  if (shooters.length < 2) {
+    return { ok: !!rings, rings, targetName: name,
+             yards: shooters[0]?.distance_yd ?? relay?.distance_yd ?? null,
+             why: null };
+  }
+
+  const norm = (t) => String(t == null ? '' : t).trim().toLowerCase();
+  const targets = [...new Set(shooters.map(p => norm(p.target_name)))];
+  const dists = [...new Set(shooters.map(p => Number(p.distance_yd) || 0))];
+
+  if (targets.length > 1) {
+    return { ok: false, rings: null, targetName: name, yards: null,
+             why: `Different targets (${shooters.map(p => p.target_name || '—').join(' vs ')}) `
+                  + '— strings shown on a plain grid, because inches do not land in the '
+                  + 'same place on two different faces.' };
+  }
+  if (dists.length > 1) {
+    return { ok: false, rings: null, targetName: name, yards: null,
+             why: `Different distances (${shooters.map(p => (p.distance_yd || '?') + 'yd').join(' vs ')}) `
+                  + '— strings shown on a plain grid. Each shooter\'s correction is still '
+                  + 'converted at their own yardage on their card below.' };
+  }
+  /* Agreed. If the geometry has not arrived — an older server with no
+   * relay_face(), or the fetch still in flight — say so plainly rather than
+   * implying the pair disagree. */
+  if (!rings) {
+    return { ok: false, rings: null, targetName: name, yards: dists[0] || null,
+             why: 'Same target and distance, but the target geometry has not come '
+                  + 'through — the server may predate it. Plain grid for now.' };
+  }
+  return { ok: true, rings, targetName: name, yards: dists[0] || null, why: null };
+}
+
 function RelayPlot({ series, yards, size, target }) {
   const SZ = size || 190, pad = 14, c = SZ / 2;
   const all = series.flatMap(s => s.stats.pts);
@@ -3208,6 +3316,7 @@ function RelayViewer({ core, onExit }) {
   const relay = state?.relay;
   const series = relaySeries(state?.shots, state?.participants);
   const withShots = series.filter(s => s.stats.pts.length > 0);
+  const overlay = relayOverlay(state?.participants, state?.face, relay);
 
   return (
     <>
@@ -3247,8 +3356,25 @@ function RelayViewer({ core, onExit }) {
           {withShots.length > 1 && (
             <div className="tcard" style={{ padding: '11px 13px' }}>
               <div className="lbl" style={{ marginBottom: 8 }}>Both strings</div>
-              <RelayPlot series={withShots} yards={relay?.distance_yd} size={250}
-                target={relay?.target_rings}/>
+              {/* The real paper, with the rings and the grid a coach calls
+                  corrections off — but only when it means the same thing for
+                  everybody on it. Two shooters on different faces, or on
+                  different lines, do not share a frame: their inches land in
+                  different places on the same picture and the picture lies. */}
+              <RelayPlot series={withShots} yards={overlay.yards ?? relay?.distance_yd} size={250}
+                target={overlay.ok ? overlay.rings : null}/>
+              {overlay.ok ? (
+                <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
+                              marginTop: 6, textAlign: 'center' }}>
+                  {overlay.targetName}{overlay.yards ? ` · ${overlay.yards}yd` : ''} — same
+                  target, same line, so both strings are on one face.
+                </div>
+              ) : (
+                <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--acc)',
+                              marginTop: 6, lineHeight: 1.5, textAlign: 'center' }}>
+                  {overlay.why}
+                </div>
+              )}
             </div>
           )}
 
@@ -3280,7 +3406,7 @@ function RelayViewer({ core, onExit }) {
   );
 }
 
-function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note, distanceYd }) {
+function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note, distanceYd, targetName }) {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [role, setRole] = useState(fixedRole || 'coach');
@@ -3289,7 +3415,10 @@ function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note, distanceYd })
 
   async function go() {
     setBusy(true); setErr(null);
-    const r = await core.joinRelay(code, name || 'Guest', role, { distanceYd });
+    /* Your own target travels with you, like your own distance. The coach's
+       combined plot draws real paper only when everyone agrees on both, and
+       the relay by itself only ever knew what the starter was shooting at. */
+    const r = await core.joinRelay(code, name || 'Guest', role, { distanceYd, targetName });
     setBusy(false);
     if (!r.ok) { setErr(relayErrText(r)); return; }
     onJoined(r);
@@ -3348,7 +3477,8 @@ function relayErrText(r) {
  * Deliberately compact: the shooter is on the line, and this must not push
  * the shot list off the screen. Three states — idle, live, and the join form
  * for the second shooter of a pair. */
-function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive, distanceYd }) {
+function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive,
+                     distanceYd, targetName }) {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -3372,6 +3502,7 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
       return (
         <div style={{ margin: '8px 0 0' }}>
           <JoinLiveForm core={core} fixedRole="shooter" distanceYd={distanceYd}
+            targetName={targetName}
             note="Your shots mirror to this relay from this session. Your partner's string is drawn over your target in their colour."
             onCancel={() => setJoining(false)}
             onJoined={r => { setJoining(false); onJoinLive(r); }}/>
@@ -3461,7 +3592,7 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
 }
 
 function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated, onAmmoUpdated,
-                    firearms, onFirearmsUpdated }) {
+                    firearms, onFirearmsUpdated, onGoToAmmo }) {
   const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
   const [handle, setHandle] = useState('');
   const [handleSaved, setHandleSaved] = useState(false);
@@ -3619,7 +3750,15 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
           <div style={note}>
             {linkedLoads
               ? `${linkedLoads} load${linkedLoads===1?'':'s'} linked to Bench batches. Sessions shot with them push group size (inches) back to the batch record.`
-              : 'No loads linked yet — Firearms › Ammunition › “⇣ Bench” imports batches from the reloading log.'}
+              : <>No loads linked yet. Batches loaded in Bench come across with bullet, powder,
+                  charge and COAL already filled in.{' '}
+                  {/* A route, not directions. "Firearms › Ammunition › ⇣ Bench" was
+                      accurate and still left someone hunting through two screens for
+                      an 11px chip. */}
+                  <button onClick={onGoToAmmo}
+                    style={{background:'none',border:'none',padding:0,color:'var(--acc)',
+                            fontFamily:'var(--fm)',fontSize:8,cursor:'pointer',textDecoration:'underline'}}>
+                    ⇣ import from Bench</button></>}
           </div>
         </div>
       )}
@@ -4023,7 +4162,8 @@ export default function App() {
               <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
                 sessions={sessions} ammo={ammo} getTarget={getTarget}
                 onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
-                firearms={firearms} onFirearmsUpdated={saveFirearms} />
+                firearms={firearms} onFirearmsUpdated={saveFirearms}
+                onGoToAmmo={()=>setTab('firearms')} />
               <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup</div>
                 <div style={{display:'flex',gap:8}}>
@@ -5197,7 +5337,8 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
 
           <RelayCard core={core} live={live} hostName={hostName}
             onHostName={onHostName} onGoLive={onGoLive} onJoinLive={onJoinLive}
-            onEndLive={onEndLive} distanceYd={+session.rangeYards || null}/>
+            onEndLive={onEndLive} distanceYd={+session.rangeYards || null}
+            targetName={target?.name || null}/>
 
           {a && a.n >= 2 && <>
             <div className="shdr">Group analytics</div>
@@ -5473,8 +5614,12 @@ function TargetFace({ target, SZ, c, sc, labels = true }) {
   const bg = outermost.color || DEFAULT_RING_COLORS[outermost.score] || '#aaa';
   return (
     <>
-      {/* Background fill, for rings scrolled off the edge of the view */}
-      <rect x={0} y={0} width={SZ} height={SZ} fill={bg}/>
+      {/* data-face marks the paper itself. The relay suite used to assert "the
+          face is drawn" by counting every circle in the svg -- which eight
+          impacts and eight call rings satisfy on their own, so it passed for a
+          month while the coach was looking at a bare grid. A marker that only
+          the face carries cannot be satisfied by the shots. */}
+      <rect data-face="1" x={0} y={0} width={SZ} height={SZ} fill={bg}/>
       {/* Zone targets: true shapes worst→best so better zones paint on top,
           mirroring the best-first hit-test order. Ring targets fall through
           to the concentric render below. */}
@@ -8295,7 +8440,19 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
   async function openPicker() {
     setPickOpen(true); setProfiles(null); setPickErr(null);
     const r = await core.ballisticProfiles('quarantined=eq.false&order=loaded_on.desc');
-    if (!r.ok) { setPickErr('Could not reach the Bench backend.'); setProfiles([]); return; }
+    if (!r.ok) {
+      /* Say which failure it was. "Could not reach the backend" covered a
+         missing view (404 — migrations not applied), an expired session (401)
+         and a policy refusal (403), and those want three different actions. */
+      const why = r.status === 404
+        ? 'The v_ballistic_profiles view is not in the database — the migrations have not all been applied.'
+        : r.status === 401 ? 'Session expired. Sign out and back in.'
+        : r.status === 403 ? 'The server refused the read (RLS).'
+        : `Could not reach the Bench backend${r.status ? ' (' + r.status + ')' : ''}.`;
+      setPickErr(why + (r.error ? ' · ' + String(r.error).slice(0, 160) : ''));
+      setProfiles([]);
+      return;
+    }
     setProfiles(r.data || []);
   }
 
@@ -8349,6 +8506,23 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
         )}
       </div>
 
+      {!form && !pickOpen && core && core.isSignedIn() && linkedCount === 0 && (
+        /* The "⇣ Bench" chip above is 11px and lives in a header two screens
+           deep. Someone who has never imported a batch has no reason to know
+           it is a thing, which made a working feature indistinguishable from a
+           missing one. Once anything is linked this disappears and the chip is
+           enough. */
+        <div className="tcard" style={{padding:'11px 13px'}}>
+          <div className="lbl">Loads from Bench</div>
+          <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
+            Batches loaded in Bench come across with bullet, powder, charge, COAL and
+            their safety state, so you do not retype a load you already recorded.
+            Sessions shot with one push their group size back to the batch.
+          </div>
+          <button className="badd" style={{width:'100%'}} onClick={openPicker}>⇣ Import batches from Bench</button>
+        </div>
+      )}
+
       {pickOpen && (
         <div className="tcard" style={{padding:'11px 13px'}}>
           <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
@@ -8358,7 +8532,13 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
           {profiles === null && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>loading…</div>}
           {pickErr && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)'}}>{pickErr}</div>}
           {profiles && !pickErr && profiles.length === 0 && (
-            <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>No live batches in Bench.</div>)}
+            <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',lineHeight:1.6}}>
+              No batches came back. A batch only appears here once Bench has pushed
+              BOTH the batch and the recipe it points at, and only while it is not
+              quarantined. In Bench, open <b>More › Cloud sync</b> and press ⇅ Sync now:
+              the two lists there — “Not sent” and “Refused by the server” — say which
+              of those it is.
+            </div>)}
           {profiles && profiles.map(p => {
             const linkedAlready = ammo.some(a => a.batchId === p.batch_id);
             return (

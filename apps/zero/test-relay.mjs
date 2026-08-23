@@ -220,13 +220,27 @@ ok(bodyC1.includes('Both strings'),
 ok(bodyC1.includes('40–0X') && bodyC1.includes('36–0X'),
    '...and both scores, computed independently (40–0X and 36–0X)');
 ok(await C.page.locator('svg circle').count() >= 8, 'both strings are plotted');
-// A pair fires ONE target, so the coach gets the real paper with both strings
-// on it rather than an abstract scatter. The rings travel with the relay.
-const caption = await C.page.locator('.tcard:has-text("Both strings") svg text').last().textContent();
-ok(/\d+yd/.test(caption || ''), `the combined plot is captioned with the target and distance (${caption})`);
-const ringCount = await C.page.locator('.tcard:has-text("Both strings") svg circle').count();
-ok(ringCount > 10,
-   `the coach's combined plot draws the target face, not a bare grid (${ringCount} circles)`);
+/* The overlay, and the check that guards it.
+ *
+ * These two shooters are deliberately on DIFFERENT LINES -- 100 and 200 yards,
+ * which is what makes the per-shooter minute conversion below testable. The
+ * same fact makes one target face a lie: the same inch is a different fraction
+ * of the paper at each distance, and a coach reading a correction off a face
+ * that was not fired at is worse off than one reading a plain grid, because
+ * the picture looks authoritative.
+ *
+ * `data-face` is on the paper only. This used to count every circle in the
+ * svg, which eight impacts and eight call rings satisfy by themselves -- so it
+ * passed throughout the period when relay_state was stripping the geometry and
+ * the coach saw no face at all. */
+const faceShown = async (pg) =>
+  (await pg.locator('.tcard:has-text("Both strings") [data-face]').count()) > 0;
+
+ok(!(await faceShown(C.page)),
+   'shooters on different lines get NO target face — inches do not share a frame');
+const gridNote = await C.page.locator('.tcard:has-text("Both strings")').textContent();
+ok(/different distances/i.test(gridNote) && /100yd/.test(gridNote) && /200yd/.test(gridNote),
+   'and the plot says which distances disagree, rather than silently degrading');
 ok(await C.page.locator('svg line[opacity="0.5"]').count() === 8,
    'a call is drawn joined to its impact, once per called shot');
 

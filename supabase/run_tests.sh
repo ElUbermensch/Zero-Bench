@@ -13,7 +13,7 @@ for m in /tmp/sbrun/migrations/*.sql; do
 done
 su postgres -c "psql -q -d shooting -c 'create schema test; grant usage on schema test to authenticated, anon;'"
 rc=0
-for t in /tmp/sbrun/test/rls_test.sql /tmp/sbrun/test/rls_test2.sql /tmp/sbrun/test/rls_test3.sql /tmp/sbrun/test/rls_test4.sql /tmp/sbrun/test/rls_test5.sql; do
+for t in /tmp/sbrun/test/rls_test.sql /tmp/sbrun/test/rls_test2.sql /tmp/sbrun/test/rls_test3.sql /tmp/sbrun/test/rls_test4.sql /tmp/sbrun/test/rls_test5.sql /tmp/sbrun/test/rls_test6.sql; do
   out=$(su postgres -c "psql -d shooting -v ON_ERROR_STOP=1 -f $t" 2>&1) || rc=1
   echo "$out" | grep -E "PASS|FAIL|ERROR|ASSERTIONS" | sed 's/^NOTICE:  //'
   # A psql ERROR aborts the script without ever printing FAIL, so grepping for

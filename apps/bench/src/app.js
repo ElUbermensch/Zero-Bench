@@ -1007,7 +1007,8 @@ const FORMS = {
 };
 
 /* Transient state for form controls that need it between renders. */
-const UI = { lookup: {}, marks: {}, formKind: null, toast: null, cartNew: {} };
+const UI = { lookup: {}, marks: {}, formKind: null, toast: null, cartNew: {},
+             confirm: null, confirmTimer: null };
 
 /* `rec` is the record being edited, or null when creating. Every control reads
  * its current value from it, so one description of a field serves both. */
@@ -1382,6 +1383,23 @@ function render() {
       <span>${label}</span></button>`).join('');
 
   if (c.v === 'form' && c.arg && c.arg.kind === 'batch') paintDrawPreview();
+
+  /* An armed delete, painted after the view rather than inside it: the views
+   * do not know about confirmation, and should not have to. Every destructive
+   * button in the app gets this behaviour by existing. */
+  if (UI.confirm) {
+    const [act, arg] = [UI.confirm.slice(0, UI.confirm.indexOf(':')),
+                        UI.confirm.slice(UI.confirm.indexOf(':') + 1)];
+    const sel = `[data-act="${act}"]` + (arg ? `[data-arg="${arg}"]` : '');
+    const btn = document.querySelector(sel);
+    if (btn) {
+      btn.textContent = 'Tap again';
+      btn.classList.add('danger', 'armed');
+      btn.setAttribute('aria-label', 'Tap again to confirm deletion');
+    } else {
+      UI.confirm = null;              // the button is not on this screen any more
+    }
+  }
 
   if (UI.toast) {
     const d = document.createElement('div');
@@ -1857,7 +1875,9 @@ VIEWS.inventory = () => {
         ${uses.length ? `<div class="tiny dim mt4">${uses.slice(0, 4).map(b =>
             `<button class="linkish" data-act="ammoDetail" data-arg="${b.id}">${esc(b.serial)}</button>`
           ).join(' ')}${uses.length > 4 ? ` +${uses.length - 4}` : ''}</div>` : ''}
-        <div class="mt6"><button class="btn sm danger" data-act="delComponent" data-arg="${c.id}">Delete</button></div>
+        <div class="mt6 row g8">
+          <button class="btn sm" data-act="edit" data-kind="component" data-arg="${c.id}">Edit</button>
+          <button class="btn sm danger" data-act="delComponent" data-arg="${c.id}">Delete</button></div>
       </div>`;
     }).join('')}</div>`;
   };
@@ -2006,7 +2026,9 @@ VIEWS.workup = (id) => {
 VIEWS.firearms = () => {
   const body = DB.firearms.length ? DB.firearms.map(f => `<div class="card">
       <div class="spread"><h2 class="m0">${esc(f.name)}</h2>
-        <button class="btn sm danger" data-act="delFirearm" data-arg="${f.id}">Delete</button></div>
+        <span class="row g8">
+          <button class="btn sm" data-act="edit" data-kind="firearm" data-arg="${f.id}">Edit</button>
+          <button class="btn sm danger" data-act="delFirearm" data-arg="${f.id}">Delete</button></span></div>
       <dl class="kv mt8">
         <dt>Cartridge</dt><dd>${esc(cartName(f.cartridge))}</dd>
         ${f.barrel ? `<dt>Barrel</dt><dd>${f.barrel}"${f.twist ? ' · ' + esc(f.twist) : ''}</dd>` : ''}
@@ -2783,12 +2805,41 @@ const ACTIONS = {
 };
 
 /* ------------------------------------------------------------- listeners */
+/* Actions that destroy a record. Every one of them used to fire on the first
+ * tap, which on a phone is one mis-aimed thumb away from losing a brass lot
+ * with four firings of history on it. guardedDelete refuses to delete anything
+ * a batch still points at, which is a different protection entirely: it stops
+ * you breaking a reference, not from deleting the thing you did not mean to
+ * touch.
+ *
+ * Two taps, and the second one is on a button that has changed its label, so
+ * it cannot be satisfied by a double tap. Handled here rather than in each
+ * view because there are seven of these and the eighth would have been added
+ * without one. */
+const DESTRUCTIVE = new Set(['delFirearm', 'delBrass', 'delRecipe', 'delComponent',
+                             'delBatch', 'delSession', 'unadjust']);
+
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const fn = ACTIONS[el.dataset.act];
   if (!fn) return;
   if (el.tagName === 'BUTTON' && el.type !== 'submit') e.preventDefault();
+
+  const key = el.dataset.act + ':' + (el.dataset.arg || '');
+  if (DESTRUCTIVE.has(el.dataset.act) && UI.confirm !== key) {
+    UI.confirm = key;
+    render();
+    /* It expires. A confirmation left armed across a screen change is a
+     * delete waiting for an unrelated tap on the same spot. */
+    clearTimeout(UI.confirmTimer);
+    UI.confirmTimer = setTimeout(() => {
+      if (UI.confirm === key) { UI.confirm = null; render(); }
+    }, 5000);
+    return;
+  }
+  UI.confirm = null;
+  clearTimeout(UI.confirmTimer);
   fn(el.dataset.arg, el);
 });
 

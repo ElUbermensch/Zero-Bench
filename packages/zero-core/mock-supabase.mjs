@@ -14,7 +14,7 @@ export function startMock(opts = {}) {
     refreshTokens: new Map(),    // refresh_token -> userId
     rows: new Map(),             // table -> Map(id -> row)
     clock: 1_000_000,            // server clock, ms; tests advance it by hand
-    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {} },
+    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {}, rpc: {} },
     failRefresh: false,
     ttlSec: opts.ttlSec ?? 3600,
     pushOrder: [],               // tables in the order they were pushed to
@@ -37,6 +37,12 @@ export function startMock(opts = {}) {
     relayParts: new Map(),      // relayId -> Map(userId -> participant)
     joinFails: new Map(),       // userId -> count
     anonUsers: new Set(),       // user ids created by anonymous sign-in
+    /* Pretend to be a server that predates migration 0009: no relay_face, and
+     * a join_relay that does not know p_target_name. PostgREST resolves an RPC
+     * by the keys in the body, so the extra key is a 404 rather than an
+     * ignored argument -- which is a client that cannot join at all if it does
+     * not handle it. */
+    legacyRelayRpc: false,
   };
 
   const stamp = () => new Date(state.clock).toISOString();
@@ -136,6 +142,7 @@ export function startMock(opts = {}) {
       /* ------------------------------------------------------------- rpc */
       if (p.startsWith('/rest/v1/rpc/')) {
         const fn = p.slice('/rest/v1/rpc/'.length);
+        state.hits.rpc[fn] = (state.hits.rpc[fn] || 0) + 1;
         const a = auth(req);
         const CODE_ALPHABET = '23456789BCDFGHJKMNPQRSTVWXZ';
 
@@ -170,8 +177,19 @@ export function startMock(opts = {}) {
           state.relayParts.set(relay.id, new Map([[a.userId,
             { user_id: a.userId, name: relay.host_name, role: 'shooter',
               slot: 1, last_seen_at: stamp(),
-              distance_yd: payload.p_distance_yd ?? null }]]));
+              distance_yd: payload.p_distance_yd ?? null,
+              target_name: payload.p_target_name ?? null }]]));
           return json(res, 200, relay);
+        }
+
+        if (fn === 'join_relay' && state.legacyRelayRpc && 'p_target_name' in payload) {
+          return json(res, 404, { code: 'PGRST202',
+            message: 'Could not find the function public.join_relay('
+                     + Object.keys(payload).sort().join(', ') + ') in the schema cache' });
+        }
+        if (fn === 'relay_face' && state.legacyRelayRpc) {
+          return json(res, 404, { code: 'PGRST202',
+            message: 'Could not find the function public.relay_face(p_relay) in the schema cache' });
         }
 
         if (fn === 'join_relay') {
@@ -202,9 +220,27 @@ export function startMock(opts = {}) {
           }
           parts.set(a.userId, { user_id: a.userId, name: payload.p_name || 'Guest',
             role, slot, last_seen_at: stamp(),
-            distance_yd: payload.p_distance_yd ?? parts.get(a.userId)?.distance_yd ?? null });
+            distance_yd: payload.p_distance_yd ?? parts.get(a.userId)?.distance_yd ?? null,
+            target_name: payload.p_target_name ?? parts.get(a.userId)?.target_name ?? null });
           state.relayParts.set(relay.id, parts);
-          return json(res, 200, { ok: true, relay, slot, role });
+          // join_relay returns `to_jsonb(r) - 'target_rings'`. Handing the
+          // geometry back here would let a client draw paper the real server
+          // never sends -- which is exactly the divergence that hid the empty
+          // coach plot for a month.
+          const { target_rings, ...relayLean } = relay;
+          return json(res, 200, { ok: true, relay: relayLean, slot, role });
+        }
+
+        /* The paper, fetched once. Participation-gated like relay_state. */
+        if (fn === 'relay_face') {
+          const relay = state.relays.get(payload.p_relay);
+          const parts = state.relayParts.get(payload.p_relay);
+          if (!relay || !parts || !parts.has(a.userId)) {
+            return json(res, 403, { code: '42501', message: 'not a participant' });
+          }
+          return json(res, 200, { target_name: relay.target_name ?? null,
+                                  target_rings: relay.target_rings ?? null,
+                                  distance_yd: relay.distance_yd ?? null });
         }
 
         if (fn === 'relay_state') {
@@ -216,18 +252,26 @@ export function startMock(opts = {}) {
           parts.get(a.userId).last_seen_at = stamp();
           // >= to match the migration: rows tying the cursor are re-sent, not lost
           const since = (rows, cur) => rows.filter(x => x.created_at >= cur);
+          // Same strip as the migration: target_rings never rides the poll.
+          const { target_rings: _rings, ...relayLean } = relay;
           return json(res, 200, {
-            relay,
+            relay: relayLean,
             shots: since([...table('relay_shots').values()]
               .filter(x => x.relay_id === payload.p_relay), payload.p_since_shot || '')
               .map(({ user_id, ...x }) => ({ ...x,
                 slot: parts.get(user_id)?.slot ?? null,
                 shooter: parts.get(user_id)?.name ?? null,
                 is_self: user_id === a.userId })),
+            // Built field by field, like the migration: to_jsonb(m) carried
+            // user_id to every participant.
             messages: since([...table('relay_messages').values()]
-              .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || ''),
+              .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || '')
+              .map(({ user_id, ...m }) => ({ ...m,
+                slot: parts.get(user_id)?.slot ?? null,
+                is_self: user_id === a.userId })),
             participants: [...parts.values()].map(x => ({ name: x.name, role: x.role,
               slot: x.slot ?? null, distance_yd: x.distance_yd ?? relay.distance_yd ?? null,
+              target_name: x.target_name ?? relay.target_name ?? null,
               last_seen_at: x.last_seen_at, is_self: x.user_id === a.userId })),
             server_time: stamp(),
           });

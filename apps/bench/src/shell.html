@@ -251,6 +251,10 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--brass);border-color:var(--brass);color:#20180a}
 .btn.danger{color:#ffa8a8;border-color:#8a2b2b;background:transparent}
+/* An armed delete. Filled rather than outlined, because the difference between
+ * "the button that deletes" and "the button that is about to delete" has to be
+ * visible without reading the label. */
+.btn.danger.armed{background:#8a2b2b;color:#fff;border-color:#b34747}
 .btn.wide{width:100%}
 .btn.sm{padding:7px 11px;min-height:36px;font-size:13px}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}

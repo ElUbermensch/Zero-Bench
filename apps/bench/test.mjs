@@ -1586,6 +1586,21 @@ section('installable and offline');
   await ctx.setOffline(false);
 }
 
+/* ============================================================== build stamp */
+/* Which build is on the phone, readable from the phone. Without it, "the fix
+ * did not work" and "the fix is not on this device" look identical, and the
+ * wrong half of the system gets debugged. */
+section('the build says which build it is');
+{
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(150);
+  const more = await page.textContent('#view');
+  ok(/build .+/.test(more), 'the More screen names the build');
+  const id = await page.evaluate(() => (typeof BUILD_ID === 'string' ? BUILD_ID : null));
+  ok(typeof id === 'string' && id.length > 4, `and it is injected at build time (${id})`);
+  ok(more.includes(id), '...the same one the screen shows');
+}
+
 /* ================================================================== hygiene */
 section('hygiene');
 {

@@ -3763,6 +3763,12 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
         </div>
       )}
       {msg && <div style={{...note, color: msg.kind==='err' ? 'var(--red)' : 'var(--green)'}}>{msg.text}</div>}
+      {/* Which build this is. Two seconds to read off a phone, and it answers
+          the question that otherwise costs an afternoon: has the code I am
+          looking for actually shipped, or am I looking at a cached copy? */}
+      <div style={{...note, opacity: 0.75}}>
+        build {(typeof window !== 'undefined' && window.__BUILD__) || 'unknown'}
+      </div>
     </div>
   );
 }

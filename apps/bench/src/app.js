@@ -1837,7 +1837,8 @@ VIEWS.more = () => [
   /* Reachable from the menu, not only from #/diag. A home-screen app has no
    * address bar, so the URL route was unreachable on exactly the device whose
    * numbers are worth having. */
-  ['diag', 'Display diagnostics', 'what this device reports about the screen'],
+  ['diag', 'Display diagnostics', typeof BUILD_ID === 'string'
+    ? 'build ' + BUILD_ID : 'what this device reports about the screen'],
 ].map(([v, t, s]) => `<button class="listitem" data-act="nav" data-arg="${v}">
     <span class="grow"><span class="ttl">${t}</span><span class="sub">${esc(s)}</span></span>
     <span class="chev">›</span></button>`).join('');

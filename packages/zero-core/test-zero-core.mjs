@@ -36,8 +36,13 @@ section('auth');
   ok(c.isSignedIn(), 'signUp establishes a session');
   ok(events.some(([e]) => e === c.EVENTS.AUTH_SIGNED_IN), 'signUp emits auth:signed-in');
 
-  await c.signOut();
-  ok(!c.isSignedIn(), 'signOut clears the session');
+  /* Deliberately NOT awaited: sign-out is fire-and-forget in both apps, which
+   * re-render on the next tick. If the local session outlives the promise, the
+   * UI redraws showing the user still signed in. */
+  const outPromise = c.signOut();
+  ok(!c.isSignedIn(), 'signOut clears the session before the network call, not after');
+  await outPromise;
+  ok(!c.isSignedIn(), '...and it stays cleared once the request settles');
   const out = events.find(([e]) => e === c.EVENTS.AUTH_SIGNED_OUT);
   ok(out && out[1].reason === 'user', 'signOut reports reason "user"');
 
@@ -182,7 +187,16 @@ section('pull cursor');
 
   mock.state.clock = 2_000_000;
   mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'rifle A', cartridge: '.223 Rem' });
+
+  /* No apply handler: nobody consumed the rows, so advancing the cursor would
+   * discard them. A pull whose result goes nowhere must not be recorded as
+   * having been received -- that is how a caller that syncs before it is ready
+   * to apply silently loses every row written before it woke up. */
   await c.sync({ trigger: 'test' });
+  ok(c.cursors.firearms === undefined,
+     'a pull with no apply handler does not advance the cursor');
+
+  await c.sync({ trigger: 'test', apply: () => {} });
   const cursorAfterFirst = c.cursors.firearms;
   ok(cursorAfterFirst === new Date(2_000_000).toISOString(),
      'the cursor is the greatest updated_at the server returned, not the local clock');
@@ -319,6 +333,183 @@ section('leaderboard');
   ok(r2.ok && b.pendingCount() === 0, 'subsequent syncs are unaffected');
   b.clearRejected();
   ok(b.rejectedList().length === 0, 'the diagnostic list can be cleared');
+}
+
+/* ================================= one bad row does not take the table with it */
+/* The poison-pill test above put the doomed row in a DIFFERENT table from the
+ * good one, so it only ever proved that a bad table does not stop a good one.
+ * Everything queued for the same table went up in one PostgREST array, one
+ * statement, one verdict -- and the 4xx that verdict produced dead-lettered
+ * every row in it. A batch referencing a recipe that had not been pushed yet
+ * would silently discard every other batch queued behind it. */
+section('a refusal is isolated to the row that caused it');
+{
+  const c = mkClient();
+  await c.signUp('isolate@example.com', 'pw');
+
+  const recipeId = c.uuid();
+  c.upsert('recipes', { id: recipeId, name: 'good recipe', charge_gr: 41.5 });
+  await c.sync({ trigger: 'test', apply: () => {} });
+
+  const goodIds = [c.uuid(), c.uuid(), c.uuid(), c.uuid()];
+  const badId = c.uuid();
+  // Interleaved, not appended: if isolation is done by "drop everything after
+  // the first failure" the tail would vanish and this would still look fine.
+  c.upsert('batches', { id: goodIds[0], recipe_id: recipeId, serial: 'A' });
+  c.upsert('batches', { id: goodIds[1], recipe_id: recipeId, serial: 'B' });
+  c.upsert('batches', { id: badId, recipe_id: c.uuid(), serial: 'ORPHAN' });
+  c.upsert('batches', { id: goodIds[2], recipe_id: recipeId, serial: 'C' });
+  c.upsert('batches', { id: goodIds[3], recipe_id: recipeId, serial: 'D' });
+
+  const rejects = [];
+  c.on(c.EVENTS.OUTBOX_REJECTED, p => rejects.push(p));
+  const r = await c.sync({ trigger: 'test', apply: () => {} });
+
+  const server = mock.state.rows.get('batches');
+  const landed = goodIds.filter(id => server.get(id));
+  ok(landed.length === 4, `every good row in the same table landed (${landed.length}/4)`);
+  ok(!server.get(badId), 'the orphan did not');
+  ok(c.rejectedList().length === 1 && c.rejectedList()[0].id === badId,
+     'exactly one row is dead-lettered, and it is the offender');
+  ok(rejects.length === 1 && rejects[0].ids.length === 1,
+     'the rejection event names one id, not the whole queue');
+  ok(r.ok && c.pendingCount() === 0, 'the sync succeeds and the queue drains');
+
+  // Bisection, not one-at-a-time: 5 rows with a single offender should cost a
+  // handful of requests, nowhere near one per row. This is a cost assertion,
+  // not a correctness one, and it is loose on purpose.
+  ok(mock.state.hits.push.batches <= 8,
+     `isolating it took ${mock.state.hits.push.batches} requests, not one per row`);
+}
+
+/* =========================== two apps, one origin, one localStorage between them */
+/* Zero is served from / and Bench from /bench/ on the SAME host, so the two
+ * share a storage area. Everything zero-core kept there was unnamespaced. */
+section('two apps sharing one storage area');
+{
+  const shared = memStore();
+  const zero = mkClient(shared, { appId: 'zero' });
+  const bench = mkClient(shared, { appId: 'bench' });
+
+  await zero.signUp('both@example.com', 'pw');
+  ok(bench.isSignedIn() === false,
+     'a client already constructed does not retroactively see the new session');
+
+  // A client built after the sign-in picks it up: the session is shared on
+  // purpose, so signing in to one app signs you in to the other.
+  const bench2 = mkClient(shared, { appId: 'bench' });
+  ok(bench2.isSignedIn() && bench2.getUser().email === 'both@example.com',
+     'the session IS shared — one sign-in serves both apps');
+
+  /* Every check below constructs the second app's client AFTER the first has
+   * written, because that is the real sequence: two pages, each reading
+   * storage when it loads. A client built earlier holds its queue and cursors
+   * in memory, which hides the sharing completely -- an earlier version of
+   * this test did exactly that and passed against the bug. */
+  zero.upsert('firearms', { id: zero.uuid(), name: 'Zero gun', cartridge: '6mm' });
+  ok(zero.pendingCount() === 1, 'the write is queued in the app that made it');
+  ok(mkClient(shared, { appId: 'bench' }).pendingCount() === 0,
+     '...and a Bench page opened afterwards does not find it in ITS queue');
+
+  /* The cursor is the destructive half. Zero syncs, consumes the rows, and
+   * advances its cursor; a Bench page opened later must still see them, or a
+   * firearm entered in one app is marked delivered before the other ever
+   * asks for it. */
+  const uidZ = zero.getUser().id;
+  mock.state.clock = 5_000_000;
+  const gunId = bench2.uuid();
+  mock.seed('firearms', { id: gunId, user_id: uidZ, name: 'From the other side', cartridge: '.308' });
+
+  let zeroSaw = [], benchSaw = [];
+  await zero.sync({ trigger: 'test', apply: (t, rows) => { if (t === 'firearms') zeroSaw = rows; } });
+  const benchLater = mkClient(shared, { appId: 'bench' });
+  await benchLater.sync({ trigger: 'test', apply: (t, rows) => { if (t === 'firearms') benchSaw = rows; } });
+
+  ok(zeroSaw.some(r => r.id === gunId), 'the app that syncs first sees the row');
+  ok(benchSaw.some(r => r.id === gunId),
+     'and so does the one opened afterwards — its cursor was not advanced by the first');
+}
+
+/* ============================ an install that predates the namespaced keys */
+section('upgrading an install that has the old shared keys');
+{
+  const shared = memStore();
+  const pendingRow = { id: '33333333-4444-5555-6666-777777777777',
+                       name: 'Queued before the upgrade', cartridge: '6.5 CM' };
+  shared.set('zerocore.outbox', [{ table: 'firearms', row: pendingRow, op: 'upsert', queuedAt: 1 }]);
+  shared.set('zerocore.cursors', { firearms: '2026-01-01T00:00:00.000Z' });
+
+  const c = mkClient(shared, { appId: 'bench' });
+  ok(c.pendingCount() === 1, 'unsent work from before the upgrade is adopted, not stranded');
+  ok(c.cursors.firearms === '2026-01-01T00:00:00.000Z', 'so is the cursor');
+  ok(shared.get('zerocore.outbox') != null,
+     'the legacy copy is left in place for the other app, which has not started yet');
+}
+
+/* ======================== rows of different shapes in the same table's queue */
+/* PostgREST builds one column list for a bulk insert and refuses a mixed array
+ * with PGRST102. Two things make that routine rather than exotic: a tombstone
+ * is {id, deleted_at} while an edit is a whole row, and the two apps
+ * deliberately write different columns of `firearms` so neither erases fields
+ * it does not model. Both end up in one device's queue. */
+section('a table whose queue holds more than one row shape');
+{
+  const c = mkClient();
+  await c.signUp('shapes@example.com', 'pw');
+
+  const keepId = c.uuid(), goneId = c.uuid(), leanId = c.uuid();
+  c.upsert('firearms', { id: keepId, name: 'Keeper', cartridge: '6.5 CM',
+                         barrel_in: 26, twist: '1:8' });
+  c.upsert('firearms', { id: goneId, name: 'Doomed', cartridge: '.308 Win' });
+  await c.sync({ trigger: 'test', apply: () => {} });
+
+  // Now: a tombstone, a full edit, and a row carrying only the other app's
+  // columns — three shapes, one table, one sync.
+  c.remove('firearms', goneId);
+  c.upsert('firearms', { id: keepId, name: 'Keeper', cartridge: '6.5 CM',
+                         barrel_in: 26, twist: '1:8.5' });
+  c.upsert('firearms', { id: leanId, name: 'From the other app', cartridge: '.223 Rem',
+                         barrel_life_rounds: 3000 });
+
+  const before = mock.state.hits.push.firearms || 0;
+  const beforePatch = mock.state.hits.patch.firearms || 0;
+  const r = await c.sync({ trigger: 'test', apply: () => {} });
+  const requests = (mock.state.hits.push.firearms || 0) - before;
+  const patches = (mock.state.hits.patch.firearms || 0) - beforePatch;
+  const t = mock.state.rows.get('firearms');
+
+  ok(r.ok, 'the sync succeeds');
+  /* Three shapes should cost three requests. Bisection would also get the
+   * rows there -- splitting a PGRST102 eventually reaches single-row requests,
+   * which are trivially uniform -- so this is the assertion that says the
+   * queue was grouped up front rather than sorted out by trial and error.
+   * A tombstone is common enough that paying 2n requests for it is not
+   * acceptable just because the result is right. */
+  ok(requests === 2, `one upsert request per row shape (${requests}), not a bisection`);
+  /* The tombstone is not among them: it goes as a PATCH, because an upsert of
+   * {id, deleted_at} fails the table's NOT NULL columns on the insert branch
+   * before Postgres ever looks for the conflict. */
+  ok(patches === 1, `and the tombstone went as one PATCH (${patches})`);
+  ok(c.pendingCount() === 0, 'and the queue drains');
+  ok(c.rejectedList().length === 0, 'nothing was dead-lettered');
+  ok(t.get(keepId)?.twist === '1:8.5', 'the edit landed');
+  ok(!!t.get(goneId)?.deleted_at, 'the tombstone landed');
+  ok(t.get(leanId)?.barrel_life_rounds === 3000, 'so did the row with the other shape');
+
+  /* The point of the fix, not just its effect: a row that carries only SOME of
+   * a table's columns must leave the rest of that row alone on the server.
+   * This is what lets the two apps share a firearm without either erasing the
+   * fields it does not model. */
+  /* "Partial" means a subset that still carries the NOT NULL columns -- which
+   * is what both apps send, because name and cartridge are the two fields they
+   * share. A payload without them is refused outright, insert branch first,
+   * even for a row that already exists. */
+  c.upsert('firearms', { id: keepId, name: 'Keeper', cartridge: '6.5 CM',
+                         barrel_life_rounds: 2200 });
+  await c.sync({ trigger: 'test', apply: () => {} });
+  const after = mock.state.rows.get('firearms').get(keepId);
+  ok(after.barrel_life_rounds === 2200 && after.twist === '1:8.5' && after.barrel_in === 26,
+     'a partial write updates its own columns and preserves the others');
 }
 
 /* ============================================================== live relay */
@@ -491,6 +682,61 @@ section('a chronograph summary survives the trip');
   const zeroRow = (mock.state.lastPush['range_sessions'] || []).find(r => r.id === sid);
   ok(zeroRow && !('velocity_avg_fps' in zeroRow),
      'a session that was never given a summary does not acquire one in transit');
+}
+
+/* ======================================== connectivity is read, not remembered */
+section('a client that starts offline can still sync later');
+{
+  /* `online` was read from navigator.onLine once, at construction, and nothing
+   * ever wrote to it again -- neither app called setOnline or
+   * attachBrowserListeners. A phone opened at a range with no signal latched
+   * false and refused every sync for the life of the process: drive home, full
+   * signal, tap Sync now, "offline". Only killing the app cleared it. */
+  /* navigator is a getter-only property on globalThis in Node, so it is
+   * redefined rather than assigned, and restored the same way. */
+  const navDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let fakeOnline = false;
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true, get: () => ({ get onLine() { return fakeOnline; } }),
+  });
+  try {
+    const c = mkClient();                       // constructed while "offline"
+    await c.signUp('net@example.com', 'pw12345');
+    c.upsert('firearms', { name: 'Offline rifle', cartridge: '.308 Win' });
+
+    const r1 = await c.sync({ trigger: 'test' });
+    ok(!r1.ok && r1.reason === 'offline', 'a sync refuses while the device is offline');
+    ok(c.pendingCount() === 1, '...and the write stays queued');
+
+    fakeOnline = true;                          // signal comes back
+    const r2 = await c.sync({ trigger: 'test' });
+    ok(r2.ok, 'the very next sync succeeds — no restart, no setOnline call');
+    ok(c.pendingCount() === 0, '...and the queued write lands');
+    ok(c.isOnline === true, 'isOnline reports what sync() actually acts on');
+  } finally {
+    if (navDesc) Object.defineProperty(globalThis, 'navigator', navDesc);
+    else delete globalThis.navigator;
+  }
+}
+
+{
+  // An explicit setOnline still wins, because a host that drives connectivity
+  // itself must not be second-guessed by a navigator flag.
+  const navDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true, get: () => ({ onLine: true }),
+  });
+  try {
+    const c = mkClient();
+    await c.signUp('force@example.com', 'pw12345');
+    c.setOnline(false);
+    const r = await c.sync({ trigger: 'test' });
+    ok(!r.ok && r.reason === 'offline',
+       'an explicit setOnline(false) is honoured even when the browser says online');
+  } finally {
+    if (navDesc) Object.defineProperty(globalThis, 'navigator', navDesc);
+    else delete globalThis.navigator;
+  }
 }
 
 /* ============================================================ user isolation */

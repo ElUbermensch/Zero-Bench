@@ -987,7 +987,14 @@ function dopeCardText(byFirearm) {
 }
 
 const S = `
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
+/* The @font-face rules are injected into index.html at build time from
+ * packages/fonts, shared with Bench.
+ *
+ * This used to be an @import from Google Fonts: a blocking request to a
+ * third-party host, in an app built to be used at a range with no signal.
+ * Offline it fails and the app falls back to a generic face, so Zero looked
+ * different on the line than it did at the bench. The files are vendored and
+ * served from our own origin now, and precached by the service worker. */
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   /* viewport-fit=cover extends the page under the status bar and the home
@@ -1245,12 +1252,45 @@ const ZeroCore = (() => {
     if (!cfg.fetch) throw new Error('zero-core: no fetch available');
 
     const store = cfg.storage || defaultStorage();
+
+    /* Storage keys, and which of them the two apps are allowed to share.
+     *
+     * Zero is served from / and Bench from /bench/ ON THE SAME ORIGIN, so they
+     * share one localStorage. Every key here used to be unnamespaced, which
+     * meant they shared all of it:
+     *
+     *  - one OUTBOX, so Zero's sync pushed Bench's queued rows and reported
+     *    them as its own;
+     *  - one set of CURSORS, so whichever app synced first advanced the cursor
+     *    past rows the other had never seen. Harmless while nothing consumed a
+     *    pull, and immediately destructive once something did: the firearm you
+     *    entered in Zero would be marked as delivered before Bench ever asked.
+     *
+     * The SESSION stays shared on purpose. It is an identity, not work in
+     * progress, and signing in once for both apps is the entire premise of one
+     * account across two apps. The queue is per app because the work is.
+     *
+     * Existing installs are adopted rather than reset: if the namespaced key
+     * has nothing and the old shared one does, the old value is taken over.
+     * The legacy copy is deliberately NOT deleted -- the other app has not
+     * started yet and would find its own queue gone. Both apps adopting the
+     * same pending rows is safe, because every write is an upsert keyed by an
+     * id the client minted. */
+    const ns = 'zerocore.' + (cfg.appId || 'unknown');
     const K = {
-      session: 'zerocore.session',
-      cursors: 'zerocore.cursors',
-      outbox:  'zerocore.outbox',
-      rejected:'zerocore.rejected',
+      session: 'zerocore.session',     // shared across both apps, deliberately
+      cursors: ns + '.cursors',
+      outbox:  ns + '.outbox',
+      rejected:ns + '.rejected',
     };
+    const LEGACY = { cursors: 'zerocore.cursors', outbox: 'zerocore.outbox',
+                     rejected: 'zerocore.rejected' };
+    for (const k of Object.keys(LEGACY)) {
+      if (store.get(K[k]) == null) {
+        const old = store.get(LEGACY[k]);
+        if (old != null) store.set(K[k], old);
+      }
+    }
 
     /* -------------------------------------------------------- event bus */
     const listeners = new Map();
@@ -1277,7 +1317,28 @@ const ZeroCore = (() => {
     let cursors = store.get(K.cursors) || {};     // { table: iso-timestamp }
     let outbox  = store.get(K.outbox)  || [];     // [{ id, table, row, op, queuedAt }]
     let rejected = store.get(K.rejected) || [];   // dead-lettered writes, see pushTable
+    /* Connectivity.
+     *
+     * This used to be read from navigator.onLine once, at construction, and
+     * nothing ever wrote to it again -- neither app called setOnline or
+     * attachBrowserListeners. A phone that opened the app at a range with no
+     * signal latched `false` and then refused every sync for the rest of the
+     * process's life: drive home, full LTE, tap Sync now, "Sync failed:
+     * offline". Killing and relaunching the app was the only cure, and nothing
+     * on screen suggested that.
+     *
+     * `isOnline()` reads the live value each time rather than trusting the
+     * latch, because the online/offline events fire on interface changes and
+     * not on the interesting cases -- a captive portal, a dead uplink behind a
+     * connected wifi. The stored flag remains for tests and for callers that
+     * set it explicitly. */
     let online  = (typeof navigator === 'undefined') ? true : navigator.onLine !== false;
+    let onlineForced = false;      // setOnline() called explicitly: trust it
+    const isOnline = () => {
+      if (onlineForced) return online;
+      if (typeof navigator === 'undefined' || typeof navigator.onLine !== 'boolean') return online;
+      return navigator.onLine;
+    };
     let refreshInFlight = null;                    // the single shared refresh
     let syncInFlight = null;
     let autoTimer = null;
@@ -1491,14 +1552,27 @@ const ZeroCore = (() => {
     }
 
     async function signOut() {
-      if (session && session.access_token) {
-        try {
-          await raw('/auth/v1/logout', { method: 'POST', headers: authHeaders() });
-        } catch (e) { /* local sign-out proceeds regardless */ }
-      }
+      /* Local first, network second.
+       *
+       * This used to await the logout POST before clearing anything, which
+       * made "am I signed out" a question the server got to answer. Offline it
+       * meant a full fetch timeout of the UI still showing the old email; a
+       * caller that did not await -- which is every caller, because sign-out
+       * is a fire-and-forget in both apps -- re-rendered against a session
+       * that was still there and showed the user signed in after they had
+       * pressed sign out.
+       *
+       * Revoking the refresh token remains worth doing, so it still happens;
+       * it just cannot hold up the local state change. The token is captured
+       * before the clear, since the request needs it. */
+      const headers = (session && session.access_token) ? authHeaders() : null;
       setSession(null, 'user');
       cursors = {};
       store.set(K.cursors, cursors);
+      if (headers) {
+        try { await raw('/auth/v1/logout', { method: 'POST', headers }); }
+        catch (e) { /* best effort: the local session is already gone */ }
+      }
       // The outbox is deliberately NOT cleared: unsent work belongs to the user,
       // not the session, and signing back in should still deliver it.
     }
@@ -1527,9 +1601,20 @@ const ZeroCore = (() => {
 
     const upsert = (table, row) => enqueue(table, row, 'upsert');
 
-    /** Soft delete: a tombstone, so a device that was offline learns about it. */
+    /**
+     * Soft delete: a tombstone, so a device that was offline learns about it.
+     *
+     * Queued as op 'delete', which is pushed as a PATCH rather than an upsert.
+     * It used to be an upsert of {id, deleted_at}, and that CANNOT work: an
+     * upsert is INSERT ... ON CONFLICT, Postgres forms the insert tuple before
+     * it detects the conflict, and every one of these tables has NOT NULL
+     * columns the tombstone does not carry. The write failed with 23502, got
+     * dead-lettered as permanently refused, and the delete never left the
+     * device -- while the queue drained and the UI said everything was sent.
+     * The SQL suite is what found it; the mock had no NOT NULL to violate.
+     */
     const remove = (table, id) =>
-      enqueue(table, { id, deleted_at: new Date().toISOString() }, 'upsert');
+      enqueue(table, { id, deleted_at: new Date().toISOString() }, 'delete');
 
     const pendingCount = () => outbox.length;
     const rejectedList = () => rejected.map(r => ({ table: r.table, id: r.row.id,
@@ -1538,7 +1623,17 @@ const ZeroCore = (() => {
     const pendingFor = (table) => outbox.filter(e => e.table === table).length;
 
     /* ---------------------------------------------------------------- pull */
-    async function pullTable(table) {
+    /* `commit` is false when nobody is going to do anything with the rows.
+     *
+     * The cursor used to advance on every pull, whether or not the rows were
+     * consumed -- and neither app passed an `apply` handler, so every sync
+     * downloaded all seventeen tables, threw them away, and moved the cursor
+     * past them. Sync was one-way in practice: a reinstall or a second device
+     * recovered nothing, and the moment an apply handler was finally wired up
+     * it would start from the cursor and never see anything written before
+     * that day. Advancing a cursor over data nobody read is how a sync engine
+     * quietly loses history. */
+    async function pullTable(table, commit) {
       const since = cursors[table] || '1970-01-01T00:00:00Z';
       let offset = 0, all = [];
       for (;;) {
@@ -1559,7 +1654,7 @@ const ZeroCore = (() => {
 
       // Advance the cursor to the newest row the SERVER actually returned.
       // Using a local timestamp here loses every row written mid-sync.
-      if (all.length) {
+      if (all.length && commit !== false) {
         const newest = all.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), since);
         cursors[table] = newest;
         store.set(K.cursors, cursors);
@@ -1591,10 +1686,81 @@ const ZeroCore = (() => {
     }
 
     /* ---------------------------------------------------------------- push */
-    async function pushTable(table) {
-      const mine = outbox.filter(e => e.table === table);
-      if (!mine.length) return 0;
-      const body = mine.map(e => e.row);
+    /* Drop a set of entries out of the outbox and into the diagnostic list.
+     * Only ever called for rows the server has individually refused. */
+    function deadLetter(table, entries, status, error) {
+      const ids = new Set(entries.map(e => e.row.id));
+      outbox = outbox.filter(e => !(e.table === table && ids.has(e.row.id) &&
+                                    entries.indexOf(e) !== -1));
+      rejected = rejected.concat(entries.map(e => ({
+        table, row: e.row, status, error: String(error).slice(0, 400),
+        rejectedAt: nowMs(),
+      }))).slice(-100);                        // bounded: a diagnostic, not a queue
+      persistOutbox();
+      emit(EVENTS.OUTBOX_REJECTED, { table, ids: [...ids], status, error });
+      emit(EVENTS.SYNC_ERROR, { phase: 'push', table, error: { status, body: error } });
+    }
+
+    /* Push one chunk of a table's queue, isolating a refusal down to the rows
+     * that actually caused it.
+     *
+     * PostgREST takes the whole array as one statement, so a single row the
+     * server will not accept fails the request for every row sent with it. The
+     * first version of this dead-lettered the entire chunk on a 4xx, which
+     * meant one malformed record -- say a session referencing a firearm that
+     * never made it up -- silently discarded every other unsent record in that
+     * table. The user's evidence for this was a queue that emptied and data
+     * that never appeared.
+     *
+     * So a 4xx on a chunk of more than one row is not a verdict on those rows.
+     * It is a signal to split the chunk and ask again. Bisecting costs about
+     * 2·log2(n) extra requests to isolate a single offender rather than the n
+     * a one-at-a-time retry would take, and it only happens on the failure
+     * path. A row is dead-lettered only when it has been refused ALONE.
+     *
+     * 5xx, 401 and 429 are never dead-lettered at any size: those are
+     * transient or an auth problem, and the row deserves another attempt. They
+     * throw, which aborts the sync and leaves the queue intact. */
+    /* A tombstone is an UPDATE, not an upsert. One request per row, which is
+     * right for something as rare as a delete and avoids inventing a filter
+     * that means "these ids, each with its own timestamp".
+     *
+     * A 404-shaped result -- PATCH matching no row -- is not an error here.
+     * The row may have been deleted on another device already, and RLS makes a
+     * row belonging to someone else simply invisible rather than forbidden.
+     * Either way the local intent is satisfied. */
+    async function pushTombstones(table, entries) {
+      let n = 0;
+      for (const e of entries) {
+        const res = await authed(
+          `/rest/v1/${table}?id=eq.${encodeURIComponent(e.row.id)}`,
+          { method: 'PATCH',
+            headers: { Prefer: 'return=minimal' },
+            body: JSON.stringify({ deleted_at: e.row.deleted_at }) });
+
+        if (!res.ok) {
+          const error = await res.text().catch(() => '');
+          const permanent = res.status >= 400 && res.status < 500 &&
+                            res.status !== 401 && res.status !== 429;
+          if (!permanent) {
+            emit(EVENTS.SYNC_ERROR, { phase: 'push', table, error: { status: res.status, body: error } });
+            throw new Error(`push ${table}: ${res.status}`);
+          }
+          deadLetter(table, [e], res.status, error);
+          continue;
+        }
+        outbox = outbox.filter(x => x !== e);
+        persistOutbox();
+        emit(EVENTS.SYNC_PUSHED, { table, rows: [e.row] });
+        n++;
+      }
+      return n;
+    }
+
+    async function pushChunk(table, entries) {
+      if (!entries.length) return 0;
+      if (entries[0].op === 'delete') return pushTombstones(table, entries);
+      const body = entries.map(e => e.row);
 
       const res = await authed(`/rest/v1/${table}?on_conflict=id`, {
         method: 'POST',
@@ -1604,42 +1770,63 @@ const ZeroCore = (() => {
 
       if (!res.ok) {
         const error = await res.text().catch(() => '');
-        /*
-         * A 4xx here is the server saying "this row will never be accepted":
-         * RLS refused it (403), a constraint rejected it (400), the payload is
-         * malformed (422). Retrying forever would be pointless AND actively
-         * harmful -- the failed push aborts the whole sync, so one poisoned
-         * row permanently blocks every other pending write from ever leaving
-         * the device. Dead-letter it instead, surface it, and keep going.
-         *
-         * 5xx and network failures are NOT dead-lettered: those are transient
-         * and the row deserves another attempt.
-         */
-        if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 429) {
-          const ids = new Set(mine.map(e => e.row.id));
-          outbox = outbox.filter(e => !(e.table === table && ids.has(e.row.id)));
-          rejected = rejected.concat(mine.map(e => ({
-            table, row: e.row, status: res.status, error: String(error).slice(0, 400),
-            rejectedAt: nowMs(),
-          }))).slice(-100);                    // bounded: this is a diagnostic, not a queue
-          persistOutbox();
-          emit(EVENTS.OUTBOX_REJECTED, { table, ids: [...ids], status: res.status, error });
+        const permanent = res.status >= 400 && res.status < 500 &&
+                          res.status !== 401 && res.status !== 429;
+        if (!permanent) {
           emit(EVENTS.SYNC_ERROR, { phase: 'push', table, error: { status: res.status, body: error } });
-          return 0;                            // sync continues; other tables still flush
+          throw new Error(`push ${table}: ${res.status}`);
         }
-        emit(EVENTS.SYNC_ERROR, { phase: 'push', table, error: { status: res.status, body: error } });
-        throw new Error(`push ${table}: ${res.status}`);
+        if (entries.length > 1) {
+          const mid = Math.ceil(entries.length / 2);
+          emit(EVENTS.SYNC_ERROR, { phase: 'push-split', table,
+            error: { status: res.status, body: error, splitting: entries.length } });
+          const a = await pushChunk(table, entries.slice(0, mid));
+          const b = await pushChunk(table, entries.slice(mid));
+          return a + b;
+        }
+        deadLetter(table, entries, res.status, error);
+        return 0;                              // sync continues; the rest still flushes
       }
-      const saved = await res.json().catch(() => body);
 
+      const saved = await res.json().catch(() => body);
       // Only drop the entries we actually sent. Anything queued while the
       // request was in flight stays, or that edit is silently lost.
-      const sent = new Set(mine.map(e => e.row.id));
-      outbox = outbox.filter(e => !(e.table === table && sent.has(e.row.id) &&
-                                    mine.find(m => m.row.id === e.row.id) === e));
+      outbox = outbox.filter(e => entries.indexOf(e) === -1);
       persistOutbox();
       emit(EVENTS.SYNC_PUSHED, { table, rows: saved });
-      return mine.length;
+      return entries.length;
+    }
+
+    async function pushTable(table) {
+      const mine = outbox.filter(e => e.table === table);
+      if (!mine.length) return 0;
+
+      /* PostgREST requires every object in a bulk insert to carry the SAME
+       * keys -- it builds one column list for the whole array -- and answers a
+       * mixed array with 400 PGRST102. That is easy to hit the moment an app
+       * both edits and deletes rows in the same table between syncs, because a
+       * tombstone is {id, deleted_at} and an edit is the whole row.
+       *
+       * Grouping by key signature is also what makes "each app writes only its
+       * own columns" work at all: Zero's firearm payload and Bench's carry
+       * different columns on purpose, and a device that has both queued must
+       * not have them merged into one malformed request.
+       *
+       * Relative order within a table is not preserved across groups. Nothing
+       * in this schema has a self-reference, so the only ordering that matters
+       * is between tables, which cfg.tables still fixes. */
+      const groups = new Map();
+      for (const e of mine) {
+        /* Keyed by op as well as shape: a tombstone travels as a PATCH and an
+         * edit as an upsert, and they must never share a request even when
+         * their column lists happen to look alike. */
+        const sig = (e.op || 'upsert') + '|' + Object.keys(e.row).sort().join(',');
+        if (!groups.has(sig)) groups.set(sig, []);
+        groups.get(sig).push(e);
+      }
+      let n = 0;
+      for (const g of groups.values()) n += await pushChunk(table, g);
+      return n;
     }
 
     /* ---------------------------------------------------------------- sync */
@@ -1659,7 +1846,7 @@ const ZeroCore = (() => {
       // leaving a resolved failure promise cached forever, and every later
       // sync() returning that same stale result.
       if (!isSignedIn()) return Promise.resolve({ ok: false, reason: 'signed-out', stats: empty });
-      if (!online)       return Promise.resolve({ ok: false, reason: 'offline',    stats: empty });
+      if (!isOnline())   return Promise.resolve({ ok: false, reason: 'offline',    stats: empty });
 
       const run = async () => {
         const started = nowMs();
@@ -1667,8 +1854,13 @@ const ZeroCore = (() => {
         emit(EVENTS.SYNC_START, { trigger: o.trigger || 'manual' });
         try {
           for (const t of cfg.tables) stats.pushed += await pushTable(t);
+          /* Only commit the cursor for tables somebody is actually consuming.
+           * A caller with no apply handler still gets the rows through
+           * SYNC_PULLED, but the cursor stays put so the data is not lost to
+           * whoever wires a handler up later. */
+          const consuming = !!o.apply;
           for (const t of cfg.tables) {
-            const rows = await pullTable(t);
+            const rows = await pullTable(t, consuming);
             const { applied, skipped } = reconcile(t, rows, o.apply);
             stats.pulled += applied.length;
             stats.conflicts += skipped.length;
@@ -1692,6 +1884,7 @@ const ZeroCore = (() => {
     function setOnline(v, opts) {
       const was = online;
       online = !!v;
+      onlineForced = true;
       if (was === online) return;
       emit(online ? EVENTS.NET_ONLINE : EVENTS.NET_OFFLINE, {});
       if (online && (!opts || opts.autoSync !== false) && isSignedIn() && outbox.length) {
@@ -1699,6 +1892,10 @@ const ZeroCore = (() => {
       }
     }
 
+    /* Attached automatically below. Leaving this opt-in meant it was never opted
+     * into: both apps shipped without it, and the flag it maintains was the one
+     * thing standing between a queued write and the server. Opt OUT with
+     * `autoNetwork: false` if a host needs to drive connectivity itself. */
     function attachBrowserListeners(apply) {
       if (typeof window === 'undefined') return () => {};
       const up = () => setOnline(true, { apply });
@@ -1715,7 +1912,7 @@ const ZeroCore = (() => {
       stopAutoSync();
       if (!cfg.autoSyncMs) return;
       autoTimer = setInterval(() => {
-        if (isSignedIn() && online) sync({ trigger: 'interval', apply });
+        if (isSignedIn() && isOnline()) sync({ trigger: 'interval', apply });
       }, cfg.autoSyncMs);
     }
     function stopAutoSync() {
@@ -2043,7 +2240,7 @@ const ZeroCore = (() => {
 
     function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }
 
-    return {
+    const instance = {
       EVENTS, TABLES,
       on, off, emit,
       signUp, signIn, signInWithOtp, signOut, refresh,
@@ -2057,11 +2254,18 @@ const ZeroCore = (() => {
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
       relayPushShot, relaySend, relayInfo,
       uuid,
-      get isOnline() { return online; },
+      get isOnline() { return isOnline(); },
       get cursors() { return Object.assign({}, cursors); },
       get outbox() { return outbox.map(e => ({ table: e.table, id: e.row.id, op: e.op })); },
       _config: cfg,
     };
+
+    /* Track connectivity unless the host says it will. Opt-in was the wrong
+     * default: it shipped un-opted-in from both apps, and the consequence was
+     * a queued write that could never leave the device. */
+    if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    return instance;
   }
 
   /* ---------------------------------------------------------------- storage */
@@ -2372,6 +2576,113 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget) {
     return s2;
   });
   return { updated, changed, queued };
+}
+
+/* ── Firearms, in both directions ─────────────────────────────────────────
+ *
+ * A firearm is the one record both apps genuinely own: Bench needs it because
+ * a batch is fired from it and the brass comes back marked, Zero needs it
+ * because a group is attributed to it and the barrel is wearing out. Entering
+ * the same rifle twice, once per app, is exactly the redundancy one account
+ * across two apps is supposed to remove.
+ *
+ * Each app writes only the columns it owns and PostgREST updates only the
+ * columns present in the payload, so neither app can erase fields it does not
+ * model. Zero sends barrel life and the starting round count; Bench sends
+ * barrel length, twist, sight height and zero range; name, cartridge and notes
+ * are shared and there the last sync wins.
+ *
+ * `cartridge` is NOT NULL in the schema, and rightly so -- a firearm with no
+ * chambering is not something Bench can match brass or a recipe against. Zero
+ * lets the field be blank, so those are counted and reported rather than sent
+ * up with an invented value.
+ */
+function zeroFirearmsOutbound(core, firearms) {
+  let changed = false, queued = 0, skipped = 0;
+  const updated = (firearms || []).map(f => {
+    if (!f || !f.name || !String(f.name).trim()) return f;
+    if (!f.caliber || !String(f.caliber).trim()) { skipped++; return f; }
+
+    /* Only what changed HERE since this device last agreed with the server.
+       Pushing everything every time is not merely wasteful: push runs before
+       pull, so an unchanged local copy would overwrite a newer edit made in
+       the other app and the pull would then read back the stale value. A
+       record with no syncedAt has never been up (including one that arrived
+       through a backup restore), so it goes. */
+    const dirty = !f.remoteId || !f.syncedAt || Number(f.mtime || 0) > Number(f.syncedAt);
+    if (!dirty) return f;
+
+    // Assign the remote id BEFORE the network runs; the caller persists it.
+    // Minting it later would give the same firearm a fresh id on every retry.
+    let f2 = f;
+    if (!f.remoteId) { f2 = { ...f, remoteId: core.uuid() }; changed = true; }
+
+    const life = Number(f2.barrelLife);
+    core.upsert('firearms', {
+      id: f2.remoteId,
+      name: String(f2.name).trim(),
+      cartridge: String(f2.caliber).trim(),
+      notes: f2.notes ? String(f2.notes) : null,
+      barrel_life_rounds: Number.isFinite(life) && life > 0 ? Math.round(life) : null,
+      rounds_at_start: Math.max(0, Math.round(Number(f2.roundsAtStart) || 0)),
+    });
+    queued++;
+    /* Marked as sent at QUEUE time, like the remote id above. The outbox is
+       durable, so queued means delivered barring a server refusal -- and a
+       refusal lands in the rejected list where it is visible, rather than
+       silently re-pushing the same row forever. */
+    f2 = { ...f2, syncedAt: Date.now() };
+    changed = true;
+    return f2;
+  });
+  return { updated, changed, queued, skipped };
+}
+
+/* Apply pulled firearm rows onto Zero's list. Returns a NEW array plus what
+ * changed, so the caller decides whether a write is worth doing -- a sync that
+ * pulled nothing new must not rewrite storage and re-render the tab. */
+function zeroFirearmsApply(rows, firearms) {
+  const list = (firearms || []).slice();
+  let added = 0, updated = 0, removed = 0;
+
+  for (const row of rows || []) {
+    if (!row || !row.id) continue;
+    const i = list.findIndex(f => f.remoteId === row.id);
+
+    if (row.deleted_at) {
+      /* Deleted on another device. Sessions reference firearms by local id and
+       * a session that loses its firearm loses the attribution that made it
+       * worth recording -- but Zero's own delete button has always removed the
+       * firearm and left those sessions pointing at nothing, so honouring the
+       * tombstone is consistent with what the app already does locally. */
+      if (i >= 0) { list.splice(i, 1); removed++; }
+      continue;
+    }
+    if (!row.name) continue;
+
+    const life = row.barrel_life_rounds;
+    const patch = {
+      name: row.name,
+      caliber: row.cartridge || '',
+      notes: row.notes || '',
+      barrelLife: (life === null || life === undefined || life === '') ? null : Number(life),
+      roundsAtStart: Math.max(0, Math.round(Number(row.rounds_at_start) || 0)),
+    };
+
+    if (i >= 0) {
+      const merged = { ...list[i], ...patch, mtime: 0, syncedAt: Date.now() };
+      const same = Object.keys(patch).every(k => merged[k] === list[i][k]);
+      /* Accepting a remote row makes the local copy agree with the server, so
+         it is clean by definition -- mtime is cleared and syncedAt restamped.
+         Leaving it dirty would push the value straight back next sync. */
+      if (!same) { list[i] = merged; updated++; }
+    } else {
+      list.push({ id: uid(), remoteId: row.id, ts: Date.now(),
+                  mtime: 0, syncedAt: Date.now(), ...patch });
+      added++;
+    }
+  }
+  return { list, added, updated, removed };
 }
 
 /* ── Cloud sync card ──────────────────────────────────────────────────── */
@@ -3149,7 +3460,8 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
   );
 }
 
-function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated, onAmmoUpdated }) {
+function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated, onAmmoUpdated,
+                    firearms, onFirearmsUpdated }) {
   const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
   const [handle, setHandle] = useState('');
   const [handleSaved, setHandleSaved] = useState(false);
@@ -3196,10 +3508,37 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
       // saved first, a retry would mint fresh UUIDs and duplicate every row.
       const out = zeroSyncOutbound(core, sessions, ammo, getTarget);
       if (out.changed) await onSessionsUpdated(out.updated);
-      const r = await core.sync({ trigger: 'manual' });
+      /* Firearms go up too, and their remote ids are persisted before the
+         network for the same reason sessions' are: a retry that minted fresh
+         ids would duplicate every rifle on the server. */
+      const guns = zeroFirearmsOutbound(core, firearms || []);
+      if (guns.changed) await onFirearmsUpdated(guns.updated);
+
+      /* An apply handler is what makes the pull real. Without one zero-core
+         deliberately leaves the cursor where it is, so a sync downloaded rows,
+         discarded them, and reported them as pulled. Only firearms are applied
+         for now -- the rest of the schema has no honest inverse yet. */
+      let pulled = null;
+      const r = await core.sync({
+        trigger: 'manual',
+        apply: (table, rows) => {
+          if (table !== 'firearms') return;
+          const res = zeroFirearmsApply(rows, (pulled && pulled.list) || guns.updated || firearms || []);
+          if (res.added || res.updated || res.removed) pulled = res;
+        },
+      });
+      if (pulled) await onFirearmsUpdated(pulled.list);
       await refreshBatchesOnSync();
+      const fromBench = pulled
+        ? ` Firearms from Bench: ${[pulled.added && `${pulled.added} new`,
+             pulled.updated && `${pulled.updated} updated`,
+             pulled.removed && `${pulled.removed} removed`].filter(Boolean).join(', ')}.`
+        : '';
+      const notSent = guns.skipped
+        ? ` ${guns.skipped} firearm${guns.skipped===1?'':'s'} not sent — no chambering recorded.`
+        : '';
       setMsg(r.ok
-        ? { kind:'ok', text:`Synced — ${out.queued} linked session${out.queued===1?'':'s'} pushed, ${r.stats.pulled} row${r.stats.pulled===1?'':'s'} pulled.` }
+        ? { kind:'ok', text:`Synced — ${out.queued} linked session${out.queued===1?'':'s'} and ${guns.queued} firearm${guns.queued===1?'':'s'} pushed, ${r.stats.pulled} row${r.stats.pulled===1?'':'s'} pulled.${fromBench}${notSent}` }
         : { kind:'err', text:'Sync failed: ' + r.reason });
     } catch (e) { setMsg({ kind:'err', text:'Sync failed: ' + (e?.message || e) }); }
     setBusy(false);
@@ -3683,7 +4022,8 @@ export default function App() {
               />
               <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
                 sessions={sessions} ammo={ammo} getTarget={getTarget}
-                onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo} />
+                onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
+                firearms={firearms} onFirearmsUpdated={saveFirearms} />
               <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup</div>
                 <div style={{display:'flex',gap:8}}>
@@ -7841,7 +8181,16 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
                 {confirmDel === r.id ? (
                   <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0}} onClick={e=>e.stopPropagation()}>
                     <button style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--red)',background:'none',border:'1px solid var(--red)',borderRadius:3,padding:'2px 7px',cursor:'pointer'}}
-                      onClick={()=>{ onSave(firearms.filter(x=>x.id!==r.id)); setConfirmDel(null); }}>delete</button>
+                      onClick={()=>{
+                        /* Tombstone it, or the next pull brings it straight
+                           back: the row is still on the server, this device
+                           now has no local copy to match it against, and the
+                           apply handler would recreate it as a new firearm.
+                           A delete that undoes itself on the next sync is
+                           worse than no sync at all. */
+                        if (r.remoteId && core) { try { core.remove('firearms', r.remoteId); } catch (e) {} }
+                        onSave(firearms.filter(x=>x.id!==r.id)); setConfirmDel(null);
+                      }}>delete</button>
                     <button style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',background:'none',border:'1px solid var(--bdr)',borderRadius:3,padding:'2px 7px',cursor:'pointer'}}
                       onClick={()=>setConfirmDel(null)}>×</button>
                   </div>
@@ -8216,6 +8565,12 @@ function AddFirearmForm({ initial, onBack, onSave }) {
       roundsAtStart: roundsAtStart ? rs : 0,
       notes: notes.trim(),
       ts: initial?.ts || Date.now(),
+      /* Local modification time, and it is what decides whether this record is
+         pushed on the next sync. Without it Zero re-pushed every firearm every
+         time, which quietly stomped edits made in Bench: the push runs before
+         the pull, so a stale local copy overwrote the newer remote one and the
+         pull then confirmed the stale value. */
+      mtime: Date.now(),
     });
   }
 

@@ -14,22 +14,16 @@
 <style>
 /* Type stack, shared with Zero so the two apps read as one product.
  *
- * Zero loads 'DM Sans' and 'Space Mono' with an @import from Google Fonts.
- * Bench does NOT copy that, deliberately: adding the import here hung this
- * app's own test suite, because the headless browser cannot reach
- * fonts.googleapis.com and a blocking @import stalls rendering until it gives
- * up. That is not a test artefact -- it is exactly what happens on a range
- * with no signal, which is the condition this app was built for.
- *
- * So both apps declare the same tokens and Bench resolves them to the system
- * stack. Zero currently resolves them to the webfont when it can reach the
- * network and to a generic fallback when it cannot, which means Zero looks
- * different at the bench than it does at the range. Self-hosting the two woff2
- * files and precaching them would settle it for both apps at once; until then
- * the honest thing is not to add a second app's worth of the same fragility. */
+ * Both faces are vendored in packages/fonts, copied into each app's dist at
+ * build time and precached by each service worker. Zero used to pull them with
+ * an @import from Google Fonts; that is a blocking request to a third-party
+ * host in an app meant to be used with no signal, and it proved itself by
+ * hanging this app's test suite when I copied it here. Served from our own
+ * origin there is no difference between online and off, and no third party
+ * involved in whether the app renders. */
 :root{
-  --fh:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
-  --fm:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --fh:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --fm:'Space Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   /* Greys taken from Zero, value for value, because the two apps are used in
    * the same session and were visibly different products: Bench's background
    * was #16181c against Zero's #0f1117, with every surface and border a little
@@ -103,6 +97,18 @@ header .title{font-weight:650;font-size:16px;flex:1;min-width:0;
 header .sub{font-size:12px;color:var(--ink3);font-weight:400}
 .backbtn{background:none;border:0;color:var(--brass);font-size:15px;padding:6px 4px;
   margin-left:-4px;cursor:pointer;min-height:var(--tap);display:flex;align-items:center}
+/* Header cloud chip. Three states, three colours: brass = sign in (an action
+ * that has not been taken), warn = records waiting, dim = everything sent. */
+.syncchip{flex:0 0 auto;background:none;border:1px solid var(--line);border-radius:999px;
+  color:var(--ink2);font-size:12px;line-height:1;padding:7px 10px;cursor:pointer;
+  /* 38, not the 34 it shipped with for about ten minutes: the suite's floor is
+   * 36px and it is right -- a header control is hit with a thumb at arm's
+   * length. min-width keeps the bare "⇅" state from becoming a dot. */
+  display:flex;align-items:center;justify-content:center;gap:5px;white-space:nowrap;
+  min-height:38px;min-width:44px}
+.syncchip.act{border-color:var(--brass);color:var(--brass)}
+.syncchip.wait{border-color:var(--warn);color:var(--warn)}
+.syncchip.busy{opacity:.6}
 /* The only scrolling element in the app. `overscroll-behavior:contain` stops a
  * scroll that reaches the end of a list from rubber-banding the whole page,
  * which on iOS is what makes a fixed shell feel like it is coming apart. */
@@ -330,6 +336,13 @@ svg.casemini{width:76px;height:auto;flex:none}
 <header>
   <button class="backbtn hidden" id="back" aria-label="Back">‹ Back</button>
   <div class="title" id="title">Bench</div>
+  <!-- Cloud status lives in the header because the question it answers ("am I
+       signed in, is anything waiting to send") is asked from whatever screen
+       the user happens to be on, and the answer used to be two taps deep under
+       More. It is a status light and an entry point, not the sync trigger --
+       the trigger is the wide button on the Identify screen and on the Cloud
+       sync page, so tapping this never fires a network write by surprise. -->
+  <button class="syncchip hidden" id="syncchip" data-act="nav" data-arg="sync"></button>
 </header>
 <main id="view"></main>
 <nav class="tabs noprint" id="tabs" aria-label="Sections"></nav>

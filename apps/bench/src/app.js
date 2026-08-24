@@ -1759,6 +1759,128 @@ VIEWS.ammo = () => {
     ? `<button class="btn primary wide" data-act="new" data-arg="batch">+ New batch</button>` : '');
 };
 
+/* ==========================================================================
+ * The paper, and what actually happened on it.
+ *
+ * A group size is a summary of a summary. 0.42" at 100 yards is five in a
+ * cloverleaf and one flyer, or six evenly spread in a line, and those are a
+ * load problem and a wind problem respectively -- the single number cannot
+ * tell them apart, and neither can a shooter reading it three weeks later.
+ *
+ * So Bench draws the string. It never records one: the shots belong to the app
+ * where the trigger was pulled, and they arrive with the paper they were shot
+ * on denormalised onto the session, because Bench has no target library and
+ * has no business growing one.
+ *
+ * ZOOM. An SR face is 37 inches across and a good group is under an inch, so
+ * drawing the whole target renders the string as one pixel. The view is
+ * cropped to the shots with a margin, then clamped: never tighter than the
+ * innermost ring (or the crop is a meaningless empty circle) and never wider
+ * than the paper (or there is black space around a target floating in nothing).
+ * ========================================================================*/
+function targetPlot(sess, opts) {
+  const o = opts || {};
+  const shots = (sess.shots || []).filter(sh => sh && Number.isFinite(+sh.x) && Number.isFinite(+sh.y));
+  if (!shots.length) return '';
+
+  const rings = (sess.targetFace && Array.isArray(sess.targetFace.rings))
+    ? sess.targetFace.rings.filter(r => r && Number.isFinite(+r.diam) && +r.diam > 0)
+        .slice().sort((a, b) => +b.diam - +a.diam)          // outermost first, so it paints first
+    : [];
+  const outerR = rings.length ? +rings[0].diam / 2 : 0;
+  const innerR = rings.length ? +rings[rings.length - 1].diam / 2 : 0;
+
+  const xs = shots.map(sh => +sh.x), ys = shots.map(sh => +sh.y);
+  const spanX = Math.max(...xs) - Math.min(...xs);
+  const spanY = Math.max(...ys) - Math.min(...ys);
+  const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
+  const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+
+  let half = Math.max(spanX, spanY) / 2 * 1.9;
+  half = Math.max(half, innerR * 1.2, 0.75);               // never a meaningless empty crop
+  if (outerR) half = Math.min(half, outerR);               // never wider than the paper
+  const view = { x: cx - half, y: cy - half, w: half * 2, h: half * 2 };
+
+  const px = o.size || 168;
+  /* SVG y grows downward; target inches grow upward. Flipping here rather than
+   * at the data means the numbers in the table below and the holes in the
+   * picture are the same numbers. */
+  const sx = (v) => v;
+  const sy = (v) => -v;
+
+  const ringEls = rings.map((r, i) => {
+    const rad = +r.diam / 2;
+    // The aiming black is black; everything outside it is paper. Falls back to
+    // alternating tone when the face carries no colours of its own.
+    const fill = r.color || (i < rings.length - 1 ? '#1a1814' : '#ffffff');
+    return `<circle cx="0" cy="0" r="${rad.toFixed(3)}" fill="${esc(fill)}"
+             stroke="#8a8378" stroke-width="${(half / px * 1.1).toFixed(4)}"/>`;
+  }).join('');
+
+  const dot = (half / px) * 4.2;                            // ~4px whatever the crop
+  const shotEls = shots.map(sh => {
+    const cxp = sx(+sh.x).toFixed(3), cyp = sy(+sh.y).toFixed(3);
+    /* A sighter is hollow. It is fired ammunition -- it comes out of the batch
+     * -- and it is not scored and not in the group, so it must be visible and
+     * must not read as part of the cluster. */
+    return sh.sighter
+      ? `<circle cx="${cxp}" cy="${cyp}" r="${dot.toFixed(4)}" fill="none"
+           stroke="var(--warn)" stroke-width="${(dot * 0.45).toFixed(4)}"/>`
+      : `<circle cx="${cxp}" cy="${cyp}" r="${dot.toFixed(4)}" fill="var(--acc)"
+           stroke="#000" stroke-width="${(dot * 0.25).toFixed(4)}"/>`;
+  }).join('');
+
+  /* Where the shooter said the sights were, joined to where the hole is. The
+   * gap between the two is the most useful thing on a string, and it is the
+   * one thing a group size can never contain. */
+  const callEls = shots.filter(sh => Number.isFinite(+sh.callX) && Number.isFinite(+sh.callY))
+    .map(sh => `<line x1="${(+sh.callX).toFixed(3)}" y1="${(-sh.callY).toFixed(3)}"
+                      x2="${(+sh.x).toFixed(3)}" y2="${(-sh.y).toFixed(3)}"
+                      stroke="var(--dim)" stroke-width="${(dot * 0.35).toFixed(4)}"
+                      stroke-dasharray="${(dot * 0.8).toFixed(4)}"/>`).join('');
+
+  const scaleBar = (() => {
+    // One inch, drawn to scale, so the picture is readable as a size and not
+    // just a shape. Without it every group looks the same size.
+    const y = view.y + view.h * 0.93, x0 = view.x + view.w * 0.06;
+    return `<line x1="${x0.toFixed(3)}" y1="${y.toFixed(3)}"
+                  x2="${(x0 + 1).toFixed(3)}" y2="${y.toFixed(3)}"
+                  stroke="var(--ink)" stroke-width="${(dot * 0.4).toFixed(4)}"/>
+            <text x="${(x0 + 0.5).toFixed(3)}" y="${(y - dot * 1.6).toFixed(3)}"
+                  font-size="${(half / px * 9).toFixed(3)}" fill="var(--ink)"
+                  text-anchor="middle" font-family="ui-monospace,monospace">1"</text>`;
+  })();
+
+  return `<svg class="plot" width="${px}" height="${px}" role="img"
+       aria-label="shot plot" data-plot="1"
+       viewBox="${view.x.toFixed(3)} ${view.y.toFixed(3)} ${view.w.toFixed(3)} ${view.h.toFixed(3)}">
+    <rect x="${view.x.toFixed(3)}" y="${view.y.toFixed(3)}"
+          width="${view.w.toFixed(3)}" height="${view.h.toFixed(3)}" fill="#efe9dc"/>
+    ${ringEls}${callEls}${shotEls}${scaleBar}
+  </svg>`;
+}
+
+/* The string as numbers. The picture shows the shape; this shows the order,
+ * and a string that walks in one direction over twenty shots is a different
+ * diagnosis from the same holes in a random sequence. */
+function stringTable(sess) {
+  const shots = (sess.shots || []).slice().sort((a, b) => (a.n || 0) - (b.n || 0));
+  if (!shots.length) return '';
+  const inches = (v) => (Number.isFinite(+v) ? (+v).toFixed(2) : '—');
+  return `<table class="strtbl"><thead><tr>
+      <th>#</th><th>ring</th><th>x&Prime;</th><th>y&Prime;</th><th>call</th></tr></thead><tbody>
+    ${shots.map(sh => `<tr${sh.sighter ? ' class="sighter"' : ''}>
+      <td class="mono">${sh.sighter ? 'S' : ''}${sh.n ?? ''}</td>
+      <td class="mono">${esc(sh.ring == null ? '—' : String(sh.ring))}</td>
+      <td class="mono">${inches(sh.x)}</td>
+      <td class="mono">${inches(sh.y)}</td>
+      <td class="mono dim">${Number.isFinite(+sh.callX)
+        ? `${inches(sh.callX)}, ${inches(sh.callY)}`
+        : (sh.windMoa != null ? `${sh.windMoa} ${esc(sh.windDir || '')}` : '—')}</td>
+    </tr>`).join('')}
+  </tbody></table>`;
+}
+
 VIEWS.ammoDetail = (id) => {
   const b = byId(DB.batches, id);
   if (!b) return `<div class="empty">This batch no longer exists.</div>`;
@@ -1868,19 +1990,38 @@ VIEWS.ammoDetail = (id) => {
   </div>
   <div class="card"><h2>Range results</h2>${sess.length ? sess.map(s => {
       const f = byId(DB.firearms, s.firearm);
+      const shots = (s.shots || []);
+      const rec = shots.filter(x => !x.sighter).length;
+      const sight = shots.length - rec;
+      const plot = targetPlot(s);
       return `<div class="rowline">
         <div class="spread"><b class="small">${fmtDate(s.date)}</b>
           <span class="small dim">${esc(f ? f.name : '')}</span></div>
+        ${plot ? `<div class="plotrow mt8">
+          ${plot}
+          <div class="grow">
+            <div class="tiny dim">${esc(s.targetName || 'target')}${
+              s.distance ? ` · ${s.distance} yd` : ''}</div>
+            <div class="mono" style="font-size:19px;line-height:1.3">${
+              s.group != null ? s.group + '&Prime;' : '—'}</div>
+            <div class="tiny dim">${rec} scored${sight ? ` · ${sight} sighter${sight === 1 ? '' : 's'}` : ''}</div>
+            ${s.group != null && s.distance
+              ? `<div class="tiny dim">${(s.group / (+s.distance / 100) / 1.0472).toFixed(2)} MOA</div>` : ''}
+          </div>
+        </div>` : ''}
         <dl class="kv mt6">
           <dt>Rounds</dt><dd class="mono">${s.rounds ?? '—'}</dd>
           ${s.vAvg != null ? `<dt>Velocity</dt><dd class="mono">${s.vAvg} fps</dd>` : ''}
           ${s.vSd != null ? `<dt>SD / ES</dt><dd class="mono">${s.vSd} / ${s.vEs ?? '—'}</dd>` : ''}
-          ${s.group != null ? `<dt>Group @ ${s.distance}y</dt><dd class="mono">${s.group}"</dd>` : ''}
+          ${s.group != null && !plot ? `<dt>Group @ ${s.distance}y</dt><dd class="mono">${s.group}"</dd>` : ''}
           ${s.temp != null ? `<dt>Temperature</dt><dd class="mono">${s.temp}°F</dd>` : ''}
           <dt>Pressure signs</dt><dd>${s.pressureSigns === 'none'
             ? '<span class="chip ok">none</span>'
             : `<span class="chip bad">${esc(s.pressureSigns)}</span>`}</dd>
         </dl>${s.notes ? `<p class="small muted mt6 m0">${esc(s.notes)}</p>` : ''}
+        ${shots.length ? `<details class="mt8"><summary class="tiny dim">The string — ${
+          shots.length} shot${shots.length === 1 ? '' : 's'}, in the order they were fired</summary>
+          ${stringTable(s)}</details>` : ''}
         <div class="btnrow mt8 noprint">
           <button class="btn sm" data-act="editSession" data-arg="${s.id}">Edit</button>
           <button class="btn sm danger" data-act="delSession" data-arg="${s.id}">Delete</button>

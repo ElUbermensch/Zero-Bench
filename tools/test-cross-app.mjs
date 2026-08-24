@@ -97,7 +97,18 @@ const benchSync = async () => {
   await bench.click('button[data-act="sySync"]');
   await bench.waitForTimeout(900);
 };
+/* Zero's sync panel lives under More -> Cloud sync now: signed in it is a
+ * status readout, and a status readout has no business sitting under the
+ * session list. Navigating each time is what a user does, and it also proves
+ * the destination survives a reload. */
+const zeroMore = async (title) => {
+  await zero.click('.tabbar button:has-text("More")');
+  await zero.waitForTimeout(250);
+  await zero.click(`button:has-text("${title}")`);
+  await zero.waitForTimeout(350);
+};
 const zeroSync = async () => {
+  if (!(await zero.locator('button:has-text("Sync now")').count())) await zeroMore('Cloud sync');
   await zero.click('button:has-text("Sync now")');
   await zero.waitForTimeout(900);
 };
@@ -339,6 +350,46 @@ section('rounds fired in Zero come back to the bench');
   ok(after.session && /Bergara/.test(after.session.firearm || ''),
      'and it is attributed to the rifle, not to nobody — in the same sync that first pushed that rifle');
 
+  /* ---- the string itself, which is the whole point of the exercise -------
+   * "The range data should be completely shown in bench. Not just a few
+   * stats. This is a string data analytics program at heart." A group size is
+   * a summary of a summary: 0.42" at 100 is five in a cloverleaf and one
+   * flyer, or six in a line, and Bench could not tell those apart. */
+  const drawn = await bench.evaluate(() => {
+    const s = (DB.sessions || []).find(x => (x.shots || []).length) || null;
+    if (!s) return { found: false };
+    const svg = targetPlot(s);
+    const el = document.createElement('div');
+    el.innerHTML = svg;
+    const node = el.firstElementChild;
+    return {
+      found: true,
+      shots: s.shots.length,
+      sighters: s.shots.filter(x => x.sighter).length,
+      ordered: s.shots.every((x, i) => i === 0 || x.n >= s.shots[i - 1].n),
+      rings: (s.targetFace && s.targetFace.rings || []).length,
+      targetName: s.targetName,
+      hasSvg: !!node && node.tagName.toLowerCase() === 'svg',
+      circles: node ? node.querySelectorAll('circle').length : 0,
+      viewBox: node ? node.getAttribute('viewBox') : null,
+      table: /<table/.test(stringTable(s)),
+    };
+  });
+  ok(drawn.found, 'the string reaches Bench at all');
+  ok(drawn.shots === 12, `every hole crosses, sighters included (${drawn.shots})`);
+  ok(drawn.sighters === 2, '...and the two sighters are still marked as sighters');
+  ok(drawn.ordered, '...in the order they were fired, not the order they were paged');
+  ok(drawn.rings >= 3 && drawn.targetName,
+     `...with the paper they were shot on (${drawn.targetName}, ${drawn.rings} rings)`);
+  ok(drawn.hasSvg && drawn.circles >= drawn.shots + drawn.rings,
+     `Bench draws it: one mark per hole and one per ring (${drawn.circles} circles)`);
+  /* The crop is the difference between a readable plot and one pixel: an SR
+   * face is 37 inches across and this group is under half an inch. */
+  const vb = (drawn.viewBox || '').split(/\s+/).map(Number);
+  ok(vb.length === 4 && vb[2] > 0 && vb[2] < 8,
+     `...cropped to the group rather than the whole 37-inch face (${vb[2]?.toFixed?.(1)}" wide)`);
+  ok(drawn.table, 'and the string is readable as numbers too, in firing order');
+
   /* Bench must not now push Zero's session back up through its own narrower
    * mapping: Bench has no shot string and no group in inches to send, so a
    * re-push would overwrite both with nulls on the next pull. */
@@ -368,6 +419,7 @@ section('rounds fired in Zero come back to the bench');
  * account looks like. */
 section('a second device, same account');
 {
+  await zeroMore('Backup & data');
   await zero.click('button:has-text("⤒ Back up now")');
   await zero.waitForTimeout(700);
   const bodyAfterUp = await zero.textContent('body');
@@ -396,10 +448,16 @@ section('a second device, same account');
   });
   await zero.reload();
   await zero.waitForTimeout(900);
+  /* The account is a status readout now and lives in the More menu, not under
+   * the session list. Which is the point of the restructure, so the check
+   * looks where a user would. */
+  await zero.click('.tabbar button:has-text("More")');
+  await zero.waitForTimeout(300);
   ok((await zero.textContent('body')).includes('both@example.com'),
      'the second device is signed in to the same account');
   ok((await zeroFirearms()).length === 0, '...and starts with none of the data');
 
+  await zeroMore('Backup & data');
   await zero.click('button:has-text("⤓ Restore")');
   await zero.waitForTimeout(900);
   const after = await zero.evaluate(() => ({

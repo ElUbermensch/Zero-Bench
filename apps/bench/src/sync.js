@@ -454,6 +454,13 @@ const BenchSync = (() => {
         vEs: nn(row.velocity_es_fps),
         pressureSigns: row.pressure_signs || 'none',
         notes: row.notes || '',
+        /* The paper it was shot on, denormalised onto the session by the app
+         * that shot it. Bench has no target library and should not grow one --
+         * it is a loading bench. Without this a hole at (0.4,-1.1) cannot be
+         * drawn anywhere meaningful. */
+        targetName: row.target_name || null,
+        targetFace: (row.target_face && Array.isArray(row.target_face.rings))
+          ? row.target_face : null,
         /* Arrived from the server, so it is clean by definition: stamping it
          * as sent is what stops Bench pushing Zero's own session back with
          * Bench's narrower mapping on the very next sync. */
@@ -491,16 +498,73 @@ const BenchSync = (() => {
     return stat;
   }
 
+  /* The string, one row per hole.
+   *
+   * Merged by remote id rather than replaced wholesale: rows arrive a page at
+   * a time, so a session's shots can span two pulls and the second page must
+   * not throw away the first. A tombstone removes the hole -- a shot the
+   * shooter deleted in Zero that stayed here would be a hole in the paper that
+   * is not in the barrel.
+   *
+   * Bench does not own any of this. It never writes a shot; the string belongs
+   * to the app where the trigger was pulled. Bench reads it because a group
+   * size on its own cannot tell you whether the load is inconsistent or the
+   * wind call was. */
+  function applyShots(DB, rows) {
+    const stat = { added: 0, updated: 0, removed: 0 };
+    if (!Array.isArray(rows) || !rows.length) return stat;
+
+    for (const row of rows) {
+      if (!row || !row.id || !row.session_id) continue;
+      const s = (DB.sessions || []).find(x => x.remote === row.session_id);
+      if (!s) continue;                        // a session this device has not pulled
+      s.shots = s.shots || [];
+      const at = s.shots.findIndex(x => x.remote === row.id);
+
+      if (row.deleted_at) {
+        if (at >= 0) { s.shots.splice(at, 1); stat.removed++; }
+        continue;
+      }
+
+      const shot = {
+        remote: row.id,
+        n: nn(row.shot_no),
+        x: nn(row.poi_x_in), y: nn(row.poi_y_in),
+        ring: row.ring == null ? null : String(row.ring),
+        sighter: !!row.is_sighter,
+        callX: nn(row.call_x_in), callY: nn(row.call_y_in),
+        windMoa: nn(row.wind_call_moa),
+        windDir: row.wind_call_dir === 'L' || row.wind_call_dir === 'R' ? row.wind_call_dir : null,
+        v: nn(row.velocity_fps),
+        excluded: !!row.excluded,
+      };
+      if (at >= 0) { s.shots[at] = shot; stat.updated++; }
+      else { s.shots.push(shot); stat.added++; }
+    }
+
+    /* Ordered by shot number, because a string is a sequence: the second half
+     * of a 20-shot string drifting off call is the thing worth seeing, and it
+     * is invisible if the holes arrive in whatever order the server paged
+     * them. */
+    for (const s of DB.sessions || []) {
+      if (s.shots) s.shots.sort((a, b) => (a.n || 0) - (b.n || 0));
+    }
+    return stat;
+  }
+
   function applyPulled(DB, table, rows, helpers) {
     if (table === 'firearms') return applyFirearms(DB, rows, helpers);
     if (table === 'range_sessions') return applyRangeSessions(DB, rows, helpers);
     /* Groups are applied AFTER their sessions, which the table order in
      * zero-core already guarantees: range_sessions comes before groups. */
     if (table === 'groups') return applyGroups(DB, rows);
+    /* Shots come after their sessions in zero-core's table order, so the
+     * session a hole belongs to is already here by the time the hole is. */
+    if (table === 'shots') return applyShots(DB, rows);
     return null;
   }
 
-  return { buildRows, push, applyPulled, applyFirearms, uuid };
+  return { buildRows, push, applyPulled, applyFirearms, applyShots, uuid };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = BenchSync;

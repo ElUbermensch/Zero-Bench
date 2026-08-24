@@ -47,6 +47,10 @@ async function shooter(email, seed) {
   await page.fill('input[placeholder="email"]', email);
   await page.fill('input[placeholder="password"]', 'pw12345');
   await page.click('button:has-text("create account")'); await page.waitForTimeout(600);
+  /* Sign-in lands on More -> Cloud sync now; these tests are about the
+   * sessions and the board, so come back to them. */
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
   return { ctx, page };
 }
 
@@ -61,10 +65,31 @@ const mkSession = (id, name, score) => ([{
 section('two shooters, one backend');
 const A = await shooter('a@example.com', mkSession('sA','A league night',[10,9]));
 const B = await shooter('b@example.com', mkSession('sB','B league night',[9,9]));
-ok((await A.page.textContent('body')).includes('a@example.com'), 'A is signed in');
-ok((await B.page.textContent('body')).includes('b@example.com'), 'B is signed in');
+/* The account is a status readout now, so it lives in the More menu rather
+ * than on the sessions screen -- which is also where the menu row says who you
+ * are without spending a tap to find out. */
+const signedInAs = async (page) => {
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(250);
+  const t = await page.textContent('body');
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(200);
+  return t;
+};
+ok((await signedInAs(A.page)).includes('a@example.com'), 'A is signed in');
+ok((await signedInAs(B.page)).includes('b@example.com'), 'B is signed in');
 
 section('handles');
+/* The handle is claimed on the sync screen -- it is an account property, and
+ * the account moved into the More menu when it stopped being something you set
+ * up and started being something you have. */
+const toSync = async (page) => {
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(250);
+  await page.click('button:has-text("Cloud sync")');
+  await page.waitForTimeout(350);
+};
+await toSync(A.page); await toSync(B.page);
 await A.page.fill('input[placeholder="leaderboard handle"]', 'Jaxon');
 await A.page.click('button:has-text("claim")'); await A.page.waitForTimeout(200);
 await B.page.fill('input[placeholder="leaderboard handle"]', 'Rival');
@@ -72,6 +97,7 @@ await B.page.click('button:has-text("claim")'); await B.page.waitForTimeout(200)
 ok(true, 'both queued a handle');
 
 section('publish');
+await A.page.click('.tabbar button:has-text("Sessions")'); await A.page.waitForTimeout(300);
 await A.page.click('text=A league night'); await A.page.waitForTimeout(500);
 ok(await A.page.locator('button:has-text("publish")').count() === 1, 'the publish button appears on a rankable session');
 await A.page.click('button:has-text("publish")'); await A.page.waitForTimeout(900);
@@ -81,6 +107,7 @@ ok(entries.length === 1, `one entry on the server (${entries.length})`);
 ok(entries[0]?.score === 19 && entries[0]?.position === 'Standing',
    `score and position pushed (${entries[0]?.score}, ${entries[0]?.position})`);
 
+await B.page.click('.tabbar button:has-text("Sessions")'); await B.page.waitForTimeout(300);
 await B.page.click('text=B league night'); await B.page.waitForTimeout(500);
 await B.page.click('button:has-text("publish")'); await B.page.waitForTimeout(900);
 ok((mock.state.rows.get('leaderboard_entries')?.size||0) === 2, 'both shooters are on the board');

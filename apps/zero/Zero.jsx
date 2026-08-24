@@ -2817,13 +2817,28 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
     if (!a) return s;
     const yards = +s.rangeYards;
     if (!Number.isFinite(yards) || yards <= 0) return s;
-    const stats = analytics(s.shots || [], getTarget(s.targetId), yards);
+    const tgt = getTarget(s.targetId);
+    const stats = analytics(s.shots || [], tgt, yards);
     if (!stats || stats.n < 2) return s;
 
     let s2 = s;
     if (!s.remoteId || !s.remoteGroupId) {
       s2 = { ...s, remoteId: s.remoteId || core.uuid(),
              remoteGroupId: s.remoteGroupId || core.uuid() };
+      changed = true;
+    }
+
+    /* Every shot gets a stable remote id, minted once and kept on the shot.
+     *
+     * Not optional: `shots` is keyed (session_id, shot_no) in the schema, so a
+     * client that minted a fresh uuid per push would send row after row
+     * claiming shot 3 of the same session and be refused with 23505 -- or, on
+     * a mock that did not model the key, quietly stack a second string on the
+     * target. The id is what makes the second push an update. */
+    const shots = s2.shots || [];
+    if (shots.some(sh => sh && !sh.remoteId)) {
+      s2 = { ...s2, shots: shots.map(sh =>
+        sh && sh.remoteId ? sh : { ...sh, remoteId: core.uuid() }) };
       changed = true;
     }
     core.upsert('range_sessions', {
@@ -2847,6 +2862,18 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
       temp_f: (s2.temp !== '' && s2.temp != null && Number.isFinite(+s2.temp)) ? +s2.temp : null,
       source_app: 'zero',
       notes: [s2.name, s2.position, s2.fireMode].filter(Boolean).join(' · ') || null,
+      /* The paper, travelling with the string that was shot on it. A hole at
+       * (0.4, -1.1) is meaningless without knowing whether that is an SR at
+       * 200 or an F-class face at 600, and Bench has no target library to look
+       * it up in -- it is a loading bench, it does not own targets. So the
+       * geometry is denormalised onto the session on purpose. Rings only:
+       * everything else on a target definition is Zero's own presentation. */
+      target_name: (tgt && tgt.name) || null,
+      target_face: (tgt && Array.isArray(tgt.rings) && tgt.rings.length)
+        ? { rings: tgt.rings.map(r => ({ score: String(r.score),
+                                         diam: +r.diam,
+                                         color: r.color || null })) }
+        : null,
     });
     core.upsert('groups', {
       id: s2.remoteGroupId,
@@ -2858,6 +2885,51 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
       mean_radius_in: round3(stats.mrIn),
       source_app: 'zero',
     });
+
+    /* The string itself, one row per hole.
+     *
+     * Bench could already see that a batch had been fired and how big the
+     * group was. That is a summary of a summary: 0.42" at 100 could be five in
+     * a cloverleaf and one flyer, or six in a line, and those are a load
+     * problem and a wind problem respectively.
+     *
+     * Shot numbers run 1..N across the WHOLE string, sighters included,
+     * because the schema's unique key is (session_id, shot_no) and numbering
+     * the two classes separately would collide on every pair. Which class a
+     * shot belongs to is a column, not a numbering scheme. */
+    (s2.shots || []).forEach((sh, i) => {
+      const p = shotXY(sh, tgt);
+      const call = sh.callXY && typeof sh.callXY.x === 'number' ? sh.callXY : null;
+      core.upsert('shots', {
+        id: sh.remoteId,
+        session_id: s2.remoteId,
+        shot_no: i + 1,
+        ring: sh.ring == null ? null : String(sh.ring),
+        is_sighter: !!sh.isSighter,
+        poi_x_in: round3(p.x),
+        poi_y_in: round3(p.y),
+        call_x_in: call ? round3(call.x) : null,
+        call_y_in: call ? round3(call.y) : null,
+        wind_call_moa: Number.isFinite(sh.windCallMoa) ? sh.windCallMoa : null,
+        wind_call_dir: sh.windCallDir === 'L' || sh.windCallDir === 'R' ? sh.windCallDir : null,
+        /* Zero records impacts on paper and nothing else. A chronograph is a
+         * separate instrument, and Bench is the app that owns its readout --
+         * see the guard in 0011, which stops this null blanking that readout. */
+        velocity_fps: null,
+        excluded: false,
+      });
+    });
+
+    /* Shots deleted since the last push. Without this the row stays on the
+     * server, Bench pulls it, and the target grows a hole the shooter deleted
+     * -- the same resurrection problem a firearm delete had, one level down.
+     * The list is cleared once queued; the outbox owns delivery from there. */
+    if ((s2.deletedShots || []).length) {
+      s2.deletedShots.forEach(id => { try { core.remove('shots', id); } catch (e) {} });
+      s2 = { ...s2, deletedShots: [] };
+      changed = true;
+    }
+
     queued++;
     return s2;
   });
@@ -3827,7 +3899,7 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
   );
 }
 
-function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessionsUpdated, onAmmoUpdated,
+function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn, onSessionsUpdated, onAmmoUpdated,
                     firearms, onFirearmsUpdated, onGoToAmmo }) {
   const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
   const [handle, setHandle] = useState('');
@@ -3923,7 +3995,17 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
     setBusy(false);
     if (!r.ok) setMsg({ kind:'err', text:(r.error?.msg || r.error?.error_description || r.error?.message || 'Sign-in failed.') });
     else if (r.needsConfirmation) setMsg({ kind:'ok', text:'Account created — confirm the email, then sign in.' });
-    else { setPw(''); setMsg(null); }
+    else {
+      setPw(''); setMsg(null);
+      /* Signing in from the home screen makes this card disappear, because
+       * signed in it is a status readout and belongs in the menu. Vanishing
+       * with no acknowledgement reads as failure, so the caller is told and
+       * takes the user to the screen the card became. Deliberately NOT driven
+       * off the AUTH_SIGNED_IN event: that also fires when a stored session is
+       * restored at launch, which would drag a returning user out of their
+       * sessions every time they opened the app. */
+      if (onSignedIn) onSignedIn();
+    }
   }
 
   return (
@@ -4015,6 +4097,11 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
 
 export default function App() {
   const [tab, setTab] = useState('sessions');
+  /* Which submenu is open under More. null is the menu itself. Kept separate
+     from `screen` because a submenu is still the tab bar's world -- the tab
+     bar stays visible and switching tabs abandons it, which is what a menu
+     does and what a full-screen `screen` does not. */
+  const [more, setMore] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [matches, setMatches] = useState([]);
   const [customTargets, setCustomTargets] = useState([]);
@@ -4178,6 +4265,23 @@ export default function App() {
     return core.on(core.EVENTS.RELAY_ENDED, () => setLiveSess(null));
   }, [core]);
 
+  /* Signing in changes what this component renders -- the sign-in card leaves
+   * the home screen, and the More menu's rows change what they say -- but
+   * `core.isSignedIn()` is a method call, not state, so nothing here re-runs
+   * when it changes. SyncPanel subscribes for itself and therefore looked
+   * correct while the screen around it did not.
+   *
+   * The symptom was specific and would have shipped: sign in, and the panel
+   * stayed on the sessions screen until something else happened to cause a
+   * render. */
+  const [, bumpAuth] = useState(0);
+  useEffect(() => {
+    if (!core) return undefined;
+    const offs = [core.EVENTS.AUTH_SIGNED_IN, core.EVENTS.AUTH_SIGNED_OUT]
+      .map(e => core.on(e, () => bumpAuth(n => n + 1)));
+    return () => offs.forEach(off => off());
+  }, [core]);
+
   /* One shot, in the shape the relay wants. The call travels with it: the gap
    * between where a shooter said the sights were and where the hole is, is the
    * single most useful thing a coach reads off a live string. */
@@ -4329,6 +4433,21 @@ export default function App() {
    * Applying is per collection and only for the collections the snapshot
    * actually carried: a snapshot written by an older build that had no ammo
    * must not blank the ammo. */
+  /* One sentence about the state of the backup, or null. Derived once because
+     it is now shown in two places: on Sessions, where it is the only thing
+     left that is not a session and has to earn that by being urgent, and on
+     the backup screen itself where it explains the buttons. */
+  const backupNudge = (() => {
+    if (!sessions.length) return null;
+    const newSince = sessions.length - (backupMeta?.sessionsAtExport ?? 0);
+    const days = backupMeta?.lastExportTs ? (Date.now() - backupMeta.lastExportTs) / 86400000 : null;
+    if (!backupMeta) return sessions.length >= 5
+      ? `No backup yet — ${sessions.length} sessions are one storage eviction from gone.` : null;
+    if (newSince >= 5) return `${newSince} sessions logged since your last backup.`;
+    if (days != null && days > 30) return `Last backup was ${Math.floor(days)} days ago.`;
+    return null;
+  })();
+
   const localData = { sessions, matches, customTargets, deletedBuiltins, firearms, ammo };
   const applyRestored = (d) => {
     if (d.sessions) saveSessions(d.sessions);
@@ -4343,6 +4462,20 @@ export default function App() {
     if (!allTargets.length) return BUILTIN_TARGETS[0]; // ultimate fallback
     return allTargets.find(t=>t.id===id) || allTargets[0];
   };
+
+  const linkedLoadCount = ammo.filter(a => a.batchId).length;
+  const moreItems = [
+    ['firearms', 'Firearms & loads',
+      `${firearms.length} firearm${firearms.length === 1 ? '' : 's'} · ${ammo.length} load${ammo.length === 1 ? '' : 's'}`],
+    ['targets', 'Targets',
+      `${customTargets.length} custom · ${visibleBuiltins.length} built in`],
+    ...(core ? [['bench', 'Loads from Bench',
+      linkedLoadCount ? `${linkedLoadCount} linked to a batch` : 'import batches you have loaded']] : []),
+    ...(core ? [['sync', 'Cloud sync',
+      core.isSignedIn() ? `signed in as ${core.getUser()?.email || 'you'}` : 'not signed in']] : []),
+    ['backup', 'Backup & data',
+      backupNudge ? 'needs attention' : 'cloud and file'],
+  ];
 
   if (!ready) return <><style>{S}</style><div style={{padding:40,fontFamily:'var(--fm)',fontSize:11,color:'var(--dim)'}}>loading...</div></>;
 
@@ -4393,7 +4526,22 @@ export default function App() {
       match={sess.matchId ? matches.find(m=>m.id===sess.matchId) : null}
       onBack={()=>{ setScreen('home'); setActiveSess(null); }}
       onAddShot={sh=>{ const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...(s.shots||[]),sh]}:s); saveSessions(u); mirrorShot(sess, tgt, sh); }}
-      onDelShot={sid=>{ const u=sessions.map(s=>s.id===sess.id?{...s,shots:(s.shots||[]).filter(sh=>sh.id!==sid)}:s); saveSessions(u); }}
+      /* A deleted shot has to be REMEMBERED, not merely dropped. Once the
+         string is on the server, dropping it locally leaves the row there;
+         the next pull hands Bench a hole the shooter deleted and the target
+         grows it back. Only shots that ever went up are worth a tombstone --
+         one with no remoteId was never sent, so there is nothing to retract. */
+      onDelShot={sid=>{
+        const u = sessions.map(s => {
+          if (s.id !== sess.id) return s;
+          const gone = (s.shots||[]).find(sh => sh.id === sid);
+          const tomb = gone && gone.remoteId
+            ? [...(s.deletedShots || []), gone.remoteId]
+            : (s.deletedShots || []);
+          return { ...s, shots:(s.shots||[]).filter(sh=>sh.id!==sid), deletedShots: tomb };
+        });
+        saveSessions(u);
+      }}
       onDelSess={()=>{ if (liveSess===sess.id) endLive(); saveSessions(sessions.filter(s=>s.id!==sess.id)); setScreen('home'); setActiveSess(null); }}
       core={core}
       live={liveSess === sess.id}
@@ -4446,6 +4594,13 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {/* Sessions, and nothing else.
+                  This screen used to carry the sync panel, the cloud backup
+                  card, the file backup card and its staleness nudge, stacked
+                  under the list. Four infrastructure cards under the content
+                  they support: on a phone the sessions were a thin strip at
+                  the top of a page about plumbing. All four are one tap away
+                  under More now, which is also where Bench keeps them. */}
               <SessionsList
                 sessions={sessions}
                 matches={matches}
@@ -4455,63 +4610,90 @@ export default function App() {
                 onNewSessionInMatch={matchId=>{ setActiveSess(null); setScreen('new_in_match_'+matchId); }}
                 onDelMatch={mid=>{ saveMatches(matches.filter(m=>m.id!==mid)); saveSessions(sessions.map(s=>s.matchId===mid?{...s,matchId:null}:s)); }}
               />
-              <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
-                sessions={sessions} ammo={ammo} getTarget={getTarget}
-                onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
-                firearms={firearms} onFirearmsUpdated={saveFirearms}
-                onGoToAmmo={()=>setTab('targets')} />
-              <CloudBackupCard core={core} data={localData}
-                onMerge={applyRestored} onReplace={applyRestored} />
-              <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
-                <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup · file</div>
-                <div style={{display:'flex',gap:8}}>
-                  <button className="badd" style={{flex:1}} onClick={exportBackup}>⤓ Export</button>
-                  <button className="badd" style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}} onClick={()=>importRef.current?.click()}>⤒ Restore</button>
+              {/* Two things survive on this screen, and both have to earn it.
+                  A stale backup is urgent — data one storage eviction from
+                  gone — so it is a line, not a card, and it is a shortcut to
+                  the screen that fixes it. */}
+              {backupNudge && (
+                <div style={{margin:'0 13px 8px',fontFamily:'var(--fm)',fontSize:9,
+                             color:'var(--acc)',lineHeight:1.5,cursor:'pointer'}}
+                     onClick={()=>{ setTab('more'); setMore('backup'); }}>
+                  ⚠ {backupNudge} — tap to back up
                 </div>
-                <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',lineHeight:1.5,marginTop:8}}>
-                  Export saves all sessions, firearms, targets &amp; matches to a JSON file. Restore replaces local data with a backup — export first to be safe. Data otherwise lives only in this browser.
-                </div>
-                {(() => {
-                  // Nudge when the last export is stale: never exported with
-                  // ≥5 sessions, ≥5 new sessions since, or >30 days old.
-                  if (!sessions.length) return null;
-                  const newSince = sessions.length - (backupMeta?.sessionsAtExport ?? 0);
-                  const days = backupMeta?.lastExportTs ? (Date.now() - backupMeta.lastExportTs) / 86400000 : null;
-                  const msg = !backupMeta
-                    ? (sessions.length >= 5 ? `No backup exported yet — ${sessions.length} sessions are one storage eviction from gone.` : null)
-                    : newSince >= 5 ? `${newSince} sessions logged since your last export.`
-                    : days != null && days > 30 ? `Last export was ${Math.floor(days)} days ago.`
-                    : null;
-                  return msg ? (
-                    <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',lineHeight:1.5,marginTop:6}}>⚠ {msg}</div>
-                  ) : null;
-                })()}
-              </div>
-              <input ref={importRef} type="file" accept="application/json,.json" style={{display:'none'}}
-                onChange={e=>{ const file=e.target.files?.[0]; if(file) importBackup(file); e.target.value=''; }} />
+              )}
+              {/* And signing in, but ONLY while signed out. The whole point of
+                  putting the email field on the home screen was that nobody
+                  should have to go looking for it to answer "where is the sync
+                  button" -- burying it under More would undo that. Once you
+                  ARE signed in it is a status readout, and a status readout
+                  belongs in the menu. Bench makes the same distinction, and by
+                  position rather than by different markup. */}
+              {core && !core.isSignedIn() && (
+                <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
+                  sessions={sessions} ammo={ammo} getTarget={getTarget}
+                  onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
+                  firearms={firearms} onFirearmsUpdated={saveFirearms}
+                  onSignedIn={()=>{ setTab('more'); setMore('sync'); }}
+                  onGoToAmmo={()=>{ setTab('more'); setMore('firearms'); }} />
+              )}
             </>
           )}
           {tab==='analytics' && <><LeaderboardCard core={core} /><AnalyticsTab sessions={sessions} getTarget={getTarget} firearms={firearms} matches={matches} /></>}
           {tab==='dope' && <DopeTab sessions={sessions} firearms={firearms} getTarget={getTarget} />}
-          {tab==='targets' && (
+
+          {/* ── More ──────────────────────────────────────────────────────
+              A menu of submenus, the same shape Bench uses. Firearms and
+              targets were top-level tabs; they are things you set up once and
+              revisit occasionally, which is exactly what a menu is for, and
+              taking them out of the tab bar is what leaves room for the four
+              destinations that are actually daily. */}
+          {tab==='more' && more === null && (
+            <MoreMenu items={moreItems} onPick={setMore} />
+          )}
+          {tab==='more' && more !== null && (
             <>
-              {/* Targets+ : the targets, and the utilities that had nowhere to
-                  live. Importing loads from Bench is one read of one view and
-                  has no business being reachable only by pressing "Sync now",
-                  which pushes everything and pulls seventeen tables. */}
-              <div style={{margin:'0 13px'}}>
-                <CloudBackupCard core={core} data={localData} compact
-                  onMerge={applyRestored} onReplace={applyRestored} />
-              </div>
-              <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
-              <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />
+              <button className="badd" onClick={()=>setMore(null)}
+                style={{margin:'0 13px 10px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>
+                ‹ More
+              </button>
+              {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
+              {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />}
+              {more==='bench' && <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />}
+              {more==='sync' && (
+                <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
+                  sessions={sessions} ammo={ammo} getTarget={getTarget}
+                  onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
+                  firearms={firearms} onFirearmsUpdated={saveFirearms}
+                  onGoToAmmo={()=>setMore('firearms')} />
+              )}
+              {more==='backup' && (
+                <>
+                  <CloudBackupCard core={core} data={localData}
+                    onMerge={applyRestored} onReplace={applyRestored} />
+                  <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
+                    <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup · file</div>
+                    <div style={{display:'flex',gap:8}}>
+                      <button className="badd" style={{flex:1}} onClick={exportBackup}>⤓ Export</button>
+                      <button className="badd" style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}} onClick={()=>importRef.current?.click()}>⤒ Restore</button>
+                    </div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',lineHeight:1.5,marginTop:8}}>
+                      A file you keep. Restore from a file REPLACES local data — unlike a cloud restore, which merges. Data otherwise lives only in this browser.
+                    </div>
+                    {backupNudge && (
+                      <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',lineHeight:1.5,marginTop:6}}>⚠ {backupNudge}</div>
+                    )}
+                  </div>
+                  <input ref={importRef} type="file" accept="application/json,.json" style={{display:'none'}}
+                    onChange={e=>{ const file=e.target.files?.[0]; if(file) importBackup(file); e.target.value=''; }} />
+                </>
+              )}
             </>
           )}
-          {tab==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
         </div>
         <div className="tabbar">
-          {[['sessions','▤','Sessions'],['analytics','◰','Analytics'],['dope','▦','DOPE'],['firearms','⌖','Firearms'],['targets','◎','Targets+']].map(([t,ico,lbl])=>(
-            <button key={t} className={`tab ${tab===t?'on':''}`} onClick={()=>setTab(t)}>
+          {[['sessions','▤','Sessions'],['analytics','◰','Analytics'],['dope','▦','DOPE'],['more','≡','More']].map(([t,ico,lbl])=>(
+            <button key={t} className={`tab ${tab===t?'on':''}`}
+              onClick={()=>{ setTab(t); if (t==='more') setMore(null); }}>
               <span className="tabi">{ico}</span><span className="tabl">{lbl}</span>
             </button>
           ))}
@@ -8900,6 +9082,42 @@ function useBenchImport({ core, ammo, onSaveAmmo }) {
 /* The stacked form of the importer, for a screen that has room for a card.
  * Both nodes are siblings here, so neither can end up inside the other's
  * layout. */
+/* The More menu: a list of destinations, each with a line saying what is
+ * behind it before you tap.
+ *
+ * Bench has had exactly this for months and it is the reason its four tabs are
+ * enough. Zero had five tabs and still could not fit sync, backup and the
+ * Bench importer anywhere, so they were stacked under the session list — the
+ * screen that should have been the least cluttered in the app. */
+function MoreMenu({ items, onPick }) {
+  const row = { display:'flex', alignItems:'center', gap:10, width:'100%',
+                background:'var(--surf)', border:'1px solid var(--bdr)',
+                borderRadius:9, padding:'12px 13px', margin:'0 0 8px',
+                textAlign:'left', cursor:'pointer', color:'var(--ink)' };
+  return (
+    <div style={{ margin:'0 13px' }}>
+      {items.map(([key, title, sub]) => (
+        <button key={key} style={row} onClick={() => onPick(key)}>
+          <span style={{ flex:1 }}>
+            <span style={{ display:'block', fontSize:13 }}>{title}</span>
+            <span style={{ display:'block', fontFamily:'var(--fm)', fontSize:9,
+                           color:'var(--dim)', marginTop:3 }}>{sub}</span>
+          </span>
+          <span style={{ color:'var(--dim)', fontSize:15 }}>›</span>
+        </button>
+      ))}
+      {/* The build stamp used to sit on the home screen inside the sync card.
+          It is a diagnostic, not content, but it has to stay reachable without
+          hunting: it is the first question worth asking when someone says a
+          fix did not land. One tap from any tab, at the foot of the menu. */}
+      <div style={{ fontFamily:'var(--fm)', fontSize:8, color:'var(--dim)',
+                    textAlign:'center', margin:'14px 0 4px' }}>
+        build {(typeof window !== 'undefined' && window.__BUILD__) || 'unknown'}
+      </div>
+    </div>
+  );
+}
+
 function BenchImportCard(props) {
   const bench = useBenchImport(props);
   if (!bench.available) return null;

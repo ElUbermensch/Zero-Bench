@@ -490,6 +490,37 @@ export function startMock(opts = {}) {
                            + '"account_backups_user_id_app_slot_key"' });
               }
             }
+            /* shots are keyed (session_id, shot_no) in the schema, not by the
+             * client's uuid. A push that re-sends a string must therefore
+             * UPDATE the row that already holds that number rather than
+             * inserting a second one under a fresh id -- which is exactly what
+             * a client that mints a new uuid per push would do, and the real
+             * server would refuse with 23505 while this mock happily stacked
+             * twelve more holes on the target. */
+            if (t === 'shots' && row.session_id && row.shot_no != null) {
+              const clash = [...table(t).values()].find(x =>
+                x.session_id === row.session_id && x.shot_no === row.shot_no
+                && x.id !== row.id);
+              if (clash) {
+                return json(res, 409, { code: '23505',
+                  message: 'duplicate key value violates unique constraint '
+                           + '"shots_session_id_shot_no_key"' });
+              }
+              if (row.wind_call_dir != null && !['L', 'R'].includes(row.wind_call_dir)) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "shots_wind_call_dir_check"' });
+              }
+            }
+            /* The face is a shape, not free text: {rings:[…]}. A client that
+             * sends the target's NAME here, or an array, gets a 400 rather
+             * than a plot that renders as nothing. */
+            if (t === 'range_sessions' && row.target_face != null) {
+              const f = row.target_face;
+              if (typeof f !== 'object' || Array.isArray(f) || !Array.isArray(f.rings)) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "range_sessions_target_face_shape"' });
+              }
+            }
             if (fk && row[fk[0]]) {
               const parent = table(fk[1]).get(row[fk[0]]);
               if (!parent) {
@@ -501,7 +532,7 @@ export function startMock(opts = {}) {
             }
             /* The server defaults this column; a client that has never backed
              * up before does not know an id to send. */
-            if (!row.id && t === 'account_backups') row.id = randomUUID();
+            if (!row.id && (t === 'account_backups' || t === 'shots')) row.id = randomUUID();
             if (!row.id && (t === 'relay_shots' || t === 'relay_messages')) {
               const key = t === 'relay_shots'
                 ? [...table(t).values()].find(x => x.relay_id === row.relay_id

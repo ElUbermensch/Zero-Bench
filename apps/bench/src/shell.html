@@ -187,6 +187,28 @@ hr{border:0;border-top:1px solid var(--line);margin:12px 0}
 .row.wrap{flex-wrap:wrap}
 .g6{gap:6px}.g8{gap:8px}.g10{gap:10px}
 .spread{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+/* The shot plot and its string.
+   The plot sits beside the numbers rather than above them: on a phone the
+   picture and "0.42 inches" are one glance, and stacking them made the batch
+   screen a scroll. */
+.plotrow{display:flex;gap:12px;align-items:flex-start}
+.plotrow .grow{flex:1;min-width:0}
+.plot{border-radius:6px;border:1px solid var(--line);flex:none;
+      max-width:46vw;height:auto;background:#efe9dc}
+.strtbl{width:100%;border-collapse:collapse;margin-top:6px;font-size:11px}
+.strtbl th{text-align:right;font-weight:400;color:var(--dim);font-size:9px;
+           text-transform:uppercase;letter-spacing:.08em;padding:3px 6px;
+           border-bottom:1px solid var(--line)}
+.strtbl th:first-child,.strtbl td:first-child{text-align:left}
+.strtbl td{text-align:right;padding:3px 6px;border-bottom:1px solid var(--line)}
+/* A sighter is dimmed, not hidden: it came out of the batch and it is not in
+   the group, and both of those have to be visible at once. */
+.strtbl tr.sighter td{color:var(--dim)}
+.strtbl tr:last-child td{border-bottom:0}
+details>summary{cursor:pointer;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:'▸ ';color:var(--dim)}
+details[open]>summary::before{content:'▾ '}
 .rowline{padding:8px 0;border-bottom:1px solid var(--line)}
 .rowline:last-child{border-bottom:0}
 .pointer{cursor:pointer}

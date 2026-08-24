@@ -352,6 +352,83 @@ section('rounds fired in Zero come back to the bench');
      '...nor flatten what Zero recorded — Bench leaves rows it did not author alone');
 }
 
+/* ================================================ a second device, same account */
+/* The reported failure, in the user's words: "the multi device signed into the
+ * same email and restoring data is not working."
+ *
+ * It was not working because there was nothing to restore FROM. Only four
+ * record types sync -- the ones Bench also understands -- and everything else
+ * (targets, matches, and the sessions' own shot strings on a device with no
+ * linked load) lived in one browser and left it only as a JSON file the user
+ * had to carry across by hand. On a home-screen PWA on iOS that file mostly
+ * could not be produced, let alone carried.
+ *
+ * The second device here is the same page with its local data wiped and its
+ * session kept, which is exactly what a fresh install signed into the same
+ * account looks like. */
+section('a second device, same account');
+{
+  await zero.click('button:has-text("⤒ Back up now")');
+  await zero.waitForTimeout(700);
+  const bodyAfterUp = await zero.textContent('body');
+  ok(/Backed up/.test(bodyAfterUp), 'Zero backs the whole log up in one tap');
+
+  const stored = [...(mock.state.rows.get('account_backups')?.values() || [])];
+  ok(stored.length === 1, `one row holds it (${stored.length})`);
+  ok(stored[0] && stored[0].app === 'zero' && stored[0].slot === 'default',
+     '...keyed by app and slot, so Bench cannot overwrite it and a second backup replaces it');
+  const snap = JSON.parse(stored[0].payload || '{}');
+  ok((snap.data?.sessions_v1 || []).length === 1 && (snap.data?.rifles_v1 || []).length === 1,
+     'the snapshot carries the sessions and the rifles');
+  ok(Array.isArray(snap.data?.custom_targets_v1) && Array.isArray(snap.data?.matches_v1),
+     '...and the collections the per-record sync deliberately does not cover');
+
+  /* The second device. Session kept, everything else gone -- and one session
+   * logged HERE that the backup has never heard of, because that is the case a
+   * restore must not destroy: a range day logged offline on the phone. */
+  await zero.evaluate(() => {
+    const session = localStorage.getItem('zerocore.session');
+    localStorage.clear();
+    if (session) localStorage.setItem('zerocore.session', session);
+    localStorage.setItem('sessions_v1', JSON.stringify([{ id: 'local-only',
+      name: 'logged on this device', date: '2026-08-20', type: 'Practice',
+      targetId: 'any', rangeYards: 200, rifleId: '', ammoId: '', ts: 9, shots: [] }]));
+  });
+  await zero.reload();
+  await zero.waitForTimeout(900);
+  ok((await zero.textContent('body')).includes('both@example.com'),
+     'the second device is signed in to the same account');
+  ok((await zeroFirearms()).length === 0, '...and starts with none of the data');
+
+  await zero.click('button:has-text("⤓ Restore")');
+  await zero.waitForTimeout(900);
+  const after = await zero.evaluate(() => ({
+    sessions: JSON.parse(localStorage.getItem('sessions_v1') || '[]'),
+    firearms: JSON.parse(localStorage.getItem('rifles_v1') || '[]'),
+    ammo: JSON.parse(localStorage.getItem('ammo_v1') || '[]'),
+  }));
+  ok(after.firearms.length === 1 && after.firearms[0].name === 'Bergara B14 HMR',
+     'the rifle comes down');
+  ok(after.ammo.length === 1 && !!after.ammo[0].batchId,
+     '...and the load, still linked to its Bench batch');
+  ok(after.sessions.some(s => s.id === 's1'),
+     '...and the session that was only on the first device');
+  ok(after.sessions.some(s => s.id === 'local-only'),
+     'while the session logged HERE survives — a restore adds, it does not replace');
+  ok(after.sessions.filter(s => s.id === 's1').length === 1,
+     'and restoring does not duplicate what it already brought');
+
+  /* Idempotence is the property that makes the button safe to press when you
+   * are not sure whether you pressed it. */
+  await zero.click('button:has-text("⤓ Restore")');
+  await zero.waitForTimeout(700);
+  const twice = await zero.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1') || '[]').length);
+  ok(twice === after.sessions.length, `restoring twice changes nothing (${twice})`);
+  ok(/Already up to date/.test(await zero.textContent('body')),
+     '...and says so rather than claiming to have restored again');
+}
+
 /* ==================================================================== hygiene */
 section('hygiene');
 {

@@ -227,6 +227,70 @@ await page.waitForTimeout(700);
 const kept = await page.evaluate(() => DB.batches[0].remote);
 ok(kept === before, 'remote ids are persisted locally, so they survive a reload');
 
+/* ============================================ the whole bench, to a second device */
+/* The per-record sync above is lossy on purpose: it maps Bench's model onto
+ * the schema Zero reads, so a component lot becomes two rows and a marking
+ * scheme has no equivalent at all. None of that is a backup, and none of it
+ * gets a new phone to the state the old one is in. This does. */
+section('cloud backup');
+const openData = async () => {
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(200);
+  await page.click('[data-act="nav"][data-arg="data"]');
+  await page.waitForTimeout(500);
+};
+await openData();
+ok((await page.textContent('#view')).includes('Cloud backup'),
+   'the backup card is on the data screen, beside the file export');
+
+await page.click('button[data-act="cbUp"]');
+await page.waitForTimeout(900);
+ok(/Backed up/.test(await page.textContent('#view')), 'one tap puts the whole bench up');
+const backups = rows('account_backups');
+ok(backups.length === 1 && backups[0].app === 'bench',
+   `one row holds it, labelled as Bench's (${backups.length})`);
+const snap = JSON.parse(backups[0].payload || '{}');
+ok((snap.brassLots || []).length === 1 && (snap.componentLots || []).length === 5,
+   "it is Bench's own JSON — every lot, including the one the shared schema refused");
+ok(snap.recipes && snap.recipes.length === 2,
+   '...and the orphan recipe the sync could not represent, which is exactly what a backup is for');
+
+/* A second device: same account, empty bench, plus one lot loaded here that
+ * the backup has never seen. */
+await page.evaluate(() => {
+  const keep = localStorage.getItem('zerocore.session');
+  localStorage.clear();
+  if (keep) localStorage.setItem('zerocore.session', keep);
+});
+await page.reload();
+await page.waitForTimeout(700);
+await page.evaluate(() => {
+  DB.componentLots = [{ id: 'local1', serial: 'C-9', kind: 'primer', name: 'CCI BR2',
+    lot: 'L-1', qty: 1000, unit: 'ea', cost: 99 }];
+  save();
+});
+await openData();
+await page.click('button[data-act="cbMerge"]');
+await page.waitForTimeout(900);
+
+const merged = await page.evaluate(() => ({
+  lots: DB.componentLots.map(l => l.id),
+  brass: DB.brassLots.length, recipes: DB.recipes.length, batches: DB.batches.length,
+  scheme: DB.meta && DB.meta.scheme ? Object.keys(DB.meta.scheme).length : 0,
+}));
+ok(merged.brass === 1 && merged.recipes === 2 && merged.batches === 1,
+   'the bench comes down onto the second device');
+ok(merged.lots.includes('local1'),
+   '...without taking the lot that was only on this device — restore adds, it does not replace');
+ok(merged.lots.filter(x => x === 'cl1').length === 1, '...and does not duplicate what it brought');
+
+await page.click('button[data-act="cbMerge"]');
+await page.waitForTimeout(800);
+const again = await page.evaluate(() => DB.componentLots.length);
+ok(again === merged.lots.length, `restoring twice changes nothing (${again} lots)`);
+ok(/Already up to date/.test(await page.textContent('#view')),
+   '...and says so rather than claiming to have restored again');
+
 section('hygiene');
 ok(errors.length === 0, 'no JS errors' + (errors.length ? ' — ' + errors.slice(0, 3).join(' | ') : ''));
 

@@ -844,6 +844,112 @@ const ZeroCore = (() => {
       return { ok: true, data: await res.json() };
     }
 
+    /* ---------------------------------------------- whole-device backups */
+    /* A snapshot is NOT sync, and none of the machinery above applies to it.
+     *
+     * It does not go through the outbox. The outbox exists so a write made at
+     * a range with no signal still lands eventually, and it retries forever to
+     * make that true. A snapshot has the opposite requirement: it is eight
+     * megabytes, the user is watching a button, and a backup that "will happen
+     * later" is a backup they will believe they have and do not. So it is a
+     * direct request that either succeeds now or reports why not.
+     *
+     * It has no cursor, because there is nothing incremental about it. It has
+     * no conflict resolution, because two devices backing up to the same slot
+     * is the user overwriting their own copy, which is what a slot IS.
+     *
+     * The payload is opaque here on purpose. zero-core has no business knowing
+     * what a session or a brass lot looks like; each app hands over a string it
+     * knows how to read back, and gets the same string out. */
+    const BACKUP_MAX_BYTES = 8 * 1024 * 1024;
+
+    /** The row id for one slot, or null. Two round trips rather than an upsert
+     *  on a compound unique key: PostgREST can do the upsert, but only if the
+     *  client names the conflict target correctly, and getting that wrong
+     *  fails as a duplicate-key INSERT — a new backup silently not saved. The
+     *  extra request is a few hundred bytes against a payload of megabytes. */
+    async function backupRowId(app, slot) {
+      const q = `select=id&app=eq.${encodeURIComponent(app)}`
+              + `&slot=eq.${encodeURIComponent(slot)}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) return { ok: false, status: res.status, error: await res.text().catch(() => '') };
+      const rows = await res.json().catch(() => []);
+      return { ok: true, id: (rows && rows[0] && rows[0].id) || null };
+    }
+
+    /** Write one snapshot. `payload` is a string; anything else is stringified
+     *  here so a caller cannot accidentally send `[object Object]`. */
+    async function backupPut({ app, slot, payload, counts, deviceLabel, appBuild }) {
+      const u = getUser();
+      if (!u) return { ok: false, reason: 'not signed in' };
+      if (isAnonymous()) return { ok: false, reason: 'anonymous devices cannot back up' };
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+
+      /* Checked here as well as in the database. The server's constraint is
+       * the one that counts, but finding out by uploading eight megabytes over
+       * a phone connection and being refused is a bad way to learn it. */
+      const bytes = new TextEncoder().encode(body).length;
+      if (bytes > BACKUP_MAX_BYTES) {
+        return { ok: false, reason: 'too large', bytes, limit: BACKUP_MAX_BYTES };
+      }
+
+      const row = {
+        user_id: u.id,
+        app: app || cfg.appId || 'zero',
+        slot: slot || 'default',
+        payload: body,
+        counts: counts || {},
+        device_label: deviceLabel || null,
+        app_build: appBuild || null,
+      };
+
+      const found = await backupRowId(row.app, row.slot);
+      if (!found.ok) return { ok: false, reason: 'lookup failed', status: found.status };
+
+      let res;
+      if (found.id) {
+        /* PATCH, not an upsert: `created_at` should keep saying when this slot
+         * was first used, and an INSERT ... ON CONFLICT that omitted it would
+         * be fine while one that included it would quietly reset it. */
+        const { user_id, ...patch } = row;
+        res = await authed('/rest/v1/account_backups?id=eq.' + encodeURIComponent(found.id),
+          { method: 'PATCH', body: JSON.stringify(patch) });
+      } else {
+        res = await authed('/rest/v1/account_backups',
+          { method: 'POST', body: JSON.stringify([row]) });
+      }
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.SYNC_ERROR, { phase: 'backup', table: 'account_backups',
+                                  error: { status: res.status, body: error } });
+        return { ok: false, reason: 'refused', status: res.status, error };
+      }
+      return { ok: true, bytes, slot: row.slot, app: row.app };
+    }
+
+    /** What snapshots exist, WITHOUT their payloads. The restore screen can
+     *  then say what is up there and how big it is before anyone commits to
+     *  downloading it on a phone plan. */
+    async function backupList(app) {
+      const q = 'select=*&order=updated_at.desc'
+              + (app ? `&app=eq.${encodeURIComponent(app)}` : '');
+      return selectView('v_account_backups', q);
+    }
+
+    /** One snapshot, payload and all. */
+    async function backupGet({ app, slot }) {
+      const q = `select=*&app=eq.${encodeURIComponent(app || cfg.appId || 'zero')}`
+              + `&slot=eq.${encodeURIComponent(slot || 'default')}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        return { ok: false, status: res.status, error };
+      }
+      const rows = await res.json().catch(() => []);
+      if (!rows || !rows.length) return { ok: true, found: false, row: null };
+      return { ok: true, found: true, row: rows[0] };
+    }
+
     /** Claim (or change) the public handle. Keyed by the user id, so it is
      *  naturally one-per-account and an upsert renames rather than duplicates.
      *  Server enforces shape and case-insensitive uniqueness. */
@@ -1196,6 +1302,7 @@ const ZeroCore = (() => {
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
+      backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,

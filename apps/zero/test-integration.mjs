@@ -231,6 +231,27 @@ await page.click('button:has-text("⇣ Bench")');
 await page.waitForTimeout(600);
 const body1 = await page.textContent('body');
 ok(body1.includes('B26H14-02X'), 'Bench batch appears in the picker');
+
+/* Opened from the AMMUNITION header, which is the screen the user screenshotted
+ * with the buttons crushed into vertical slivers. Same structural check as on
+ * Targets+: the panel is a sibling of that header, not a flex item inside it. */
+const hdrLayout = await page.evaluate(() => {
+  const panel = document.querySelector('[data-bench-picker]');
+  const btn = [...document.querySelectorAll('button')].find(b => /⇣ Bench/.test(b.textContent));
+  let el = panel && panel.parentElement, inRow = false;
+  while (el && el !== document.body) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'flex' && cs.flexDirection === 'row') { inRow = true; break; }
+    el = el.parentElement;
+  }
+  const r = btn && btn.getBoundingClientRect();
+  return { inRow, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+           btnW: r ? Math.round(r.width) : 0, btnH: r ? Math.round(r.height) : 0 };
+});
+ok(!hdrLayout.inRow, 'the picker opened from the ammunition header is not inside that header');
+ok(hdrLayout.overflow <= 0, `...and the page does not scroll sideways (${hdrLayout.overflow}px)`);
+ok(hdrLayout.btnW > hdrLayout.btnH,
+   `...and "⇣ Bench" stays a button rather than a vertical sliver (${hdrLayout.btnW}×${hdrLayout.btnH})`);
 ok(body1.includes('UNTESTED'), 'the untested safety flag is shown');
 ok(body1.includes('41.52gr Hodgdon H4350'),
    'the picker shows the charge and powder, so two loads of one bullet are distinguishable');
@@ -404,13 +425,65 @@ console.log('\nimport is its own button, and its own request');
   ok(onTargets.includes('does not push anything and is not a sync'),
      '...and says plainly that it is a read');
 
+  /* An earlier section quarantined B26H14-02X to pin the warning, and a
+   * quarantined batch is deliberately not offered for import -- you do not
+   * want it selectable as a load. So there is a second, good batch to find,
+   * and the quarantined one must NOT be in the list beside it.
+   *
+   * This was passing for the wrong reason until the mock learned to honour a
+   * `col=eq.value` filter: it was returning every row whatever was asked for,
+   * so the picker appeared to work while the request it actually sends was
+   * never tested. */
+  mock.seed('v_ballistic_profiles', {
+    id: 'p2', user_id: userId, batch_id: '99999999-8888-7777-6666-555555555533',
+    serial: 'B26H20-03K', load_name: '6.5CM / 140 Hybrid', cartridge: '6.5 Creedmoor',
+    bullet_name: 'Berger 140gr Hybrid', bullet_weight_gr: 140, bc_g7: 0.315,
+    powder_name: 'Hodgdon H4350', charge_gr: 41.5, primer_name: 'CCI BR-2',
+    coal_mean_in: 2.81, muzzle_velocity_fps: 2705, qty_remaining: 100, qty_loaded: 100,
+    loaded_on: '2026-08-02', quarantined: false, untested: true,
+    over_published_max: false, recipe_status: 'workup',
+  });
+
   const pushesBefore = JSON.stringify(mock.state.hits.push);
   const pullsBefore = { ...mock.state.hits.pull };
   await page.click('button:has-text("⇣ Import batches")');
   await page.waitForTimeout(700);
 
-  ok((await page.textContent('body')).includes('B26H14-02X'),
-     'the batch list comes back');
+  const picked = await page.textContent('body');
+  ok(picked.includes('B26H20-03K'), 'the batch list comes back');
+  ok(!picked.includes('B26H14-02X'),
+     '...without the quarantined batch, which is filtered server-side and not offered as a load');
+
+  /* The panel must be a SIBLING of the header, never a child of it. Dropped
+   * into the ammunition header -- a flex row -- it became a flex item, squeezed
+   * the two buttons into one-character-wide vertical slivers and pushed the
+   * page into horizontal scroll. Asserted structurally, because "it looks
+   * wrong" is not something a suite can see. */
+  const laidOut = await page.evaluate(() => {
+    const panel = document.querySelector('[data-bench-picker]');
+    if (!panel) return { found: false };
+    const flexParent = (() => {
+      let el = panel.parentElement;
+      while (el && el !== document.body) {
+        if (getComputedStyle(el).display === 'flex') return el;
+        el = el.parentElement;
+      }
+      return null;
+    })();
+    return {
+      found: true,
+      insideFlexRow: !!(flexParent && getComputedStyle(flexParent).flexDirection === 'row'),
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      panelWidth: Math.round(panel.getBoundingClientRect().width),
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+  ok(laidOut.found, 'the picker panel is in the document');
+  ok(!laidOut.insideFlexRow,
+     'and is NOT inside a flex row, where it would squash whatever shares it');
+  ok(laidOut.overflow <= 0, `no horizontal overflow (${laidOut.overflow}px)`);
+  ok(laidOut.panelWidth > laidOut.viewport * 0.5,
+     `the panel gets real width rather than a sliver (${laidOut.panelWidth} of ${laidOut.viewport})`);
   ok(JSON.stringify(mock.state.hits.push) === pushesBefore,
      'and NOTHING was pushed to get it');
   const pulled = Object.keys(mock.state.hits.pull)

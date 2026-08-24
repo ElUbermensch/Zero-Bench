@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 
 const MOA_PER_100YD = 1.0472;
 
@@ -711,6 +711,72 @@ function parseBackupText(text) {
   }
   const counts = `${(data.sessions||[]).length} sessions · ${(data.firearms||[]).length} firearms · ${(data.matches||[]).length} matches · ${(data.customTargets||[]).length} custom targets`;
   return { ok:true, data, found, counts };
+}
+
+/* ── Merging a snapshot into what is already here ─────────────────────────
+ *
+ * The file restore REPLACES, and says so in its confirm dialog. That is
+ * defensible for a file the user went and fetched deliberately. It is not
+ * defensible for a cloud restore, because the obvious way to use one is: log a
+ * range day on the phone with no signal, get home, tap Restore on the iPad,
+ * and lose the range day. So the cloud restore MERGES.
+ *
+ * The rule is additive, and deliberately the dumbest one that cannot destroy
+ * anything:
+ *
+ *   * a record in the snapshot whose id is not here      -> added
+ *   * a record whose id IS here                          -> the local copy stays
+ *   * a record here that the snapshot has never heard of -> untouched
+ *
+ * What that buys: no restore can ever lose local work, in any order, however
+ * many times it is run, however stale the snapshot.
+ *
+ * What it costs, stated plainly rather than papered over:
+ *
+ *   1. An EDIT made on the other device does not cross. Both copies have the
+ *      same id, so the local one wins and the edit is invisible here. Fixing
+ *      that honestly needs a per-record modification time on every write, which
+ *      firearms already have (they are the one record that syncs both ways) and
+ *      nothing else does yet.
+ *   2. A DELETE made on the other device does not cross either, and worse, a
+ *      record deleted HERE comes back if the snapshot still holds it. Fixing
+ *      that needs tombstones, which is the same piece of work as (1).
+ *
+ * Both are why "Replace everything from the cloud" exists beside this as an
+ * explicit, separately-confirmed choice. Merge is the safe default; replace is
+ * the one that makes two devices agree exactly, at the price of whatever is
+ * only on this one.
+ */
+function mergeById(localList, incomingList) {
+  const out = Array.isArray(localList) ? localList.slice() : [];
+  const have = new Set(out.filter(r => r && r.id).map(r => r.id));
+  let added = 0, skipped = 0;
+  for (const r of incomingList || []) {
+    if (!r || typeof r !== 'object' || !r.id) continue;
+    if (have.has(r.id)) { skipped++; continue; }
+    out.push(r); have.add(r.id); added++;
+  }
+  return { list: out, added, skipped };
+}
+
+/** Merge a parsed snapshot (parseBackupText's `data`) into the local model.
+ *  Returns only the collections the snapshot actually carried, so a partial
+ *  snapshot cannot blank a collection it says nothing about. */
+function mergeBackupData(local, incoming) {
+  const out = {}, stats = {};
+  for (const k of ['sessions', 'matches', 'customTargets', 'firearms', 'ammo']) {
+    if (!Array.isArray(incoming[k])) continue;
+    const m = mergeById(local[k], incoming[k]);
+    out[k] = m.list; stats[k] = m.added;
+  }
+  /* Not records but a list of ids: which built-in targets the user has hidden.
+   * The union is right — hidden on either device means hidden, and a target
+   * that comes back is a nuisance rather than data loss. */
+  if (Array.isArray(incoming.deletedBuiltins)) {
+    out.deletedBuiltins = [...new Set([...(local.deletedBuiltins || []),
+                                       ...incoming.deletedBuiltins])];
+  }
+  return { data: out, stats };
 }
 
 /* ── Match course-of-fire templates ──────────────────────────────────────
@@ -1977,6 +2043,112 @@ const ZeroCore = (() => {
       return { ok: true, data: await res.json() };
     }
 
+    /* ---------------------------------------------- whole-device backups */
+    /* A snapshot is NOT sync, and none of the machinery above applies to it.
+     *
+     * It does not go through the outbox. The outbox exists so a write made at
+     * a range with no signal still lands eventually, and it retries forever to
+     * make that true. A snapshot has the opposite requirement: it is eight
+     * megabytes, the user is watching a button, and a backup that "will happen
+     * later" is a backup they will believe they have and do not. So it is a
+     * direct request that either succeeds now or reports why not.
+     *
+     * It has no cursor, because there is nothing incremental about it. It has
+     * no conflict resolution, because two devices backing up to the same slot
+     * is the user overwriting their own copy, which is what a slot IS.
+     *
+     * The payload is opaque here on purpose. zero-core has no business knowing
+     * what a session or a brass lot looks like; each app hands over a string it
+     * knows how to read back, and gets the same string out. */
+    const BACKUP_MAX_BYTES = 8 * 1024 * 1024;
+
+    /** The row id for one slot, or null. Two round trips rather than an upsert
+     *  on a compound unique key: PostgREST can do the upsert, but only if the
+     *  client names the conflict target correctly, and getting that wrong
+     *  fails as a duplicate-key INSERT — a new backup silently not saved. The
+     *  extra request is a few hundred bytes against a payload of megabytes. */
+    async function backupRowId(app, slot) {
+      const q = `select=id&app=eq.${encodeURIComponent(app)}`
+              + `&slot=eq.${encodeURIComponent(slot)}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) return { ok: false, status: res.status, error: await res.text().catch(() => '') };
+      const rows = await res.json().catch(() => []);
+      return { ok: true, id: (rows && rows[0] && rows[0].id) || null };
+    }
+
+    /** Write one snapshot. `payload` is a string; anything else is stringified
+     *  here so a caller cannot accidentally send `[object Object]`. */
+    async function backupPut({ app, slot, payload, counts, deviceLabel, appBuild }) {
+      const u = getUser();
+      if (!u) return { ok: false, reason: 'not signed in' };
+      if (isAnonymous()) return { ok: false, reason: 'anonymous devices cannot back up' };
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+
+      /* Checked here as well as in the database. The server's constraint is
+       * the one that counts, but finding out by uploading eight megabytes over
+       * a phone connection and being refused is a bad way to learn it. */
+      const bytes = new TextEncoder().encode(body).length;
+      if (bytes > BACKUP_MAX_BYTES) {
+        return { ok: false, reason: 'too large', bytes, limit: BACKUP_MAX_BYTES };
+      }
+
+      const row = {
+        user_id: u.id,
+        app: app || cfg.appId || 'zero',
+        slot: slot || 'default',
+        payload: body,
+        counts: counts || {},
+        device_label: deviceLabel || null,
+        app_build: appBuild || null,
+      };
+
+      const found = await backupRowId(row.app, row.slot);
+      if (!found.ok) return { ok: false, reason: 'lookup failed', status: found.status };
+
+      let res;
+      if (found.id) {
+        /* PATCH, not an upsert: `created_at` should keep saying when this slot
+         * was first used, and an INSERT ... ON CONFLICT that omitted it would
+         * be fine while one that included it would quietly reset it. */
+        const { user_id, ...patch } = row;
+        res = await authed('/rest/v1/account_backups?id=eq.' + encodeURIComponent(found.id),
+          { method: 'PATCH', body: JSON.stringify(patch) });
+      } else {
+        res = await authed('/rest/v1/account_backups',
+          { method: 'POST', body: JSON.stringify([row]) });
+      }
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.SYNC_ERROR, { phase: 'backup', table: 'account_backups',
+                                  error: { status: res.status, body: error } });
+        return { ok: false, reason: 'refused', status: res.status, error };
+      }
+      return { ok: true, bytes, slot: row.slot, app: row.app };
+    }
+
+    /** What snapshots exist, WITHOUT their payloads. The restore screen can
+     *  then say what is up there and how big it is before anyone commits to
+     *  downloading it on a phone plan. */
+    async function backupList(app) {
+      const q = 'select=*&order=updated_at.desc'
+              + (app ? `&app=eq.${encodeURIComponent(app)}` : '');
+      return selectView('v_account_backups', q);
+    }
+
+    /** One snapshot, payload and all. */
+    async function backupGet({ app, slot }) {
+      const q = `select=*&app=eq.${encodeURIComponent(app || cfg.appId || 'zero')}`
+              + `&slot=eq.${encodeURIComponent(slot || 'default')}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        return { ok: false, status: res.status, error };
+      }
+      const rows = await res.json().catch(() => []);
+      if (!rows || !rows.length) return { ok: true, found: false, row: null };
+      return { ok: true, found: true, row: rows[0] };
+    }
+
     /** Claim (or change) the public handle. Keyed by the user id, so it is
      *  naturally one-per-account and an upsert renames rather than duplicates.
      *  Server enforces shape and case-insensitive uniqueness. */
@@ -2329,6 +2501,7 @@ const ZeroCore = (() => {
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
+      backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
@@ -2630,8 +2803,14 @@ function BatchFacts({ a }) {
  * session (via the returned array) so every later push upserts the same rows
  * instead of duplicating them. Sessions with <2 record shots are skipped —
  * the schema requires shot_count >= 2 for a group. */
-function zeroSyncOutbound(core, sessions, ammo, getTarget) {
+function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
   const linked = new Map(ammo.filter(a => a.batchId).map(a => [a.id, a]));
+  /* Firearms are keyed by their LOCAL id here because that is what a session
+   * stores, and by remote id on the far side. A rifle that has never synced
+   * has no remote id yet, which is why firearms are pushed before sessions
+   * are built — see doSync. */
+  const gunRemote = new Map((firearms || [])
+    .filter(f => f && f.remoteId).map(f => [f.id, f.remoteId]));
   let changed = false, queued = 0;
   const updated = sessions.map(s => {
     const a = s.ammoId ? linked.get(s.ammoId) : null;
@@ -2650,9 +2829,21 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget) {
     core.upsert('range_sessions', {
       id: s2.remoteId,
       batch_id: a.batchId,
+      /* Which rifle burned the rounds. Bench needs it to attribute wear to a
+       * barrel and to a brass lot; without it a session arrives in Bench
+       * unattributed and the batch is the only thing that moves. Null when the
+       * rifle was never named or has not synced yet — a wrong attribution is
+       * worse than a missing one. */
+      firearm_id: (s2.rifleId && gunRemote.get(s2.rifleId)) || null,
       occurred_on: s2.date || null,
       location: s2.rangeLocation || null,
-      rounds_fired: stats.n,
+      /* Rounds CONSUMED, which is every shot logged — sighters and foulers
+       * included. `stats.n` counts record shots only; sending that made a
+       * 12-round string decrement the batch by 10, and it is also the number
+       * Zero's own barrel-life counter uses, so the two apps disagreed about
+       * the same rifle. The group's shot_count below is still the record
+       * count, because that is what the group was measured from. */
+      rounds_fired: (s2.shots || []).length || stats.n,
       temp_f: (s2.temp !== '' && s2.temp != null && Number.isFinite(+s2.temp)) ? +s2.temp : null,
       source_app: 'zero',
       notes: [s2.name, s2.position, s2.fireMode].filter(Boolean).join(' · ') || null,
@@ -3680,15 +3871,19 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
     if (!core || !core.isSignedIn()) return;
     setBusy(true); setMsg(null);
     try {
-      // Assign + PERSIST remote ids before the network runs: if they were not
-      // saved first, a retry would mint fresh UUIDs and duplicate every row.
-      const out = zeroSyncOutbound(core, sessions, ammo, getTarget);
-      if (out.changed) await onSessionsUpdated(out.updated);
-      /* Firearms go up too, and their remote ids are persisted before the
-         network for the same reason sessions' are: a retry that minted fresh
-         ids would duplicate every rifle on the server. */
+      /* Firearms first, and not for queue order — zero-core's table order
+         already guarantees a firearm reaches the server before a session that
+         references it. It is that a session carries `firearm_id`, and a rifle
+         entered on this device has no remote id until this call mints one. Run
+         the other way round, as this did, and the first sync after adding a
+         rifle sends every session unattributed.
+
+         Remote ids are persisted before the network runs: if they were not
+         saved first, a retry would mint fresh UUIDs and duplicate every row. */
       const guns = zeroFirearmsOutbound(core, firearms || []);
       if (guns.changed) await onFirearmsUpdated(guns.updated);
+      const out = zeroSyncOutbound(core, sessions, ammo, getTarget, guns.updated);
+      if (out.changed) await onSessionsUpdated(out.updated);
 
       /* An apply handler is what makes the pull real. Without one zero-core
          deliberately leaves the cursor where it is, so a sync downloaded rows,
@@ -4130,6 +4325,20 @@ export default function App() {
     reader.readAsText(file);
   };
 
+  /* The live model, and the two ways a cloud snapshot can come back into it.
+   * Applying is per collection and only for the collections the snapshot
+   * actually carried: a snapshot written by an older build that had no ammo
+   * must not blank the ammo. */
+  const localData = { sessions, matches, customTargets, deletedBuiltins, firearms, ammo };
+  const applyRestored = (d) => {
+    if (d.sessions) saveSessions(d.sessions);
+    if (d.matches) saveMatches(d.matches);
+    if (d.customTargets) saveCustomTargets(d.customTargets);
+    if (d.deletedBuiltins) saveDeletedBuiltins(d.deletedBuiltins);
+    if (d.firearms) saveFirearms(d.firearms);
+    if (d.ammo) saveAmmo(d.ammo);
+  };
+
   const getTarget = id => {
     if (!allTargets.length) return BUILTIN_TARGETS[0]; // ultimate fallback
     return allTargets.find(t=>t.id===id) || allTargets[0];
@@ -4251,8 +4460,10 @@ export default function App() {
                 onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
                 firearms={firearms} onFirearmsUpdated={saveFirearms}
                 onGoToAmmo={()=>setTab('targets')} />
+              <CloudBackupCard core={core} data={localData}
+                onMerge={applyRestored} onReplace={applyRestored} />
               <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
-                <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup</div>
+                <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup · file</div>
                 <div style={{display:'flex',gap:8}}>
                   <button className="badd" style={{flex:1}} onClick={exportBackup}>⤓ Export</button>
                   <button className="badd" style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}} onClick={()=>importRef.current?.click()}>⤒ Restore</button>
@@ -4288,7 +4499,11 @@ export default function App() {
                   live. Importing loads from Bench is one read of one view and
                   has no business being reachable only by pressing "Sync now",
                   which pushes everything and pulls seventeen tables. */}
-              <BenchImport core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
+              <div style={{margin:'0 13px'}}>
+                <CloudBackupCard core={core} data={localData} compact
+                  onMerge={applyRestored} onReplace={applyRestored} />
+              </div>
+              <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
               <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />
             </>
           )}
@@ -8548,15 +8763,28 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
  * `compact` renders the small chip pair for a header; otherwise it renders as
  * a card with its own heading, for a menu screen.
  */
-function BenchImport({ core, ammo, onSaveAmmo, compact }) {
+/* A HOOK, not a component, and that is the whole point.
+ *
+ * The first cut of this returned a fragment holding both the chips and the
+ * picker panel. Dropped into the ammunition header -- which is a flex row --
+ * the panel became a flex ITEM: it sat beside the buttons, squeezed "⟳" and
+ * "⇣ Bench" into vertical slivers one character wide, and pushed the whole
+ * page into horizontal scroll. The picker had always lived below the header
+ * before, and moving it was not a decision, it was a side effect of pulling
+ * the component out.
+ *
+ * One state, two render sites. The caller puts `chips` wherever the buttons
+ * belong and `panel` wherever a full-width card belongs, and nothing about
+ * where they go is decided in here.
+ */
+function useBenchImport({ core, ammo, onSaveAmmo }) {
   const [pickOpen, setPickOpen] = useState(false);
   const [profiles, setProfiles] = useState(null);   // null=loading, []=empty, [rows]
   const [pickErr, setPickErr] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshed, setRefreshed] = useState(null);
   const linkedCount = ammo.filter(a => a.batchId).length;
-
-  if (!core || !core.isSignedIn()) return null;
+  const available = !!(core && core.isSignedIn());
 
   async function openPicker() {
     setPickOpen(true); setProfiles(null); setPickErr(null);
@@ -8631,53 +8859,272 @@ function BenchImport({ core, ammo, onSaveAmmo, compact }) {
     </div>
   );
 
-  if (compact) {
+  /* Buttons only. Whatever the caller's header is doing with flex, a row of
+   * two small buttons behaves in it; a full-width card does not. */
+  const chips = !available ? null : (
+    <div style={{display:'flex',gap:6}}>
+      {linkedCount > 0 && (
+        <button className="badd" onClick={refreshNow} disabled={refreshing}
+          title="Re-read every linked batch from Bench"
+          style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1,whiteSpace:'nowrap'}}>
+          {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
+      )}
+      <button className="badd" onClick={openPicker}
+        style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',whiteSpace:'nowrap'}}>⇣ Bench</button>
+    </div>
+  );
+
+  const card = !available ? null : (
+    <div className="tcard" style={{padding:'11px 13px'}}>
+      <div className="lbl">Loads from Bench</div>
+      <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
+        Reads the batches loaded in Bench and brings the ones you pick across with
+        bullet, powder, charge, COAL and their safety state. This is a read of one
+        view — it does not push anything and is not a sync.
+        {linkedCount ? ` ${linkedCount} load${linkedCount===1?'':'s'} linked so far.` : ''}
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="badd" style={{flex:1}} onClick={openPicker}>⇣ Import batches</button>
+        {linkedCount > 0 && (
+          <button className="badd" onClick={refreshNow} disabled={refreshing}
+            style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',opacity:refreshing?0.5:1}}>
+            {refreshing ? 'reading…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳ Refresh linked'}</button>
+        )}
+      </div>
+    </div>
+  );
+
+  return { available, chips, card, panel: available ? list : null, linkedCount };
+}
+
+/* The stacked form of the importer, for a screen that has room for a card.
+ * Both nodes are siblings here, so neither can end up inside the other's
+ * layout. */
+function BenchImportCard(props) {
+  const bench = useBenchImport(props);
+  if (!bench.available) return null;
+  return <>{bench.card}{bench.panel}</>;
+}
+
+/* ── The whole log, kept somewhere the other phone can reach ───────────────
+ *
+ * This replaces "export a file and carry it across", which on a home-screen
+ * PWA on iOS was never reliably possible: `<a download>` is not honoured, so
+ * the file either never appeared or opened in place with no way to keep it.
+ * The share sheet fixed the export; it did not fix the import, because the
+ * second device still had to be handed the file somehow.
+ *
+ * One row per account holds the snapshot. It is NOT the per-record sync: that
+ * covers the four records Bench also understands, and always will, because a
+ * table Bench cannot read is a table nobody maintains. Targets, matches, dope
+ * and drills have no Bench equivalent and travel here instead.
+ */
+function CloudBackupCard({ core, data, onMerge, onReplace, compact }) {
+  const [rows, setRows] = useState(null);      // null = not looked yet
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const signedIn = !!(core && core.isSignedIn && core.isSignedIn());
+
+  const refresh = useCallback(async () => {
+    if (!signedIn) return;
+    try {
+      const r = await core.backupList('zero');
+      setRows(r.ok ? r.data : []);
+      /* A 404 here means the table is not there yet: the migration has not
+       * been applied to this project. Saying "backup failed" would send the
+       * user looking at their phone, which is the wrong place entirely. */
+      if (!r.ok && r.status === 404) {
+        setMsg({ kind: 'err', text: 'Cloud backup is not set up on this account yet '
+                                  + '(migration 0010 has not been applied).' });
+      }
+    } catch (e) { setRows([]); }
+  }, [core, signedIn]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const snapshot = () => JSON.stringify({
+    schema: 'zero-backup', version: 1, exportedAt: new Date().toISOString(),
+    data: {
+      sessions_v1: data.sessions, matches_v1: data.matches,
+      custom_targets_v1: data.customTargets, deleted_builtins_v1: data.deletedBuiltins,
+      rifles_v1: data.firearms, ammo_v1: data.ammo,
+    },
+  });
+
+  async function backUp() {
+    setBusy(true); setMsg(null);
+    try {
+      const payload = snapshot();
+      const r = await core.backupPut({
+        app: 'zero', slot: 'default', payload,
+        counts: { sessions: (data.sessions || []).length,
+                  firearms: (data.firearms || []).length,
+                  matches: (data.matches || []).length,
+                  targets: (data.customTargets || []).length,
+                  ammo: (data.ammo || []).length },
+        deviceLabel: deviceLabel(),
+        appBuild: (typeof window !== 'undefined' && window.__BUILD__) || null,
+      });
+      if (r.ok) {
+        setMsg({ kind: 'ok', text: `Backed up — ${(data.sessions || []).length} sessions, `
+                                 + `${fmtBytes(r.bytes)}.` });
+        await refresh();
+      } else if (r.reason === 'too large') {
+        setMsg({ kind: 'err', text: `Too large to back up (${fmtBytes(r.bytes)}, limit `
+                                  + `${fmtBytes(r.limit)}). Delete old sessions or export a file instead.` });
+      } else {
+        setMsg({ kind: 'err', text: 'Backup failed: ' + (r.reason || 'unknown')
+                                  + (r.status ? ` (${r.status})` : '') });
+      }
+    } catch (e) { setMsg({ kind: 'err', text: 'Backup failed: ' + (e?.message || e) }); }
+    setBusy(false);
+  }
+
+  async function pull(mode) {
+    setBusy(true); setMsg(null);
+    try {
+      const got = await core.backupGet({ app: 'zero', slot: 'default' });
+      if (!got.ok) { setMsg({ kind: 'err', text: 'Could not read the backup'
+                              + (got.status ? ` (${got.status})` : '') }); setBusy(false); return; }
+      if (!got.found) { setMsg({ kind: 'err', text: 'Nothing backed up on this account yet.' });
+                        setBusy(false); return; }
+      const parsed = parseBackupText(got.row.payload);
+      if (!parsed.ok) { setMsg({ kind: 'err', text: 'Backup unreadable: ' + parsed.error });
+                        setBusy(false); return; }
+
+      if (mode === 'replace') {
+        /* Two confirms, and the second one names what goes. A restore that
+         * replaces is the only button in this app that can destroy a season of
+         * data, and it should feel like it. */
+        if (!window.confirm('Replace EVERYTHING on this device with the cloud backup?'
+            + `\n\nThis device currently holds ${(data.sessions || []).length} sessions.`
+            + `\nThe backup holds ${(parsed.data.sessions || []).length}.`
+            + '\n\nAnything only on this device is lost.')) { setBusy(false); return; }
+        if (!window.confirm('Last chance — this cannot be undone.')) { setBusy(false); return; }
+        onReplace(parsed.data);
+        setMsg({ kind: 'ok', text: 'Replaced from the cloud: ' + parsed.counts });
+      } else {
+        const { data: merged, stats } = mergeBackupData(data, parsed.data);
+        const added = Object.entries(stats).filter(([, n]) => n > 0)
+          .map(([k, n]) => `${n} ${k}`).join(', ');
+        onMerge(merged);
+        setMsg({ kind: 'ok', text: added
+          ? 'Merged from the cloud: ' + added + ' added.'
+          : 'Already up to date — nothing in the backup that is not already here.' });
+      }
+    } catch (e) { setMsg({ kind: 'err', text: 'Restore failed: ' + (e?.message || e) }); }
+    setBusy(false);
+  }
+
+  const card = { margin: compact ? '0 0 12px' : '20px 13px 8px', background: 'var(--surf)',
+                 border: '1px solid var(--bdr)', borderRadius: 9, padding: '11px 13px' };
+  const lbl = { fontFamily:'var(--fm)', fontSize:9, color:'var(--dim)',
+                letterSpacing:'.1em', textTransform:'uppercase', marginBottom:8 };
+  const note = { fontFamily:'var(--fm)', fontSize:8, color:'var(--dim)', lineHeight:1.5, marginTop:8 };
+
+  if (!core) return null;
+  if (!signedIn) {
     return (
-      <>
-        <div style={{display:'flex',gap:6}}>
-          {linkedCount > 0 && (
-            <button className="badd" onClick={refreshNow} disabled={refreshing}
-              title="Re-read every linked batch from Bench"
-              style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1}}>
-              {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
-          )}
-          <button className="badd" onClick={openPicker}
-            style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ Bench</button>
+      <div style={card}>
+        <div style={lbl}>Cloud backup</div>
+        <div style={{ ...note, marginTop: 0 }}>
+          Sign in above to keep a copy of everything — sessions, firearms, targets,
+          matches and loads — on your account, and pull it onto another device.
         </div>
-        {list}
-      </>
+      </div>
     );
   }
 
+  const mine = (rows || []).find(r => r.slot === 'default') || null;
+
   return (
-    <>
-      <div className="tcard" style={{padding:'11px 13px'}}>
-        <div className="lbl">Loads from Bench</div>
-        <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
-          Reads the batches loaded in Bench and brings the ones you pick across with
-          bullet, powder, charge, COAL and their safety state. This is a read of one
-          view — it does not push anything and is not a sync.
-          {linkedCount ? ` ${linkedCount} load${linkedCount===1?'':'s'} linked so far.` : ''}
-        </div>
-        <div style={{display:'flex',gap:8}}>
-          <button className="badd" style={{flex:1}} onClick={openPicker}>⇣ Import batches</button>
-          {linkedCount > 0 && (
-            <button className="badd" onClick={refreshNow} disabled={refreshing}
-              style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',opacity:refreshing?0.5:1}}>
-              {refreshing ? 'reading…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳ Refresh linked'}</button>
-          )}
-        </div>
+    <div style={card}>
+      <div style={lbl}>Cloud backup</div>
+      <div style={{ display:'flex', gap:8 }}>
+        <button className="badd" style={{ flex:1 }} disabled={busy} onClick={backUp}>
+          {busy ? '…' : '⤒ Back up now'}
+        </button>
+        <button className="badd" disabled={busy || !mine}
+          style={{ flex:1, background:'none', border:'1px solid var(--bdr)',
+                   color: mine ? 'var(--ink)' : 'var(--dim)' }}
+          onClick={() => pull('merge')}>⤓ Restore</button>
       </div>
-      {list}
-    </>
+
+      <div style={{ ...note }}>
+        {mine
+          ? <>Last backed up {fmtWhen(mine.updated_at)}
+              {mine.device_label ? ` from ${mine.device_label}` : ''} · {fmtCounts(mine.counts)} · {fmtBytes(mine.bytes)}</>
+          : <>Nothing backed up yet on this account.</>}
+      </div>
+
+      <div style={note}>
+        Restore <strong>adds</strong> anything the backup has that this device does not.
+        It never deletes or overwrites what is already here, so restoring after a
+        range day cannot lose the range day. Edits made on the other device do not
+        cross — for that, and to make two devices match exactly, use replace.
+      </div>
+
+      {mine && (
+        <button className="badd" disabled={busy}
+          style={{ width:'100%', marginTop:8, background:'none',
+                   border:'1px solid var(--red)', color:'var(--red)' }}
+          onClick={() => pull('replace')}>Replace everything from the cloud</button>
+      )}
+
+      {msg && (
+        <div style={{ ...note, color: msg.kind === 'err' ? 'var(--red)' : 'var(--green)' }}>
+          {msg.text}
+        </div>
+      )}
+    </div>
   );
+}
+
+const fmtBytes = (n) => (!Number.isFinite(+n) ? '—'
+  : +n < 1024 ? `${+n} B`
+  : +n < 1024 * 1024 ? `${(+n / 1024).toFixed(0)} KB`
+  : `${(+n / 1048576).toFixed(1)} MB`);
+
+const fmtCounts = (c) => {
+  if (!c || typeof c !== 'object') return 'contents unknown';
+  const parts = ['sessions', 'firearms', 'matches', 'targets', 'ammo']
+    .filter(k => +c[k] > 0).map(k => `${c[k]} ${k}`);
+  return parts.length ? parts.join(' · ') : 'empty';
+};
+
+const fmtWhen = (iso) => {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'at an unknown time';
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)} h ago`;
+  return new Date(t).toLocaleDateString();
+};
+
+/* Enough to tell two devices apart on the restore screen, and nothing that
+ * identifies a person. The user agent is the only thing available without a
+ * permission prompt, and "iPhone" is exactly the amount of it that helps. */
+function deviceLabel() {
+  const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  if (/iPad/.test(ua)) return 'iPad';
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/Android/.test(ua)) return 'Android';
+  if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows';
+  return 'this device';
 }
 
 function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) {
   const [form, setForm] = useState(null); // null | {id?, name, rifleId, bullet, powder, charge, oal, notes}
   const [confirmDel, setConfirmDel] = useState(null);
-  /* The Bench importer is its own component now -- it is a read of one view,
-   * not part of managing loads, and it is wanted in more than one place. */
+  /* The Bench importer is its own thing now -- a read of one view, not part of
+   * managing loads, and wanted in more than one place. The hook hands back the
+   * buttons and the panel separately so the panel never ends up inside this
+   * screen's header flex row, which is exactly what squashed the buttons into
+   * vertical slivers the first time. */
+  const bench = useBenchImport({ core, ammo, onSaveAmmo });
   const linkedCount = ammo.filter(a => a.batchId).length;
   const blank = { name:'', rifleId:'', bullet:'', powder:'', charge:'', oal:'', notes:'' };
   const fname = id => firearms.find(f=>f.id===id)?.name || '';
@@ -8701,17 +9148,15 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
         <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.14em',textTransform:'uppercase'}}>Ammunition</div>
         {!form && (
           <div style={{display:'flex',gap:6}}>
-            <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} compact />
+            {bench.chips}
             <button className="badd" onClick={()=>setForm({...blank})} style={{fontSize:11,padding:'5px 11px'}}>+ load</button>
           </div>
         )}
       </div>
 
-      {/* The first-run card and the picker itself both live in BenchImport,
-          which is rendered from the header above and from Targets+. */}
-      {!form && core && core.isSignedIn() && linkedCount === 0 && (
-        <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} />
-      )}
+      {/* Below the header, never inside it. */}
+      {!form && bench.panel}
+      {!form && linkedCount === 0 && !bench.panel && bench.card}
 
       {form && (
         <div className="tcard" style={{padding:'11px 13px'}}>

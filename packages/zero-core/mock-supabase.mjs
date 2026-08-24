@@ -324,6 +324,14 @@ export function startMock(opts = {}) {
           // RLS: another account's row is invisible, not forbidden. PostgREST
           // answers a filter matching nothing with 204 and no rows changed.
           if (!row || row.user_id !== a.userId) return json(res, 204, null);
+          // The size ceiling is a table constraint, so it applies to an UPDATE
+          // exactly as it does to an INSERT -- and the update is the common
+          // path, since a slot is written over and over.
+          if (t === 'account_backups' && payload && payload.payload !== undefined
+              && Buffer.byteLength(String(payload.payload || ''), 'utf8') > 8388608) {
+            return json(res, 400, { code: '23514',
+              message: 'new row violates check constraint "account_backups_payload_check"' });
+          }
           Object.assign(row, payload, { updated_at: stamp() });
           return json(res, 204, null);
         }
@@ -354,11 +362,35 @@ export function startMock(opts = {}) {
             return json(res, 200, rows2.slice(offset, offset + limit));
           }
 
+          /* Every other `col=eq.value` in the query string. The pull only ever
+           * filters on updated_at, so this used to be all the mock knew --
+           * which meant a request for ONE backup slot was answered with every
+           * row in the table and the client appeared to work while asking for
+           * something the real server would have narrowed. */
+          const eqs = [];
+          for (const [k, v] of u.searchParams) {
+            if (k === 'updated_at' || k === 'select' || k === 'limit' ||
+                k === 'offset' || k === 'order' || k === 'on_conflict') continue;
+            if (v.startsWith('eq.')) eqs.push([k, v.slice(3)]);
+          }
+
+
           const isPublic = state.publicTables.has(t);
           let rows = [...table(t).values()]
             .filter(r => isPublic || r.user_id === a.userId)   // RLS stand-in
             .filter(r => !gt || r.updated_at > gt)
+            .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
             .sort((x, y) => (x.updated_at < y.updated_at ? -1 : 1));
+          /* A view over a table, not a second store: `bytes` is derived and
+           * `payload` is absent, which is the whole reason the view exists. */
+          if (t === 'v_account_backups') {
+            rows = [...table('account_backups').values()]
+              .filter(r => r.user_id === a.userId)
+              .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
+              .map(({ payload, ...rest }) => ({ ...rest,
+                bytes: Buffer.byteLength(String(payload || ''), 'utf8') }))
+              .sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
+          }
           return json(res, 200, rows.slice(offset, offset + limit));
         }
 
@@ -435,6 +467,29 @@ export function startMock(opts = {}) {
                 return json(res, 403, { code: '42501', message: 'not a participant' });
               }
             }
+            /* account_backups is the one table with a size ceiling and a
+             * compound unique key, and both are the point of it. A mock that
+             * accepted an oversized payload would let a client ship a backup
+             * button that fails only on a real phone with real data, and one
+             * that ignored the unique key would let a second backup stack a
+             * second eight-megabyte row where the schema allows exactly one. */
+            if (t === 'account_backups') {
+              if (state.anonUsers.has(a.userId)) {
+                return json(res, 403, { code: '42501',
+                  message: 'RLS: anonymous devices cannot back up' });
+              }
+              if (Buffer.byteLength(String(row.payload || ''), 'utf8') > 8388608) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "account_backups_payload_check"' });
+              }
+              const clash = [...table(t).values()].find(x => x.user_id === a.userId
+                && x.app === row.app && x.slot === row.slot && x.id !== row.id);
+              if (clash) {
+                return json(res, 409, { code: '23505',
+                  message: 'duplicate key value violates unique constraint '
+                           + '"account_backups_user_id_app_slot_key"' });
+              }
+            }
             if (fk && row[fk[0]]) {
               const parent = table(fk[1]).get(row[fk[0]]);
               if (!parent) {
@@ -444,6 +499,9 @@ export function startMock(opts = {}) {
                 });
               }
             }
+            /* The server defaults this column; a client that has never backed
+             * up before does not know an id to send. */
+            if (!row.id && t === 'account_backups') row.id = randomUUID();
             if (!row.id && (t === 'relay_shots' || t === 'relay_messages')) {
               const key = t === 'relay_shots'
                 ? [...table(t).values()].find(x => x.relay_id === row.relay_id

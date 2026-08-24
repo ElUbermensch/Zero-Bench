@@ -232,6 +232,203 @@ section('a delete stays deleted');
   ok((await benchDb()).firearms.length === before - 1, 'and it does not come back on the next sync');
 }
 
+/* ============================================ Zero shoots it, Bench counts it */
+/* The other direction of the same account, and the one the user reported
+ * missing: Bench loads the ammunition, Zero records what happened to it, and
+ * Bench never heard about it. A batch that was shot up still read as full,
+ * every barrel-wear figure in Bench was blind to the rounds Zero logged, and
+ * the group -- the only thing that says whether the load is any good -- lived
+ * in an app that cannot see the recipe that produced it. */
+section('rounds fired in Zero come back to the bench');
+{
+  /* A minimal but real bench: the batch has to descend from a recipe and its
+   * lots, because that is the chain the push walks and a batch invented
+   * without one would test a row the app cannot produce. */
+  await bench.evaluate(() => {
+    const ca = (DB.cartridges.find(c => c.name === '6.5 Creedmoor') || {}).id;
+    DB.componentLots = [
+      { id: 'cl1', serial: 'C-1', kind: 'bullet', name: 'Berger 140gr Hybrid', lot: 'BG-0326',
+        qty: 500, unit: 'ea', cost: 289, weightGr: 140, bcG7: 0.311 },
+      { id: 'cl2', serial: 'C-2', kind: 'powder', name: 'Hodgdon H4350', lot: 'H-1177',
+        qty: 8, unit: 'lb', cost: 311.2 },
+      { id: 'cl3', serial: 'C-3', kind: 'primer', name: 'Fed GM210M', lot: 'GM-K3',
+        qty: 1000, unit: 'ea', cost: 119.99 },
+    ];
+    DB.recipes = [{ id: 'r1', name: '6.5CM / 140 / H4350', cartridge: ca,
+      bullet: 'Berger 140gr Hybrid', powder: 'Hodgdon H4350', primer: 'Fed GM210M',
+      charge: 41.5, coal: 2.81, source: 'Hodgdon 2024', sourceMax: 43 }];
+    DB.batches = [{ id: 'ba1', serial: 'B26H01-01F', recipe: 'r1', bulletLot: 'cl1',
+      powderLot: 'cl2', primerLot: 'cl3', date: '2026-08-01', qty: 100 }];
+    DB.sessions = [];
+    save();
+  });
+  later();
+  await benchSync();
+  const batch = await bench.evaluate(() => {
+    const b = DB.batches[0];
+    return { remote: b.remote, serial: b.serial, left: roundsLeft(b) };
+  });
+  ok(!!batch.remote && batch.left === 100, 'the batch is on the server and nothing is fired yet');
+
+  /* Zero's side, seeded the way its own suite seeds it: a NEW rifle, a load
+   * linked to that batch, and one string shot with it -- twelve rounds down
+   * the barrel, ten of them scored. The two numbers differ on purpose.
+   *
+   * The rifle is new here deliberately. A session carries `firearm_id`, and a
+   * rifle entered on this device has no remote id until the push mints one, so
+   * a sync that built its sessions before its firearms sent this session
+   * unattributed. Everything below happens in ONE sync for that reason. */
+  const gunId = 'r2';
+  await zero.evaluate(({ batchId, gunId }) => {
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: gunId, name: 'Bergara B14 HMR', caliber: '6.5 Creedmoor',
+      barrelLife: 2200, roundsAtStart: 0, ts: 2,
+    }]));
+    const shot = (i, x) => ({ id: 'x' + i, ring: '10', clockH: 12, clockM: 0,
+      xy: { x, y: 0 }, elev: 0, wind: 0, isSighter: i > 10 });
+    const shots = [];
+    for (let i = 1; i <= 10; i++) shots.push(shot(i, i === 10 ? 0.42 : 0));
+    shots.push(shot(11, 0), shot(12, 0));            // two sighters, not scored
+    localStorage.setItem('ammo_v1', JSON.stringify([{ id: 'am1', name: 'Linked load',
+      bullet: 'Berger 140', batchId, batchSerial: 'B26H01-01F', ts: 1 }]));
+    localStorage.setItem('sessions_v1', JSON.stringify([{ id: 's1', name: 'load workup',
+      date: '2026-08-13', type: 'Score', targetId: 'any', rangeYards: 100,
+      rangeLocation: 'home range', rifleId: gunId || '', ammoId: 'am1', temp: '72',
+      ts: 1, matchId: null, shots }]));
+  }, { batchId: batch.remote, gunId });
+  await zero.reload();
+  await zero.waitForTimeout(700);
+  later();
+  await zeroSync();
+
+  const srv = [...(mock.state.rows.get('range_sessions')?.values() || [])];
+  ok(srv.length === 1, `Zero pushed the session (${srv.length} row)`);
+  const s0 = srv[0] || {};
+  ok(s0.batch_id === batch.remote, 'attributed to the batch that loaded the ammunition');
+  const gunRow = firearmRows().find(f => f.name === 'Bergara B14 HMR');
+  ok(!!gunRow && s0.firearm_id === gunRow.id,
+     '...and to the rifle, in the same sync that first pushed that rifle');
+  /* The bug this pins: `rounds_fired` used to carry the RECORD shot count, so
+   * a twelve-round string drew ten rounds out of the batch and Zero's own
+   * barrel counter -- which counts every shot -- disagreed with the server
+   * about the same rifle. */
+  ok(s0.rounds_fired === 12,
+     `every round consumed is reported, sighters included (${s0.rounds_fired})`);
+  const g0 = [...(mock.state.rows.get('groups')?.values() || [])][0] || {};
+  ok(g0.shot_count === 10, '...while the group is still measured over the ten scored shots');
+  ok(g0.distance_yd === 100 && Math.abs((g0.group_es_in || 0) - 0.42) < 0.01,
+     'the group goes up in inches at the distance it was shot');
+
+  later();
+  await benchSync();
+  const after = await bench.evaluate(() => {
+    const b = DB.batches[0];
+    const s = (DB.sessions || []).find(x => x.batch === b.id) || null;
+    return {
+      n: (DB.sessions || []).length, left: roundsLeft(b),
+      session: s && { rounds: s.rounds, distance: s.distance, group: s.group,
+                      date: s.date, firearm: (DB.firearms.find(f => f.id === s.firearm) || {}).name || null },
+    };
+  });
+  ok(after.n === 1, 'the session arrives in Bench without being typed again');
+  ok(after.session && after.session.rounds === 12,
+     `...carrying the rounds it burned (${after.session && after.session.rounds})`);
+  ok(after.left === 88, `so the batch reports what is actually left (${after.left} of 100)`);
+  ok(after.session && after.session.distance === 100 && Math.abs((after.session.group || 0) - 0.42) < 0.01,
+     'the group and its distance arrive too — what the load actually did');
+  ok(after.session && /Bergara/.test(after.session.firearm || ''),
+     'and it is attributed to the rifle, not to nobody — in the same sync that first pushed that rifle');
+
+  /* Bench must not now push Zero's session back up through its own narrower
+   * mapping: Bench has no shot string and no group in inches to send, so a
+   * re-push would overwrite both with nulls on the next pull. */
+  later();
+  await benchSync();
+  const back = [...(mock.state.rows.get('groups')?.values() || [])][0] || {};
+  const s1 = [...(mock.state.rows.get('range_sessions')?.values() || [])][0] || {};
+  ok([...(mock.state.rows.get('range_sessions')?.values() || [])].length === 1,
+     'a second Bench sync does not duplicate the session');
+  ok(s1.rounds_fired === 12 && Math.abs((back.group_es_in || 0) - 0.42) < 0.01,
+     '...nor flatten what Zero recorded — Bench leaves rows it did not author alone');
+}
+
+/* ================================================ a second device, same account */
+/* The reported failure, in the user's words: "the multi device signed into the
+ * same email and restoring data is not working."
+ *
+ * It was not working because there was nothing to restore FROM. Only four
+ * record types sync -- the ones Bench also understands -- and everything else
+ * (targets, matches, and the sessions' own shot strings on a device with no
+ * linked load) lived in one browser and left it only as a JSON file the user
+ * had to carry across by hand. On a home-screen PWA on iOS that file mostly
+ * could not be produced, let alone carried.
+ *
+ * The second device here is the same page with its local data wiped and its
+ * session kept, which is exactly what a fresh install signed into the same
+ * account looks like. */
+section('a second device, same account');
+{
+  await zero.click('button:has-text("⤒ Back up now")');
+  await zero.waitForTimeout(700);
+  const bodyAfterUp = await zero.textContent('body');
+  ok(/Backed up/.test(bodyAfterUp), 'Zero backs the whole log up in one tap');
+
+  const stored = [...(mock.state.rows.get('account_backups')?.values() || [])];
+  ok(stored.length === 1, `one row holds it (${stored.length})`);
+  ok(stored[0] && stored[0].app === 'zero' && stored[0].slot === 'default',
+     '...keyed by app and slot, so Bench cannot overwrite it and a second backup replaces it');
+  const snap = JSON.parse(stored[0].payload || '{}');
+  ok((snap.data?.sessions_v1 || []).length === 1 && (snap.data?.rifles_v1 || []).length === 1,
+     'the snapshot carries the sessions and the rifles');
+  ok(Array.isArray(snap.data?.custom_targets_v1) && Array.isArray(snap.data?.matches_v1),
+     '...and the collections the per-record sync deliberately does not cover');
+
+  /* The second device. Session kept, everything else gone -- and one session
+   * logged HERE that the backup has never heard of, because that is the case a
+   * restore must not destroy: a range day logged offline on the phone. */
+  await zero.evaluate(() => {
+    const session = localStorage.getItem('zerocore.session');
+    localStorage.clear();
+    if (session) localStorage.setItem('zerocore.session', session);
+    localStorage.setItem('sessions_v1', JSON.stringify([{ id: 'local-only',
+      name: 'logged on this device', date: '2026-08-20', type: 'Practice',
+      targetId: 'any', rangeYards: 200, rifleId: '', ammoId: '', ts: 9, shots: [] }]));
+  });
+  await zero.reload();
+  await zero.waitForTimeout(900);
+  ok((await zero.textContent('body')).includes('both@example.com'),
+     'the second device is signed in to the same account');
+  ok((await zeroFirearms()).length === 0, '...and starts with none of the data');
+
+  await zero.click('button:has-text("⤓ Restore")');
+  await zero.waitForTimeout(900);
+  const after = await zero.evaluate(() => ({
+    sessions: JSON.parse(localStorage.getItem('sessions_v1') || '[]'),
+    firearms: JSON.parse(localStorage.getItem('rifles_v1') || '[]'),
+    ammo: JSON.parse(localStorage.getItem('ammo_v1') || '[]'),
+  }));
+  ok(after.firearms.length === 1 && after.firearms[0].name === 'Bergara B14 HMR',
+     'the rifle comes down');
+  ok(after.ammo.length === 1 && !!after.ammo[0].batchId,
+     '...and the load, still linked to its Bench batch');
+  ok(after.sessions.some(s => s.id === 's1'),
+     '...and the session that was only on the first device');
+  ok(after.sessions.some(s => s.id === 'local-only'),
+     'while the session logged HERE survives — a restore adds, it does not replace');
+  ok(after.sessions.filter(s => s.id === 's1').length === 1,
+     'and restoring does not duplicate what it already brought');
+
+  /* Idempotence is the property that makes the button safe to press when you
+   * are not sure whether you pressed it. */
+  await zero.click('button:has-text("⤓ Restore")');
+  await zero.waitForTimeout(700);
+  const twice = await zero.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1') || '[]').length);
+  ok(twice === after.sessions.length, `restoring twice changes nothing (${twice})`);
+  ok(/Already up to date/.test(await zero.textContent('body')),
+     '...and says so rather than claiming to have restored again');
+}
+
 /* ==================================================================== hygiene */
 section('hygiene');
 {

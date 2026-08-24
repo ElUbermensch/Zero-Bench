@@ -2364,7 +2364,137 @@ VIEWS.sync = () => {
   </div>`;
 };
 
+/* ── The whole bench, kept somewhere the other phone can reach ─────────────
+ *
+ * The file export is a real backup and stays. What it is not is a way to get
+ * this bench onto a second device: that needs the file to travel, and on a
+ * home-screen PWA on a phone it mostly does not.
+ *
+ * One row per account holds a snapshot. It is NOT the per-record sync above --
+ * that maps Bench's model onto the schema Zero reads, which is lossy in both
+ * directions by design (a component lot becomes a product and a purchase; a
+ * marking scheme has no equivalent at all). This is Bench's own JSON, byte for
+ * byte, and only Bench ever reads it.
+ *
+ * Restore MERGES by default. The obvious way to use a cloud restore is to load
+ * ammunition on the phone at the bench, then pull it onto the tablet -- and a
+ * restore that replaced would eat whatever was loaded on the tablet meanwhile.
+ * Replace exists beside it, separately confirmed, for making two devices match.
+ */
+function cloudCard() {
+  if (!CORE) return '';
+  const st = UI.cloud || {};
+  if (!CORE.isSignedIn()) {
+    return `<div class="card"><h2>Cloud backup</h2>
+      <p class="small muted">Sign in under Cloud sync to keep a copy of this whole
+        bench on your account, and pull it onto another device.</p></div>`;
+  }
+  const row = st.row || null;
+  return `<div class="card"><h2>Cloud backup</h2>
+    <div class="btnrow">
+      <button class="btn primary" data-act="cbUp" ${st.busy ? 'disabled' : ''}>
+        ${st.busy ? '…' : 'Back up now'}</button>
+      <button class="btn" data-act="cbMerge" ${st.busy || !row ? 'disabled' : ''}>Restore</button>
+    </div>
+    <div class="tiny dim mt10">${row
+      ? `Last backed up ${esc(fmtWhen(row.updated_at))}`
+        + `${row.device_label ? ' from ' + esc(row.device_label) : ''}`
+        + ` · ${esc(fmtCounts(row.counts))} · ${esc(fmtBytes(row.bytes))}`
+      : 'Nothing backed up yet on this account.'}</div>
+    <p class="tiny dim mt6">Restore <b>adds</b> what the backup has and this device
+      does not. It never deletes or overwrites what is here, so restoring after a
+      loading session cannot lose the loading session. Edits made on the other
+      device do not cross — for that, use replace.</p>
+    ${row ? `<button class="btn danger wide mt10" data-act="cbReplace" ${st.busy ? 'disabled' : ''}>
+      Replace everything from the cloud</button>` : ''}
+    ${st.msg ? `<div class="banner ${st.ok ? 'ok' : 'bad'} mt10"><div class="small">${esc(st.msg)}</div></div>` : ''}
+  </div>`;
+}
+
+const fmtBytes = (n) => (!Number.isFinite(+n) ? '—'
+  : +n < 1024 ? `${+n} B`
+  : +n < 1048576 ? `${Math.round(+n / 1024)} KB`
+  : `${(+n / 1048576).toFixed(1)} MB`);
+
+const fmtCounts = (c) => {
+  if (!c || typeof c !== 'object') return 'contents unknown';
+  const parts = COLLECTIONS.filter(k => +c[k] > 0).map(k => `${c[k]} ${k}`);
+  return parts.length ? parts.join(' · ') : 'empty';
+};
+
+const fmtWhen = (iso) => {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'at an unknown time';
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)} h ago`;
+  return new Date(t).toLocaleDateString();
+};
+
+/* Enough to tell two devices apart, and nothing that identifies a person. */
+function deviceLabel() {
+  const ua = navigator.userAgent || '';
+  if (/iPad/.test(ua)) return 'iPad';
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/Android/.test(ua)) return 'Android';
+  if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows';
+  return 'this device';
+}
+
+/* Union by id, per collection. The dumbest rule that cannot destroy anything:
+ * a record whose id is already here is left exactly as it is, and a record the
+ * snapshot has never heard of is untouched. */
+function mergeSnapshot(db, incoming) {
+  const stats = {};
+  for (const k of COLLECTIONS) {
+    if (!Array.isArray(incoming[k])) continue;
+    const have = new Set((db[k] || []).filter(r => r && r.id).map(r => r.id));
+    let added = 0;
+    for (const r of incoming[k]) {
+      if (!r || typeof r !== 'object' || !r.id || have.has(r.id)) continue;
+      db[k] = db[k] || [];
+      db[k].push(r); have.add(r.id); added++;
+    }
+    if (added) stats[k] = added;
+  }
+  /* The marking scheme is settings rather than records, and an empty one here
+   * with a filled-in one in the backup is the case that matters: a new device
+   * has the default scheme and should adopt the one the account uses. */
+  if (incoming.meta && incoming.meta.scheme && !hasScheme(DB)) {
+    db.meta = Object.assign({}, db.meta, { scheme: incoming.meta.scheme });
+    stats.scheme = 1;
+  }
+  return stats;
+}
+
+const hasScheme = (db) => {
+  const s = db && db.meta && db.meta.scheme;
+  return !!(s && Object.keys(s).length);
+};
+
+async function loadCloudInfo() {
+  if (!CORE || !CORE.isSignedIn()) return;
+  UI.cloud = UI.cloud || {};
+  try {
+    const r = await CORE.backupList('bench');
+    if (r.ok) UI.cloud.row = (r.data || []).find(x => x.slot === 'default') || null;
+    /* A 404 is the migration not being applied on this project, which is a
+     * thing to go and do rather than a thing wrong with the phone. */
+    else if (r.status === 404) {
+      UI.cloud.msg = 'Cloud backup is not set up on this account yet (migration 0010).';
+      UI.cloud.ok = false;
+    }
+  } catch (e) { /* leave the card in its "nothing yet" state */ }
+  if (cur().v === 'data') render();
+}
+
 VIEWS.data = () => {
+  /* Fired off rather than awaited: the view is synchronous, and a card that
+   * says "nothing backed up yet" for 200ms is better than a screen that waits
+   * on the network before it draws anything at all. */
+  if (CORE && CORE.isSignedIn() && !UI.cloud) { UI.cloud = {}; loadCloudInfo(); }
   const counts = [['Cartridges', DB.cartridges.length], ['Firearms', DB.firearms.length],
     ['Component lots', DB.componentLots.length], ['Brass lots', DB.brassLots.length],
     ['Recipes', DB.recipes.length], ['Batches', DB.batches.length], ['Sessions', DB.sessions.length]];
@@ -2373,12 +2503,15 @@ VIEWS.data = () => {
         ? 'Data is saved on this device. Clearing site data erases it — export regularly.'
         : '<b>Not persisting.</b> This browser is blocking local storage, so everything is in memory and will vanish on reload. Export before closing.'}
     </div></div>
-    <div class="card"><h2>Backup</h2>
+    ${cloudCard()}
+    <div class="card"><h2>Backup · file</h2>
       <div class="btnrow">
         <button class="btn primary" data-act="export">Export JSON</button>
         <button class="btn" data-act="importBtn">Import JSON</button>
         <input type="file" id="importFile" accept="application/json,.json" class="hidden">
       </div>
+      <p class="tiny dim mt10">A file you keep. Importing one REPLACES this device —
+        unlike a cloud restore, which merges.</p>
     </div>
     <div class="card"><h2>Contents</h2><dl class="kv">${counts.map(([k, v]) =>
       `<dt>${k}</dt><dd class="mono">${v}</dd>`).join('')}</dl></div>
@@ -2581,6 +2714,89 @@ async function doAuth(mode) {
  * Remote ids are assigned onto the local records and SAVED FIRST. If the
  * network step ran before the save, a retry would mint fresh ids and duplicate
  * every row on the server — the same trap Zero's sync had to avoid. */
+/* ── Cloud backup, the whole bench in one row ──────────────────────────── */
+async function doCloudBackup() {
+  if (!CORE || !CORE.isSignedIn()) return;
+  UI.cloud = { ...(UI.cloud || {}), busy: true, msg: null };
+  render();
+  try {
+    const payload = JSON.stringify(DB);
+    const counts = {};
+    for (const k of COLLECTIONS) counts[k] = (DB[k] || []).length;
+    const r = await CORE.backupPut({
+      app: 'bench', slot: 'default', payload, counts,
+      deviceLabel: deviceLabel(),
+      appBuild: (typeof window !== 'undefined' && window.__BUILD__) || null,
+    });
+    if (r.ok) {
+      UI.cloud = { busy: false, ok: true,
+                   msg: `Backed up — ${fmtBytes(r.bytes)}.` };
+      await loadCloudInfo();
+    } else if (r.reason === 'too large') {
+      UI.cloud = { ...UI.cloud, busy: false, ok: false,
+        msg: `Too large to back up (${fmtBytes(r.bytes)}, limit ${fmtBytes(r.limit)}). `
+           + 'Export a file instead.' };
+    } else {
+      UI.cloud = { ...UI.cloud, busy: false, ok: false,
+        msg: 'Backup failed: ' + (r.reason || 'unknown') + (r.status ? ` (${r.status})` : '') };
+    }
+  } catch (e) {
+    UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'Backup failed: ' + (e && e.message || e) };
+  }
+  render();
+}
+
+async function doCloudRestore(mode) {
+  if (!CORE || !CORE.isSignedIn()) return;
+  UI.cloud = { ...(UI.cloud || {}), busy: true, msg: null };
+  render();
+  try {
+    const got = await CORE.backupGet({ app: 'bench', slot: 'default' });
+    if (!got.ok || !got.found) {
+      UI.cloud = { ...UI.cloud, busy: false, ok: false,
+        msg: got.ok ? 'Nothing backed up on this account yet.'
+                    : 'Could not read the backup' + (got.status ? ` (${got.status})` : '') };
+      return render();
+    }
+    let incoming = null;
+    try { incoming = JSON.parse(got.row.payload); } catch (e) { incoming = null; }
+    if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.brassLots)) {
+      UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'That backup is not readable.' };
+      return render();
+    }
+
+    const n = (o, k) => (Array.isArray(o[k]) ? o[k].length : 0);
+    const tally = (o) => COLLECTIONS.reduce((a, k) => a + n(o, k), 0);
+
+    if (mode === 'replace') {
+      const detail = COLLECTIONS.filter(k => n(DB, k) || n(incoming, k))
+        .map(k => `  ${k}: ${n(DB, k)} → ${n(incoming, k)}`).join('\n');
+      if (!confirm(`Replace everything on this device with the cloud backup?\n\n${detail}\n\n`
+          + `${tally(DB)} record${tally(DB) === 1 ? '' : 's'} here are discarded and `
+          + `${tally(incoming)} restored. This cannot be undone.`)) {
+        UI.cloud = { ...UI.cloud, busy: false };
+        return render();
+      }
+      Store.save(incoming); DB = loadDb();
+      UI.cloud = { ...UI.cloud, busy: false, ok: true, msg: `Replaced — ${tally(DB)} records.` };
+      save();
+      toast('Restored from the cloud.');
+      return reset('lookup');
+    }
+
+    const stats = mergeSnapshot(DB, incoming);
+    save();
+    const added = Object.entries(stats).map(([k, v]) => `${v} ${k}`).join(', ');
+    UI.cloud = { ...UI.cloud, busy: false, ok: true,
+      msg: added ? `Merged from the cloud: ${added} added.`
+                 : 'Already up to date — nothing in the backup that is not already here.' };
+    render();
+  } catch (e) {
+    UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'Restore failed: ' + (e && e.message || e) };
+    render();
+  }
+}
+
 async function doSync() {
   if (!CORE || !CORE.isSignedIn()) return;
   UI.sync = { ...(UI.sync || {}), busy: true, msg: null };
@@ -2617,7 +2833,7 @@ async function doSync() {
       at: new Date().toLocaleTimeString(),
       msg: r.ok
         ? `Sent ${queued} record${queued === 1 ? '' : 's'}, pulled ${r.stats.pulled}.`
-          + (fromOther ? ` Firearms from Zero: ${fromOther}.` : '')
+          + (fromOther ? ` From Zero: ${fromOther}.` : '')
           + (blocked.length ? ` ${blocked.length} could not be represented — see below.` : '')
         : 'Sync failed: ' + r.reason,
     };
@@ -2693,7 +2909,7 @@ function applyEdit(kind, id, d) {
    * modification time Bench re-pushed every firearm on every sync, and since
    * push runs before pull that overwrote edits made in Zero with Bench's stale
    * copy -- then read the stale value back and called it agreement. */
-  if (kind === 'firearm') rec.mtime = Date.now();
+  if (kind === 'firearm' || kind === 'session') rec.mtime = Date.now();
   if (kind === 'brass') rec.qty = brassOnHand(rec);   // kept in step for exports
   const home = HOMES[kind];
   const msg = 'Changes saved.';
@@ -2751,7 +2967,7 @@ const SAVERS = {
    * sessions fired out of it, so logging one IS the decrement -- and deleting a
    * mistyped one puts the rounds back, and un-ages the brass, for free. */
   session: (d) => {
-    DB.sessions.push(Object.assign({ id: uid('se') }, FIELDS.session(d)));
+    DB.sessions.push(Object.assign({ id: uid('se'), mtime: Date.now() }, FIELDS.session(d)));
     return ['goDetail', ['ammoDetail', d.batch], 'Session saved — batch is no longer untested.'];
   },
 
@@ -2908,6 +3124,10 @@ const ACTIONS = {
   syOut: () => { CORE.signOut(); UI.sync = {}; render(); },
   syClearRej: () => { CORE.clearRejected && CORE.clearRejected(); render(); },
   sySync: () => doSync(),
+
+  cbUp:      () => doCloudBackup(),
+  cbMerge:   () => doCloudRestore('merge'),
+  cbReplace: () => doCloudRestore('replace'),
 
   serialgo: () => doSerialLookup(),
 

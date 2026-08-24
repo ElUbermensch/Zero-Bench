@@ -231,6 +231,27 @@ await page.click('button:has-text("⇣ Bench")');
 await page.waitForTimeout(600);
 const body1 = await page.textContent('body');
 ok(body1.includes('B26H14-02X'), 'Bench batch appears in the picker');
+
+/* Opened from the AMMUNITION header, which is the screen the user screenshotted
+ * with the buttons crushed into vertical slivers. Same structural check as on
+ * Targets+: the panel is a sibling of that header, not a flex item inside it. */
+const hdrLayout = await page.evaluate(() => {
+  const panel = document.querySelector('[data-bench-picker]');
+  const btn = [...document.querySelectorAll('button')].find(b => /⇣ Bench/.test(b.textContent));
+  let el = panel && panel.parentElement, inRow = false;
+  while (el && el !== document.body) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'flex' && cs.flexDirection === 'row') { inRow = true; break; }
+    el = el.parentElement;
+  }
+  const r = btn && btn.getBoundingClientRect();
+  return { inRow, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+           btnW: r ? Math.round(r.width) : 0, btnH: r ? Math.round(r.height) : 0 };
+});
+ok(!hdrLayout.inRow, 'the picker opened from the ammunition header is not inside that header');
+ok(hdrLayout.overflow <= 0, `...and the page does not scroll sideways (${hdrLayout.overflow}px)`);
+ok(hdrLayout.btnW > hdrLayout.btnH,
+   `...and "⇣ Bench" stays a button rather than a vertical sliver (${hdrLayout.btnW}×${hdrLayout.btnH})`);
 ok(body1.includes('UNTESTED'), 'the untested safety flag is shown');
 ok(body1.includes('41.52gr Hodgdon H4350'),
    'the picker shows the charge and powder, so two loads of one bullet are distinguishable');
@@ -411,6 +432,37 @@ console.log('\nimport is its own button, and its own request');
 
   ok((await page.textContent('body')).includes('B26H14-02X'),
      'the batch list comes back');
+
+  /* The panel must be a SIBLING of the header, never a child of it. Dropped
+   * into the ammunition header -- a flex row -- it became a flex item, squeezed
+   * the two buttons into one-character-wide vertical slivers and pushed the
+   * page into horizontal scroll. Asserted structurally, because "it looks
+   * wrong" is not something a suite can see. */
+  const laidOut = await page.evaluate(() => {
+    const panel = document.querySelector('[data-bench-picker]');
+    if (!panel) return { found: false };
+    const flexParent = (() => {
+      let el = panel.parentElement;
+      while (el && el !== document.body) {
+        if (getComputedStyle(el).display === 'flex') return el;
+        el = el.parentElement;
+      }
+      return null;
+    })();
+    return {
+      found: true,
+      insideFlexRow: !!(flexParent && getComputedStyle(flexParent).flexDirection === 'row'),
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      panelWidth: Math.round(panel.getBoundingClientRect().width),
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+  ok(laidOut.found, 'the picker panel is in the document');
+  ok(!laidOut.insideFlexRow,
+     'and is NOT inside a flex row, where it would squash whatever shares it');
+  ok(laidOut.overflow <= 0, `no horizontal overflow (${laidOut.overflow}px)`);
+  ok(laidOut.panelWidth > laidOut.viewport * 0.5,
+     `the panel gets real width rather than a sliver (${laidOut.panelWidth} of ${laidOut.viewport})`);
   ok(JSON.stringify(mock.state.hits.push) === pushesBefore,
      'and NOTHING was pushed to get it');
   const pulled = Object.keys(mock.state.hits.pull)

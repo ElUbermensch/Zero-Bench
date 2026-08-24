@@ -2630,8 +2630,14 @@ function BatchFacts({ a }) {
  * session (via the returned array) so every later push upserts the same rows
  * instead of duplicating them. Sessions with <2 record shots are skipped —
  * the schema requires shot_count >= 2 for a group. */
-function zeroSyncOutbound(core, sessions, ammo, getTarget) {
+function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
   const linked = new Map(ammo.filter(a => a.batchId).map(a => [a.id, a]));
+  /* Firearms are keyed by their LOCAL id here because that is what a session
+   * stores, and by remote id on the far side. A rifle that has never synced
+   * has no remote id yet, which is why firearms are pushed before sessions
+   * are built — see doSync. */
+  const gunRemote = new Map((firearms || [])
+    .filter(f => f && f.remoteId).map(f => [f.id, f.remoteId]));
   let changed = false, queued = 0;
   const updated = sessions.map(s => {
     const a = s.ammoId ? linked.get(s.ammoId) : null;
@@ -2650,9 +2656,21 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget) {
     core.upsert('range_sessions', {
       id: s2.remoteId,
       batch_id: a.batchId,
+      /* Which rifle burned the rounds. Bench needs it to attribute wear to a
+       * barrel and to a brass lot; without it a session arrives in Bench
+       * unattributed and the batch is the only thing that moves. Null when the
+       * rifle was never named or has not synced yet — a wrong attribution is
+       * worse than a missing one. */
+      firearm_id: (s2.rifleId && gunRemote.get(s2.rifleId)) || null,
       occurred_on: s2.date || null,
       location: s2.rangeLocation || null,
-      rounds_fired: stats.n,
+      /* Rounds CONSUMED, which is every shot logged — sighters and foulers
+       * included. `stats.n` counts record shots only; sending that made a
+       * 12-round string decrement the batch by 10, and it is also the number
+       * Zero's own barrel-life counter uses, so the two apps disagreed about
+       * the same rifle. The group's shot_count below is still the record
+       * count, because that is what the group was measured from. */
+      rounds_fired: (s2.shots || []).length || stats.n,
       temp_f: (s2.temp !== '' && s2.temp != null && Number.isFinite(+s2.temp)) ? +s2.temp : null,
       source_app: 'zero',
       notes: [s2.name, s2.position, s2.fireMode].filter(Boolean).join(' · ') || null,
@@ -3680,15 +3698,19 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSessions
     if (!core || !core.isSignedIn()) return;
     setBusy(true); setMsg(null);
     try {
-      // Assign + PERSIST remote ids before the network runs: if they were not
-      // saved first, a retry would mint fresh UUIDs and duplicate every row.
-      const out = zeroSyncOutbound(core, sessions, ammo, getTarget);
-      if (out.changed) await onSessionsUpdated(out.updated);
-      /* Firearms go up too, and their remote ids are persisted before the
-         network for the same reason sessions' are: a retry that minted fresh
-         ids would duplicate every rifle on the server. */
+      /* Firearms first, and not for queue order — zero-core's table order
+         already guarantees a firearm reaches the server before a session that
+         references it. It is that a session carries `firearm_id`, and a rifle
+         entered on this device has no remote id until this call mints one. Run
+         the other way round, as this did, and the first sync after adding a
+         rifle sends every session unattributed.
+
+         Remote ids are persisted before the network runs: if they were not
+         saved first, a retry would mint fresh UUIDs and duplicate every row. */
       const guns = zeroFirearmsOutbound(core, firearms || []);
       if (guns.changed) await onFirearmsUpdated(guns.updated);
+      const out = zeroSyncOutbound(core, sessions, ammo, getTarget, guns.updated);
+      if (out.changed) await onSessionsUpdated(out.updated);
 
       /* An apply handler is what makes the pull real. Without one zero-core
          deliberately leaves the cursor where it is, so a sync downloaded rows,
@@ -4288,7 +4310,7 @@ export default function App() {
                   live. Importing loads from Bench is one read of one view and
                   has no business being reachable only by pressing "Sync now",
                   which pushes everything and pulls seventeen tables. */}
-              <BenchImport core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
+              <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
               <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />
             </>
           )}
@@ -8548,15 +8570,28 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
  * `compact` renders the small chip pair for a header; otherwise it renders as
  * a card with its own heading, for a menu screen.
  */
-function BenchImport({ core, ammo, onSaveAmmo, compact }) {
+/* A HOOK, not a component, and that is the whole point.
+ *
+ * The first cut of this returned a fragment holding both the chips and the
+ * picker panel. Dropped into the ammunition header -- which is a flex row --
+ * the panel became a flex ITEM: it sat beside the buttons, squeezed "⟳" and
+ * "⇣ Bench" into vertical slivers one character wide, and pushed the whole
+ * page into horizontal scroll. The picker had always lived below the header
+ * before, and moving it was not a decision, it was a side effect of pulling
+ * the component out.
+ *
+ * One state, two render sites. The caller puts `chips` wherever the buttons
+ * belong and `panel` wherever a full-width card belongs, and nothing about
+ * where they go is decided in here.
+ */
+function useBenchImport({ core, ammo, onSaveAmmo }) {
   const [pickOpen, setPickOpen] = useState(false);
   const [profiles, setProfiles] = useState(null);   // null=loading, []=empty, [rows]
   const [pickErr, setPickErr] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshed, setRefreshed] = useState(null);
   const linkedCount = ammo.filter(a => a.batchId).length;
-
-  if (!core || !core.isSignedIn()) return null;
+  const available = !!(core && core.isSignedIn());
 
   async function openPicker() {
     setPickOpen(true); setProfiles(null); setPickErr(null);
@@ -8631,53 +8666,62 @@ function BenchImport({ core, ammo, onSaveAmmo, compact }) {
     </div>
   );
 
-  if (compact) {
-    return (
-      <>
-        <div style={{display:'flex',gap:6}}>
-          {linkedCount > 0 && (
-            <button className="badd" onClick={refreshNow} disabled={refreshing}
-              title="Re-read every linked batch from Bench"
-              style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1}}>
-              {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
-          )}
-          <button className="badd" onClick={openPicker}
-            style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ Bench</button>
-        </div>
-        {list}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <div className="tcard" style={{padding:'11px 13px'}}>
-        <div className="lbl">Loads from Bench</div>
-        <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
-          Reads the batches loaded in Bench and brings the ones you pick across with
-          bullet, powder, charge, COAL and their safety state. This is a read of one
-          view — it does not push anything and is not a sync.
-          {linkedCount ? ` ${linkedCount} load${linkedCount===1?'':'s'} linked so far.` : ''}
-        </div>
-        <div style={{display:'flex',gap:8}}>
-          <button className="badd" style={{flex:1}} onClick={openPicker}>⇣ Import batches</button>
-          {linkedCount > 0 && (
-            <button className="badd" onClick={refreshNow} disabled={refreshing}
-              style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',opacity:refreshing?0.5:1}}>
-              {refreshing ? 'reading…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳ Refresh linked'}</button>
-          )}
-        </div>
-      </div>
-      {list}
-    </>
+  /* Buttons only. Whatever the caller's header is doing with flex, a row of
+   * two small buttons behaves in it; a full-width card does not. */
+  const chips = !available ? null : (
+    <div style={{display:'flex',gap:6}}>
+      {linkedCount > 0 && (
+        <button className="badd" onClick={refreshNow} disabled={refreshing}
+          title="Re-read every linked batch from Bench"
+          style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1,whiteSpace:'nowrap'}}>
+          {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
+      )}
+      <button className="badd" onClick={openPicker}
+        style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',whiteSpace:'nowrap'}}>⇣ Bench</button>
+    </div>
   );
+
+  const card = !available ? null : (
+    <div className="tcard" style={{padding:'11px 13px'}}>
+      <div className="lbl">Loads from Bench</div>
+      <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
+        Reads the batches loaded in Bench and brings the ones you pick across with
+        bullet, powder, charge, COAL and their safety state. This is a read of one
+        view — it does not push anything and is not a sync.
+        {linkedCount ? ` ${linkedCount} load${linkedCount===1?'':'s'} linked so far.` : ''}
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <button className="badd" style={{flex:1}} onClick={openPicker}>⇣ Import batches</button>
+        {linkedCount > 0 && (
+          <button className="badd" onClick={refreshNow} disabled={refreshing}
+            style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',opacity:refreshing?0.5:1}}>
+            {refreshing ? 'reading…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳ Refresh linked'}</button>
+        )}
+      </div>
+    </div>
+  );
+
+  return { available, chips, card, panel: available ? list : null, linkedCount };
+}
+
+/* The stacked form of the importer, for a screen that has room for a card.
+ * Both nodes are siblings here, so neither can end up inside the other's
+ * layout. */
+function BenchImportCard(props) {
+  const bench = useBenchImport(props);
+  if (!bench.available) return null;
+  return <>{bench.card}{bench.panel}</>;
 }
 
 function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) {
   const [form, setForm] = useState(null); // null | {id?, name, rifleId, bullet, powder, charge, oal, notes}
   const [confirmDel, setConfirmDel] = useState(null);
-  /* The Bench importer is its own component now -- it is a read of one view,
-   * not part of managing loads, and it is wanted in more than one place. */
+  /* The Bench importer is its own thing now -- a read of one view, not part of
+   * managing loads, and wanted in more than one place. The hook hands back the
+   * buttons and the panel separately so the panel never ends up inside this
+   * screen's header flex row, which is exactly what squashed the buttons into
+   * vertical slivers the first time. */
+  const bench = useBenchImport({ core, ammo, onSaveAmmo });
   const linkedCount = ammo.filter(a => a.batchId).length;
   const blank = { name:'', rifleId:'', bullet:'', powder:'', charge:'', oal:'', notes:'' };
   const fname = id => firearms.find(f=>f.id===id)?.name || '';
@@ -8701,17 +8745,15 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
         <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.14em',textTransform:'uppercase'}}>Ammunition</div>
         {!form && (
           <div style={{display:'flex',gap:6}}>
-            <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} compact />
+            {bench.chips}
             <button className="badd" onClick={()=>setForm({...blank})} style={{fontSize:11,padding:'5px 11px'}}>+ load</button>
           </div>
         )}
       </div>
 
-      {/* The first-run card and the picker itself both live in BenchImport,
-          which is rendered from the header above and from Targets+. */}
-      {!form && core && core.isSignedIn() && linkedCount === 0 && (
-        <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} />
-      )}
+      {/* Below the header, never inside it. */}
+      {!form && bench.panel}
+      {!form && linkedCount === 0 && !bench.panel && bench.card}
 
       {form && (
         <div className="tcard" style={{padding:'11px 13px'}}>

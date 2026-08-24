@@ -2617,7 +2617,7 @@ async function doSync() {
       at: new Date().toLocaleTimeString(),
       msg: r.ok
         ? `Sent ${queued} record${queued === 1 ? '' : 's'}, pulled ${r.stats.pulled}.`
-          + (fromOther ? ` Firearms from Zero: ${fromOther}.` : '')
+          + (fromOther ? ` From Zero: ${fromOther}.` : '')
           + (blocked.length ? ` ${blocked.length} could not be represented — see below.` : '')
         : 'Sync failed: ' + r.reason,
     };
@@ -2693,7 +2693,7 @@ function applyEdit(kind, id, d) {
    * modification time Bench re-pushed every firearm on every sync, and since
    * push runs before pull that overwrote edits made in Zero with Bench's stale
    * copy -- then read the stale value back and called it agreement. */
-  if (kind === 'firearm') rec.mtime = Date.now();
+  if (kind === 'firearm' || kind === 'session') rec.mtime = Date.now();
   if (kind === 'brass') rec.qty = brassOnHand(rec);   // kept in step for exports
   const home = HOMES[kind];
   const msg = 'Changes saved.';
@@ -2751,7 +2751,7 @@ const SAVERS = {
    * sessions fired out of it, so logging one IS the decrement -- and deleting a
    * mistyped one puts the rounds back, and un-ages the brass, for free. */
   session: (d) => {
-    DB.sessions.push(Object.assign({ id: uid('se') }, FIELDS.session(d)));
+    DB.sessions.push(Object.assign({ id: uid('se'), mtime: Date.now() }, FIELDS.session(d)));
     return ['goDetail', ['ammoDetail', d.batch], 'Session saved — batch is no longer untested.'];
   },
 

@@ -14,7 +14,7 @@ export function startMock(opts = {}) {
     refreshTokens: new Map(),    // refresh_token -> userId
     rows: new Map(),             // table -> Map(id -> row)
     clock: 1_000_000,            // server clock, ms; tests advance it by hand
-    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {} },
+    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {}, rpc: {} },
     failRefresh: false,
     ttlSec: opts.ttlSec ?? 3600,
     pushOrder: [],               // tables in the order they were pushed to
@@ -37,6 +37,12 @@ export function startMock(opts = {}) {
     relayParts: new Map(),      // relayId -> Map(userId -> participant)
     joinFails: new Map(),       // userId -> count
     anonUsers: new Set(),       // user ids created by anonymous sign-in
+    /* Pretend to be a server that predates migration 0009: no relay_face, and
+     * a join_relay that does not know p_target_name. PostgREST resolves an RPC
+     * by the keys in the body, so the extra key is a 404 rather than an
+     * ignored argument -- which is a client that cannot join at all if it does
+     * not handle it. */
+    legacyRelayRpc: false,
   };
 
   const stamp = () => new Date(state.clock).toISOString();
@@ -136,6 +142,7 @@ export function startMock(opts = {}) {
       /* ------------------------------------------------------------- rpc */
       if (p.startsWith('/rest/v1/rpc/')) {
         const fn = p.slice('/rest/v1/rpc/'.length);
+        state.hits.rpc[fn] = (state.hits.rpc[fn] || 0) + 1;
         const a = auth(req);
         const CODE_ALPHABET = '23456789BCDFGHJKMNPQRSTVWXZ';
 
@@ -170,8 +177,19 @@ export function startMock(opts = {}) {
           state.relayParts.set(relay.id, new Map([[a.userId,
             { user_id: a.userId, name: relay.host_name, role: 'shooter',
               slot: 1, last_seen_at: stamp(),
-              distance_yd: payload.p_distance_yd ?? null }]]));
+              distance_yd: payload.p_distance_yd ?? null,
+              target_name: payload.p_target_name ?? null }]]));
           return json(res, 200, relay);
+        }
+
+        if (fn === 'join_relay' && state.legacyRelayRpc && 'p_target_name' in payload) {
+          return json(res, 404, { code: 'PGRST202',
+            message: 'Could not find the function public.join_relay('
+                     + Object.keys(payload).sort().join(', ') + ') in the schema cache' });
+        }
+        if (fn === 'relay_face' && state.legacyRelayRpc) {
+          return json(res, 404, { code: 'PGRST202',
+            message: 'Could not find the function public.relay_face(p_relay) in the schema cache' });
         }
 
         if (fn === 'join_relay') {
@@ -202,9 +220,27 @@ export function startMock(opts = {}) {
           }
           parts.set(a.userId, { user_id: a.userId, name: payload.p_name || 'Guest',
             role, slot, last_seen_at: stamp(),
-            distance_yd: payload.p_distance_yd ?? parts.get(a.userId)?.distance_yd ?? null });
+            distance_yd: payload.p_distance_yd ?? parts.get(a.userId)?.distance_yd ?? null,
+            target_name: payload.p_target_name ?? parts.get(a.userId)?.target_name ?? null });
           state.relayParts.set(relay.id, parts);
-          return json(res, 200, { ok: true, relay, slot, role });
+          // join_relay returns `to_jsonb(r) - 'target_rings'`. Handing the
+          // geometry back here would let a client draw paper the real server
+          // never sends -- which is exactly the divergence that hid the empty
+          // coach plot for a month.
+          const { target_rings, ...relayLean } = relay;
+          return json(res, 200, { ok: true, relay: relayLean, slot, role });
+        }
+
+        /* The paper, fetched once. Participation-gated like relay_state. */
+        if (fn === 'relay_face') {
+          const relay = state.relays.get(payload.p_relay);
+          const parts = state.relayParts.get(payload.p_relay);
+          if (!relay || !parts || !parts.has(a.userId)) {
+            return json(res, 403, { code: '42501', message: 'not a participant' });
+          }
+          return json(res, 200, { target_name: relay.target_name ?? null,
+                                  target_rings: relay.target_rings ?? null,
+                                  distance_yd: relay.distance_yd ?? null });
         }
 
         if (fn === 'relay_state') {
@@ -216,18 +252,26 @@ export function startMock(opts = {}) {
           parts.get(a.userId).last_seen_at = stamp();
           // >= to match the migration: rows tying the cursor are re-sent, not lost
           const since = (rows, cur) => rows.filter(x => x.created_at >= cur);
+          // Same strip as the migration: target_rings never rides the poll.
+          const { target_rings: _rings, ...relayLean } = relay;
           return json(res, 200, {
-            relay,
+            relay: relayLean,
             shots: since([...table('relay_shots').values()]
               .filter(x => x.relay_id === payload.p_relay), payload.p_since_shot || '')
               .map(({ user_id, ...x }) => ({ ...x,
                 slot: parts.get(user_id)?.slot ?? null,
                 shooter: parts.get(user_id)?.name ?? null,
                 is_self: user_id === a.userId })),
+            // Built field by field, like the migration: to_jsonb(m) carried
+            // user_id to every participant.
             messages: since([...table('relay_messages').values()]
-              .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || ''),
+              .filter(x => x.relay_id === payload.p_relay), payload.p_since_msg || '')
+              .map(({ user_id, ...m }) => ({ ...m,
+                slot: parts.get(user_id)?.slot ?? null,
+                is_self: user_id === a.userId })),
             participants: [...parts.values()].map(x => ({ name: x.name, role: x.role,
               slot: x.slot ?? null, distance_yd: x.distance_yd ?? relay.distance_yd ?? null,
+              target_name: x.target_name ?? relay.target_name ?? null,
               last_seen_at: x.last_seen_at, is_self: x.user_id === a.userId })),
             server_time: stamp(),
           });
@@ -280,6 +324,14 @@ export function startMock(opts = {}) {
           // RLS: another account's row is invisible, not forbidden. PostgREST
           // answers a filter matching nothing with 204 and no rows changed.
           if (!row || row.user_id !== a.userId) return json(res, 204, null);
+          // The size ceiling is a table constraint, so it applies to an UPDATE
+          // exactly as it does to an INSERT -- and the update is the common
+          // path, since a slot is written over and over.
+          if (t === 'account_backups' && payload && payload.payload !== undefined
+              && Buffer.byteLength(String(payload.payload || ''), 'utf8') > 8388608) {
+            return json(res, 400, { code: '23514',
+              message: 'new row violates check constraint "account_backups_payload_check"' });
+          }
           Object.assign(row, payload, { updated_at: stamp() });
           return json(res, 204, null);
         }
@@ -310,11 +362,35 @@ export function startMock(opts = {}) {
             return json(res, 200, rows2.slice(offset, offset + limit));
           }
 
+          /* Every other `col=eq.value` in the query string. The pull only ever
+           * filters on updated_at, so this used to be all the mock knew --
+           * which meant a request for ONE backup slot was answered with every
+           * row in the table and the client appeared to work while asking for
+           * something the real server would have narrowed. */
+          const eqs = [];
+          for (const [k, v] of u.searchParams) {
+            if (k === 'updated_at' || k === 'select' || k === 'limit' ||
+                k === 'offset' || k === 'order' || k === 'on_conflict') continue;
+            if (v.startsWith('eq.')) eqs.push([k, v.slice(3)]);
+          }
+
+
           const isPublic = state.publicTables.has(t);
           let rows = [...table(t).values()]
             .filter(r => isPublic || r.user_id === a.userId)   // RLS stand-in
             .filter(r => !gt || r.updated_at > gt)
+            .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
             .sort((x, y) => (x.updated_at < y.updated_at ? -1 : 1));
+          /* A view over a table, not a second store: `bytes` is derived and
+           * `payload` is absent, which is the whole reason the view exists. */
+          if (t === 'v_account_backups') {
+            rows = [...table('account_backups').values()]
+              .filter(r => r.user_id === a.userId)
+              .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
+              .map(({ payload, ...rest }) => ({ ...rest,
+                bytes: Buffer.byteLength(String(payload || ''), 'utf8') }))
+              .sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
+          }
           return json(res, 200, rows.slice(offset, offset + limit));
         }
 
@@ -391,6 +467,60 @@ export function startMock(opts = {}) {
                 return json(res, 403, { code: '42501', message: 'not a participant' });
               }
             }
+            /* account_backups is the one table with a size ceiling and a
+             * compound unique key, and both are the point of it. A mock that
+             * accepted an oversized payload would let a client ship a backup
+             * button that fails only on a real phone with real data, and one
+             * that ignored the unique key would let a second backup stack a
+             * second eight-megabyte row where the schema allows exactly one. */
+            if (t === 'account_backups') {
+              if (state.anonUsers.has(a.userId)) {
+                return json(res, 403, { code: '42501',
+                  message: 'RLS: anonymous devices cannot back up' });
+              }
+              if (Buffer.byteLength(String(row.payload || ''), 'utf8') > 8388608) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "account_backups_payload_check"' });
+              }
+              const clash = [...table(t).values()].find(x => x.user_id === a.userId
+                && x.app === row.app && x.slot === row.slot && x.id !== row.id);
+              if (clash) {
+                return json(res, 409, { code: '23505',
+                  message: 'duplicate key value violates unique constraint '
+                           + '"account_backups_user_id_app_slot_key"' });
+              }
+            }
+            /* shots are keyed (session_id, shot_no) in the schema, not by the
+             * client's uuid. A push that re-sends a string must therefore
+             * UPDATE the row that already holds that number rather than
+             * inserting a second one under a fresh id -- which is exactly what
+             * a client that mints a new uuid per push would do, and the real
+             * server would refuse with 23505 while this mock happily stacked
+             * twelve more holes on the target. */
+            if (t === 'shots' && row.session_id && row.shot_no != null) {
+              const clash = [...table(t).values()].find(x =>
+                x.session_id === row.session_id && x.shot_no === row.shot_no
+                && x.id !== row.id);
+              if (clash) {
+                return json(res, 409, { code: '23505',
+                  message: 'duplicate key value violates unique constraint '
+                           + '"shots_session_id_shot_no_key"' });
+              }
+              if (row.wind_call_dir != null && !['L', 'R'].includes(row.wind_call_dir)) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "shots_wind_call_dir_check"' });
+              }
+            }
+            /* The face is a shape, not free text: {rings:[…]}. A client that
+             * sends the target's NAME here, or an array, gets a 400 rather
+             * than a plot that renders as nothing. */
+            if (t === 'range_sessions' && row.target_face != null) {
+              const f = row.target_face;
+              if (typeof f !== 'object' || Array.isArray(f) || !Array.isArray(f.rings)) {
+                return json(res, 400, { code: '23514',
+                  message: 'new row violates check constraint "range_sessions_target_face_shape"' });
+              }
+            }
             if (fk && row[fk[0]]) {
               const parent = table(fk[1]).get(row[fk[0]]);
               if (!parent) {
@@ -400,6 +530,9 @@ export function startMock(opts = {}) {
                 });
               }
             }
+            /* The server defaults this column; a client that has never backed
+             * up before does not know an id to send. */
+            if (!row.id && (t === 'account_backups' || t === 'shots')) row.id = randomUUID();
             if (!row.id && (t === 'relay_shots' || t === 'relay_messages')) {
               const key = t === 'relay_shots'
                 ? [...table(t).values()].find(x => x.relay_id === row.relay_id

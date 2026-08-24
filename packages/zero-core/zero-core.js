@@ -43,7 +43,7 @@ const ZeroCore = (() => {
     OUTBOX_CHANGED:      'outbox:changed',      // { pending, rejected }
     OUTBOX_REJECTED:     'outbox:rejected',     // { table, ids, status, error }
     DATA_CHANGED:        'data:changed',        // { table, ids, origin }
-    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants }
+    RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants, face }
     RELAY_ENDED:         'relay:ended',         // { relayId }
     RELAY_ERROR:         'relay:error',         // { phase, error }
   });
@@ -444,6 +444,36 @@ const ZeroCore = (() => {
       // not the session, and signing back in should still deliver it.
     }
 
+    /** Take a session out of the URL fragment, if one is there. Returns true
+     *  when it adopted one, so a caller can react (and a test can assert). */
+    function adoptSessionFromUrl() {
+      if (typeof location === 'undefined' || !location.hash) return false;
+      const hash = location.hash.replace(/^#/, '');
+      // Bench deep links live in this fragment too (#/s/SERIAL). Only touch it
+      // when it is unmistakably an auth callback.
+      if (!/(^|&)access_token=/.test(hash)) return false;
+      const q = new URLSearchParams(hash);
+      const access = q.get('access_token'), refresh = q.get('refresh_token');
+      if (!access || !refresh) return false;
+      const ttl = Number(q.get('expires_in') || 3600) * 1000;
+      setSession({ access_token: access, refresh_token: refresh,
+                   expires_at: nowMs() + ttl, user: null });
+      /* Strip it before anything else can read it. replaceState rather than
+       * assigning location.hash, which would leave an entry in history. */
+      try {
+        if (history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+      } catch (e) {}
+      /* The token carries the user id in its payload but not the email, and
+       * the UI shows an email. Fetching it is one request and only happens on
+       * this path. */
+      raw('/auth/v1/user', { method: 'GET', headers: authHeaders() })
+        .then(r => (r.ok ? r.json() : null))
+        .then(u => { if (u && u.id && session) { session.user = u; store.set(K.session, session);
+                                                 emit(EVENTS.AUTH_SIGNED_IN, { user: u }); } })
+        .catch(() => {});
+      return true;
+    }
+
     const getSession = () => session;
     const getUser = () => (session && session.user) || null;
     const isSignedIn = () => !!(session && session.access_token);
@@ -805,9 +835,119 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.SYNC_ERROR, { phase: 'select', table: view, error: { status: res.status, body: error } });
-        return { ok: false, error };
+        /* The status travels with the failure. "Could not reach the backend"
+         * is the same sentence for a missing view (404 -- migrations not
+         * applied), an expired session (401) and a policy refusal (403), and
+         * those need three different things done about them. */
+        return { ok: false, status: res.status, error };
       }
       return { ok: true, data: await res.json() };
+    }
+
+    /* ---------------------------------------------- whole-device backups */
+    /* A snapshot is NOT sync, and none of the machinery above applies to it.
+     *
+     * It does not go through the outbox. The outbox exists so a write made at
+     * a range with no signal still lands eventually, and it retries forever to
+     * make that true. A snapshot has the opposite requirement: it is eight
+     * megabytes, the user is watching a button, and a backup that "will happen
+     * later" is a backup they will believe they have and do not. So it is a
+     * direct request that either succeeds now or reports why not.
+     *
+     * It has no cursor, because there is nothing incremental about it. It has
+     * no conflict resolution, because two devices backing up to the same slot
+     * is the user overwriting their own copy, which is what a slot IS.
+     *
+     * The payload is opaque here on purpose. zero-core has no business knowing
+     * what a session or a brass lot looks like; each app hands over a string it
+     * knows how to read back, and gets the same string out. */
+    const BACKUP_MAX_BYTES = 8 * 1024 * 1024;
+
+    /** The row id for one slot, or null. Two round trips rather than an upsert
+     *  on a compound unique key: PostgREST can do the upsert, but only if the
+     *  client names the conflict target correctly, and getting that wrong
+     *  fails as a duplicate-key INSERT — a new backup silently not saved. The
+     *  extra request is a few hundred bytes against a payload of megabytes. */
+    async function backupRowId(app, slot) {
+      const q = `select=id&app=eq.${encodeURIComponent(app)}`
+              + `&slot=eq.${encodeURIComponent(slot)}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) return { ok: false, status: res.status, error: await res.text().catch(() => '') };
+      const rows = await res.json().catch(() => []);
+      return { ok: true, id: (rows && rows[0] && rows[0].id) || null };
+    }
+
+    /** Write one snapshot. `payload` is a string; anything else is stringified
+     *  here so a caller cannot accidentally send `[object Object]`. */
+    async function backupPut({ app, slot, payload, counts, deviceLabel, appBuild }) {
+      const u = getUser();
+      if (!u) return { ok: false, reason: 'not signed in' };
+      if (isAnonymous()) return { ok: false, reason: 'anonymous devices cannot back up' };
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+
+      /* Checked here as well as in the database. The server's constraint is
+       * the one that counts, but finding out by uploading eight megabytes over
+       * a phone connection and being refused is a bad way to learn it. */
+      const bytes = new TextEncoder().encode(body).length;
+      if (bytes > BACKUP_MAX_BYTES) {
+        return { ok: false, reason: 'too large', bytes, limit: BACKUP_MAX_BYTES };
+      }
+
+      const row = {
+        user_id: u.id,
+        app: app || cfg.appId || 'zero',
+        slot: slot || 'default',
+        payload: body,
+        counts: counts || {},
+        device_label: deviceLabel || null,
+        app_build: appBuild || null,
+      };
+
+      const found = await backupRowId(row.app, row.slot);
+      if (!found.ok) return { ok: false, reason: 'lookup failed', status: found.status };
+
+      let res;
+      if (found.id) {
+        /* PATCH, not an upsert: `created_at` should keep saying when this slot
+         * was first used, and an INSERT ... ON CONFLICT that omitted it would
+         * be fine while one that included it would quietly reset it. */
+        const { user_id, ...patch } = row;
+        res = await authed('/rest/v1/account_backups?id=eq.' + encodeURIComponent(found.id),
+          { method: 'PATCH', body: JSON.stringify(patch) });
+      } else {
+        res = await authed('/rest/v1/account_backups',
+          { method: 'POST', body: JSON.stringify([row]) });
+      }
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.SYNC_ERROR, { phase: 'backup', table: 'account_backups',
+                                  error: { status: res.status, body: error } });
+        return { ok: false, reason: 'refused', status: res.status, error };
+      }
+      return { ok: true, bytes, slot: row.slot, app: row.app };
+    }
+
+    /** What snapshots exist, WITHOUT their payloads. The restore screen can
+     *  then say what is up there and how big it is before anyone commits to
+     *  downloading it on a phone plan. */
+    async function backupList(app) {
+      const q = 'select=*&order=updated_at.desc'
+              + (app ? `&app=eq.${encodeURIComponent(app)}` : '');
+      return selectView('v_account_backups', q);
+    }
+
+    /** One snapshot, payload and all. */
+    async function backupGet({ app, slot }) {
+      const q = `select=*&app=eq.${encodeURIComponent(app || cfg.appId || 'zero')}`
+              + `&slot=eq.${encodeURIComponent(slot || 'default')}&limit=1`;
+      const res = await authed('/rest/v1/account_backups?' + q, { method: 'GET' });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        return { ok: false, status: res.status, error };
+      }
+      const rows = await res.json().catch(() => []);
+      if (!rows || !rows.length) return { ok: true, found: false, row: null };
+      return { ok: true, found: true, row: rows[0] };
     }
 
     /** Claim (or change) the public handle. Keyed by the user id, so it is
@@ -884,12 +1024,31 @@ const ZeroCore = (() => {
       const id = await ensureIdentity();
       if (!id.ok) return { ok: false, error: id.error };
       const d = Number((opts || {}).distanceYd);
-      const r = await rpc('join_relay', {
+      /* PostgREST resolves an RPC by the KEYS in the body, so sending
+       * p_target_name to a server that predates migration 0009 is not ignored
+       * -- it is a 404 (PGRST202, "could not find the function"), and joining
+       * a relay stops working entirely. A front end can reach a phone before
+       * its operator has run the migration; that must not take pair fire down
+       * on a match morning. So: try with it, and if the server does not know
+       * that shape, try again without.
+       *
+       * The retry is narrow on purpose. Only a 404/PGRST202 qualifies -- a
+       * refusal, a throttle or a bad code must not be silently retried. */
+      const send = (extra) => rpc('join_relay', Object.assign({
         p_code: String(code || '').trim(),
         p_name: name || 'Guest',
         p_role: role === 'shooter' ? 'shooter' : 'coach',
         p_distance_yd: Number.isFinite(d) && d > 0 ? d : null,
-      });
+      }, extra));
+
+      /* YOUR target, for the same reason as YOUR distance: the coach's
+       * combined plot is only honest if everyone is on the same paper, and the
+       * relay by itself only ever knew the starter's. */
+      let r = await send({ p_target_name: (opts || {}).targetName || null });
+      const unknownShape = !r.ok && (r.status === 404 ||
+        /PGRST202|could not find the function/i.test(JSON.stringify(r.error || '')));
+      if (unknownShape) r = await send({});
+
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'join', error: r.error }); return r; }
       // join_relay returns a RESULT, not an exception: a bad code is ok:false,
       // which is how the server-side throttle can record the failed attempt.
@@ -905,6 +1064,22 @@ const ZeroCore = (() => {
                role: res.role || 'coach' };
     }
 
+    /* The paper, fetched ONCE. relay_state deliberately strips target_rings
+     * from every poll -- it is static geometry and re-sending it every 2.5s to
+     * every participant for a whole match is waste -- so this is the only way
+     * anyone but the starter ever sees it.
+     *
+     * A server without migration 0009 has no such function and answers 404.
+     * That is not an error worth showing: the app simply draws the bare grid
+     * it drew before, which is exactly what it did for the last month. */
+    async function fetchRelayFace() {
+      if (!relay) return null;
+      const r = await rpc('relay_face', { p_relay: relay.id });
+      if (!r.ok) { relay.face = null; return null; }
+      relay.face = r.data || null;
+      return relay.face;
+    }
+
     function startRelay(meta) {
       stopRelay();
       relay = Object.assign({
@@ -913,6 +1088,10 @@ const ZeroCore = (() => {
         shots: new Map(), messages: new Map(), participants: [],
         backoff: RELAY_POLL_MS, stopped: false, timer: null,
       }, meta);
+      /* Deliberately not awaited: the first poll must not wait on geometry.
+       * The plot draws a bare grid until it lands, then redraws with paper. */
+      fetchRelayFace().then(() => { if (relay) pollRelayOnce().catch(() => {}); })
+                      .catch(() => {});
       pumpRelay();
       attachRelayResume();
       return relay;
@@ -958,6 +1137,9 @@ const ZeroCore = (() => {
       emit(EVENTS.RELAY_STATE, {
         relay: st.relay, shots, messages,
         participants: relay.participants, serverTime: st.server_time,
+        /* Cached, not re-fetched. Consumers get it in the same shape on every
+         * tick so they do not have to hold it themselves. */
+        face: relay.face || null,
       });
 
       if (st.relay && st.relay.status === 'ended') {
@@ -1102,7 +1284,11 @@ const ZeroCore = (() => {
       ? { id: relay.id, code: relay.code, isHost: relay.isHost,
           name: relay.name, role: relay.role, slot: relay.slot,
           canShoot: relay.role === 'shooter',
-          shotCount: relay.shots.size, participants: relay.participants }
+          shotCount: relay.shots.size, participants: relay.participants,
+          /* The paper, or null against a server without relay_face. Exposed
+           * here as well as on the state event so a consumer can ask at any
+           * time rather than waiting for the next poll. */
+          face: relay.face || null }
       : null);
 
     function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }
@@ -1116,6 +1302,8 @@ const ZeroCore = (() => {
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
+      backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
+      adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
@@ -1131,6 +1319,20 @@ const ZeroCore = (() => {
      * default: it shipped un-opted-in from both apps, and the consequence was
      * a queued write that could never leave the device. */
     if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    /* A confirmation link lands here carrying a session in the URL fragment.
+     *
+     * Supabase's confirm-your-email link goes to the project's Site URL with
+     * `#access_token=...&refresh_token=...&type=signup` on the end. Nothing
+     * read it, so a new user clicked the link, watched the app load as a
+     * stranger, and had to go and sign in by hand -- after a page that, with
+     * Site URL left at its localhost default, does not resolve at all.
+     *
+     * Adopted and then STRIPPED from the URL immediately: a bearer token that
+     * stays in the address bar is one that goes into history, gets shared in a
+     * screenshot, and is read by anything that can see a referrer. This is the
+     * same thing Supabase's own client calls detectSessionInUrl. */
+    if (cfg.detectSessionInUrl !== false) { try { adoptSessionFromUrl(); } catch (e) {} }
 
     return instance;
   }

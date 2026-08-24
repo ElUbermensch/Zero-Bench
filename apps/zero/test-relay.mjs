@@ -65,6 +65,12 @@ async function device(label, { seed, email } = {}) {
     await page.fill('input[placeholder="password"]', 'pw12345');
     await page.click('button:has-text("create account")');
     await page.waitForTimeout(600);
+    /* Signing in from the home screen now lands on More -> Cloud sync: the
+     * card that was typed into belongs in the menu once there is an account,
+     * and vanishing with no acknowledgement would read as a failure. Come
+     * back to the sessions, which is what these tests are about. */
+    await page.click('.tabbar button:has-text("Sessions")');
+    await page.waitForTimeout(300);
   }
   return { ctx, page, label };
 }

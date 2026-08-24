@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 import { loadConfig } from '../../tools/config.mjs';
 import { FACE_CSS, FONT_FILES } from '../../packages/fonts/face-css.mjs';
+import { buildId } from '../../tools/build-id.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const at = (...p) => path.join(HERE, ...p);
@@ -53,9 +54,13 @@ export async function buildZero(o) {
    * plain CSS with no reason to sit inside a 1.5MB script. One source
    * (packages/fonts) feeds both apps, so the two cannot declare different
    * faces for the same family. */
+  /* The build stamp goes in the HEAD, not the bundle: the cache name is a hash
+   * OF the bundle, so anything derived from it cannot also be inside it. */
+  const build = buildId();
   fs.writeFileSync(path.join(outdir, 'index.html'),
     fs.readFileSync(at('src/shell.html'), 'utf8')
-      .replace('</head>', () => `<style>\n${FACE_CSS}\n</style>\n</head>`));
+      .replace('</head>', () => `<style>\n${FACE_CSS}\n</style>\n`
+        + `<script>window.__BUILD__=${JSON.stringify(build.id)}</script>\n</head>`));
   fs.writeFileSync(path.join(outdir, 'sw.js'),
     fs.readFileSync(at('src/sw.js'), 'utf8')
       .replace('__CACHE_VERSION__', `zero-${hash}`)

@@ -73,9 +73,58 @@ await page.evaluate(({ BATCH_ID }) => {
 await page.reload();
 await page.waitForTimeout(700);
 
+/* Firearms is a submenu under More now, not a tab. Zero carried five tabs and
+ * still had nowhere to put sync, backup or the Bench importer -- they were
+ * stacked under the session list. Four tabs and a menu of submenus is the
+ * shape Bench already uses. */
+const openMore = async (title) => {
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(250);
+  await page.click(`button:has-text("${title}")`);
+  await page.waitForTimeout(400);
+};
+
 console.log('\nboot');
-ok((await page.textContent('body')).includes('league night'), 'the seeded session renders');
-ok((await page.textContent('body')).includes('Cloud sync'), 'the sync card is present on the home screen');
+{
+  const home = await page.textContent('body');
+  ok(home.includes('league night'), 'the seeded session renders');
+
+  /* The complaint this answers: "Zero feels super crowded especially on
+   * sessions." The sync panel, the cloud backup card and the file backup card
+   * all rendered under the session list, so the sessions were a strip at the
+   * top of a page about plumbing. None of the three belongs on the screen you
+   * open to look at what you shot. */
+  ok(!home.includes('Data backup'), 'the backup cards are NOT on the sessions screen');
+  ok(!/⤓ Export|⤒ Restore/.test(home), '...nor an export or restore button, one thumb from the session list');
+  /* Checked by its heading, not by its button: signed out the card renders a
+   * "sign in first" line with no button at all, so asserting on the button
+   * would pass with the card sitting right there. */
+  ok(!home.includes('Cloud backup'), '...nor the cloud backup card');
+
+  /* Signing in is the exception, and only while signed out. The email field
+   * was put on the home screen precisely so nobody has to hunt for it to
+   * answer "where is the sync button"; hiding it under More would undo that.
+   * Signed in it becomes a status readout, and that belongs in the menu --
+   * asserted below, after this suite signs in. */
+  ok(home.includes('Cloud sync'), 'but the sign-in card stays while signed out');
+
+  const tabs = await page.$$eval('.tabbar button', bs => bs.map(b => b.textContent.trim()));
+  ok(tabs.length === 4, `four tabs, not five (${tabs.length})`);
+  ok(tabs.some(t => /More/.test(t)), '...and one of them is More');
+
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(300);
+  const menu = await page.textContent('body');
+  for (const dest of ['Firearms & loads', 'Targets', 'Cloud sync', 'Backup & data']) {
+    ok(menu.includes(dest), `More lists ${dest}`);
+  }
+  /* A menu that only says where things are is worse than the tabs it replaced.
+   * Each row says what is behind it before you spend a tap on it. */
+  ok(/1 firearm|0 firearms/.test(menu), '...with a count on the row, so the tap is informed');
+
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
+}
 
 /* ============================================ backup export, on both paths */
 /* `<a download>` is not honoured in a home-screen PWA on iOS: the tap does
@@ -97,6 +146,7 @@ console.log('\nbackup export');
       return click.apply(this, arguments);
     };
   });
+  await openMore('Backup & data');
   await page.click('button:has-text("⤓ Export")');
   await page.waitForTimeout(400);
   const shared = await page.evaluate(() => ({
@@ -136,18 +186,42 @@ console.log('\nbuild stamp');
   const stamped = await page.evaluate(() => window.__BUILD__ || null);
   ok(typeof stamped === 'string' && stamped.length > 4,
      `the page carries a build stamp (${stamped})`);
+  /* At the foot of the More menu, one tap from any tab. It used to be on the
+   * home screen inside the sync card; when that card moved, a stamp two taps
+   * deep inside Cloud sync would have been the wrong place for the first
+   * question anyone asks when a fix seems not to have landed. */
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(300);
   const shown = await page.textContent('body');
-  ok(shown.includes(stamped), 'and the sync card shows it, so it is readable from a phone');
+  ok(shown.includes(stamped), 'and the More menu shows it, so it is readable from a phone');
 }
 
 console.log('\nserver config + account');
+/* Back to Sessions, where the sign-in card lives while signed out. */
+await page.click('.tabbar button:has-text("Sessions")');
 await page.waitForTimeout(300);
 await page.fill('input[placeholder="email"]', 'jaxon@example.com');
 await page.fill('input[placeholder="password"]', 'hunter2');
 await page.click('button:has-text("create account")');
 await page.waitForTimeout(500);
-ok((await page.textContent('body')).includes('jaxon@example.com'), 'signed in, email shown');
-ok((await page.textContent('body')).includes('1 load linked'), 'the linked-load count is reported');
+/* The other half of the placement rule: once there IS an account the panel is
+ * a status readout and gets out of the way. Which means the card the user just
+ * typed into vanishes -- and a card that vanishes with no acknowledgement
+ * reads as a failure, so signing in carries them to the screen it became. */
+{
+  const after = await page.textContent('body');
+  ok(after.includes('jaxon@example.com'), 'signed in, email shown');
+  ok(/Sync now/.test(after), '...on the sync screen, which sign-in lands on');
+
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
+  const home = await page.textContent('body');
+  ok(!/Sync now/.test(home), 'and the panel is gone from the sessions screen');
+
+  await openMore('Cloud sync');
+  const syncScreen = await page.textContent('body');
+  ok(syncScreen.includes('1 load linked'), 'the linked-load count is reported');
+}
 
 console.log('\npush');
 await page.click('button:has-text("Sync now")');
@@ -165,16 +239,57 @@ ok(g0.mean_radius_in === 0.21, `mean radius pushed in inches (${g0.mean_radius_i
 ok(g0.distance_yd === 100 && g0.shot_count === 2, 'distance and shot count map');
 ok(g0.session_id === s0.id, 'the group references its session');
 
+/* ================================================ the string, not just the group */
+/* "This is a string data analytics program at heart." Bench could see that a
+ * batch had been fired and how big the group was — a summary of a summary.
+ * 0.42" at 100 is five in a cloverleaf and one flyer, or six in a line, and
+ * those are a load problem and a wind problem. */
+console.log('\nthe shot string goes up');
+{
+  const shots = [...(mock.state.rows.get('shots')?.values() || [])];
+  ok(shots.length === 2, `every hole is a row (${shots.length})`);
+  const byNo = shots.slice().sort((a, b) => a.shot_no - b.shot_no);
+  ok(byNo[0].shot_no === 1 && byNo[1].shot_no === 2,
+     'numbered across the whole string, because (session, shot_no) is the key');
+  ok(Number(byNo[1].poi_x_in) === 0.42 && Number(byNo[1].poi_y_in) === 0,
+     `impacts travel in target inches (${byNo[1].poi_x_in}, ${byNo[1].poi_y_in})`);
+  ok(byNo[0].ring === '10' && byNo[1].ring === '9',
+     'with the ring each took — the score is not derivable from the geometry');
+  ok(byNo.every(x => x.is_sighter === false), 'and none of these were sighters');
+  ok(byNo.every(x => x.velocity_fps == null),
+     'no velocities: Zero records holes in paper, a chronograph is Bench\'s instrument');
+
+  const sess = [...(mock.state.rows.get('range_sessions')?.values() || [])][0] || {};
+  ok(sess.target_name, `the paper travels with the string (${sess.target_name})`);
+  ok(sess.target_face && Array.isArray(sess.target_face.rings) && sess.target_face.rings.length > 2,
+     '...as ring geometry, so a hole at (0.4,-1.1) can be drawn where it landed');
+  ok(sess.target_face.rings.every(r => typeof r.score === 'string' && Number.isFinite(r.diam)),
+     '...in the shape the check constraint demands');
+}
+
 console.log('\nidempotency across sync AND reload');
 await page.click('button:has-text("Sync now")');
 await page.waitForTimeout(700);
 await page.reload();                      // remote ids must have been persisted
 await page.waitForTimeout(700);
+await openMore('Cloud sync');             // a reload lands on Sessions
 await page.click('button:has-text("Sync now")');
 await page.waitForTimeout(700);
 ok((mock.state.rows.get('range_sessions')?.size || 0) === 1,
    'three syncs + a reload still yield exactly one range_session');
 ok((mock.state.rows.get('groups')?.size || 0) === 1, '...and exactly one group');
+/* The failure this guards: shots are keyed (session_id, shot_no), so a client
+ * minting a fresh uuid per push sends row after row claiming shot 1 of the
+ * same session. The server refuses with 23505; a mock that did not model the
+ * key would have stacked six holes on a two-shot target instead. */
+ok((mock.state.rows.get('shots')?.size || 0) === 2,
+   `...and exactly two shots, not two per sync (${mock.state.rows.get('shots')?.size || 0})`);
+{
+  const shot = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots[0].remoteId);
+  ok(!!shot && mock.state.rows.get('shots').has(shot),
+     'each shot carries the remote id it was pushed under, persisted locally');
+}
 const remoteId = await page.evaluate(() =>
   JSON.parse(localStorage.getItem('sessions_v1'))[0].remoteId);
 ok(remoteId === [...mock.state.rows.get('range_sessions').keys()][0],
@@ -215,8 +330,7 @@ await page.evaluate(() => {
 });
 await page.reload();
 await page.waitForTimeout(800);
-await page.click('button:has-text("Firearms")');
-await page.waitForTimeout(400);
+await openMore('Firearms & loads');
 ok((await page.textContent('body')).includes('Leander SR-01'), 'the firearm is there');
 ok(await page.locator('button:has-text("⇣ Bench")').count() > 0,
    'the Bench importer is still offered once a firearm exists');
@@ -417,11 +531,10 @@ console.log('\nimport is its own button, and its own request');
    * session detail, where the tab bar is not what is on screen. */
   await page.reload();
   await page.waitForTimeout(900);
-  await page.click('.tabbar button:has-text("Targets+")');
-  await page.waitForTimeout(500);
+  await openMore('Loads from Bench');
   const onTargets = await page.textContent('body');
   ok(onTargets.includes('Loads from Bench'),
-     'Targets+ carries the Bench importer');
+     'More carries the Bench importer as its own destination');
   ok(onTargets.includes('does not push anything and is not a sync'),
      '...and says plainly that it is a read');
 

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { loadConfig } from '../../tools/config.mjs';
 import { FACE_CSS, FONT_FILES } from '../../packages/fonts/face-css.mjs';
+import { buildId } from '../../tools/build-id.mjs';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,7 +17,12 @@ const core = read('../../packages/zero-core/zero-core.js')
   .replace("if (typeof module !== 'undefined' && module.exports) module.exports = ZeroCore;\n", '');
 // The backend, injected the same way Zero gets it: one file, both apps.
 const cfg = loadConfig();
-const conf = `const SHARED_SUPABASE = ${JSON.stringify({ url: cfg.url, anonKey: cfg.anonKey })};`;
+const build = buildId();
+/* Which build this is, in one line the user can read off the phone. Injected
+ * beside the backend config for the same reason: both are facts about how this
+ * copy was made, and neither belongs in source. */
+const conf = `const SHARED_SUPABASE = ${JSON.stringify({ url: cfg.url, anonKey: cfg.anonKey })};\n`
+  + `const BUILD_ID = ${JSON.stringify(build.id)};`;
 const js = [conf, read('src/qr.js'), core, read('src/sync.js'), read('src/app.js')].join('\n');
 if (/<\/script|<!--/i.test(js)) throw new Error('payload would close the inline script');
 // replace via a FUNCTION: a string replacement expands $' and $& inside the payload

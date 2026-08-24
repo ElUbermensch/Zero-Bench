@@ -4001,7 +4001,22 @@ export default function App() {
   const importRef = useRef(null);
 
   // Full-data backup of all personal keys. Schema-versioned for forward compat.
-  const exportBackup = () => {
+  /* Export, by the share sheet where there is one and a download where there
+   * is not.
+   *
+   * `<a download>` is what this used to be, and in a home-screen PWA on iOS
+   * that is close to useless: the attribute is not honoured, so the tap either
+   * does nothing at all or opens the JSON in place with no way to keep it. The
+   * backup button appeared to work and produced no file. That is the worst
+   * shape a backup feature can have -- the user believes they have a copy --
+   * and it is also why moving data to a second device failed: there was never
+   * a file to move.
+   *
+   * navigator.share with a File gives the real iOS share sheet: Save to Files,
+   * AirDrop, Messages. AirDrop in particular IS the second-device path.
+   * Everywhere else (desktop browsers, Android without file share) falls back
+   * to the download, which works there. */
+  const exportBackup = async () => {
     const payload = {
       schema: 'zero-backup', version: 1, exportedAt: new Date().toISOString(),
       data: {
@@ -4009,19 +4024,40 @@ export default function App() {
         deleted_builtins_v1: deletedBuiltins, rifles_v1: firearms, ammo_v1: ammo,
       },
     };
-    try {
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const el = document.createElement('a');
-      el.href = url;
-      el.download = `zero-backup-${new Date().toISOString().slice(0,10)}.json`;
-      document.body.appendChild(el); el.click(); el.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      // Record the export so the staleness nudge resets. Not part of the
-      // backup payload itself (it's local bookkeeping, not user data).
+    const text = JSON.stringify(payload, null, 2);
+    const name = `zero-backup-${new Date().toISOString().slice(0,10)}.json`;
+    // Local bookkeeping, not user data: only stamped once something actually
+    // left the app, so the staleness nudge cannot be reset by a failed export.
+    const markExported = () => {
       const meta = { lastExportTs: Date.now(), sessionsAtExport: sessions.length };
       setBackupMeta(meta);
       window.storage.set('backup_meta_v1', JSON.stringify(meta)).catch?.(()=>{});
+    };
+
+    try {
+      const file = new File([text], name, { type: 'application/json' });
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Zero backup' });
+        markExported();
+        return;
+      }
+    } catch (e) {
+      /* A dismissed share sheet is not a failure, and must NOT fall through to
+       * a download: on the platform where the sheet exists, the download is
+       * the thing that silently does nothing. */
+      if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) return;
+      // Anything else: fall through and try the download.
+    }
+
+    try {
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const el = document.createElement('a');
+      el.href = url;
+      el.download = name;
+      document.body.appendChild(el); el.click(); el.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      markExported();
     } catch (e) { window.alert('Export failed: ' + (e?.message || e)); }
   };
 
@@ -8270,6 +8306,20 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
 
 /* ── Firearms tab: round-count tracking + barrel life + per-firearm group trend ── */
 function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, core }) {
+  /* ONE prop set for the ammunition section, spread into both returns.
+   *
+   * This function returns from two places -- an empty state and a populated
+   * one -- and each wrote the same long prop list out by hand. The populated
+   * one omitted `core`. Every cloud-facing control in AmmoSection is gated on
+   * `core && core.isSignedIn()`, so the "⇣ Bench" button, the refresh button
+   * and the import card all vanished the moment a user added their first
+   * firearm, and stayed gone forever after. It looked exactly like the import
+   * feature not existing -- which is what the user reported, twice, while
+   * signed in on a current build with the batches sitting on the server.
+   *
+   * Written once now. A prop list duplicated across two branches is a prop
+   * list that will disagree with itself again. */
+  const ammoProps = { ammo, firearms, sessions, getTarget, onSaveAmmo, core };
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
   const [open, setOpen] = useState(null);
@@ -8301,7 +8351,7 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
           <div className="et">No firearms yet</div>
           <div className="es">Add a firearm to track round count against barrel life and see per-firearm group trends.</div>
         </div>
-        <AmmoSection ammo={ammo} firearms={firearms} sessions={sessions} getTarget={getTarget} onSaveAmmo={onSaveAmmo} core={core} />
+        <AmmoSection {...ammoProps} />
       </div>
     );
   }
@@ -8422,7 +8472,7 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
         Round count includes starting round count plus all shots logged in sessions that reference this firearm. Barrel life is a shooter-set threshold; actual accurate life varies by chambering, powder, and cleaning regimen.
       </div>
 
-      <AmmoSection ammo={ammo} firearms={firearms} sessions={sessions} getTarget={getTarget} onSaveAmmo={onSaveAmmo} />
+      <AmmoSection {...ammoProps} />
     </div>
   );
 }

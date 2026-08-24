@@ -251,10 +251,6 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--brass);border-color:var(--brass);color:#20180a}
 .btn.danger{color:#ffa8a8;border-color:#8a2b2b;background:transparent}
-/* An armed delete. Filled rather than outlined, because the difference between
- * "the button that deletes" and "the button that is about to delete" has to be
- * visible without reading the label. */
-.btn.danger.armed{background:#8a2b2b;color:#fff;border-color:#b34747}
 .btn.wide{width:100%}
 .btn.sm{padding:7px 11px;min-height:36px;font-size:13px}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}
@@ -308,23 +304,10 @@ svg.casemini{width:76px;height:auto;flex:none}
 .lbl{width:2.5in;height:1.5in;padding:.07in .09in;box-sizing:border-box;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
   color:#000;background:#fff;display:flex;flex-direction:column;
-  border:1px dashed #bbb;position:relative;overflow:hidden;
-  /* Browsers drop BACKGROUND colours when printing unless asked not to, and
-   * this label has two that carry meaning: the red "DO NOT FIRE" band, and
-   * previously the coloured mark dots. Both printed white -- a quarantine
-   * warning that vanishes on paper is worse than no warning, because the label
-   * looks complete. The case drawing is SVG fill, which is content rather than
-   * background and prints either way, but the band still needs this. */
-  -webkit-print-color-adjust:exact;print-color-adjust:exact}
+  border:1px dashed #bbb;position:relative;overflow:hidden}
 .lbl .cart{font-size:11pt;font-weight:800;line-height:1.02}
 .lbl .load{font-size:7.2pt;line-height:1.18;margin-top:1px}
-/* The scanned serial, big enough to read across a bench and select by hand if
- * the clipboard is refused. */
-.serialbig{font-size:26px;letter-spacing:.06em;text-align:center;margin-top:12px;
-  padding:12px 8px;background:var(--panel2);border:1px solid var(--line);
-  border-radius:var(--r);user-select:all;-webkit-user-select:all;word-break:break-all}
 .lbl .btm{margin-top:auto;display:flex;align-items:flex-end;gap:5px}
-.lbl .btm .grow1{display:flex;flex-direction:column;min-width:0}
 .lbl .ser{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10pt;
   font-weight:700;letter-spacing:.03em;line-height:1.15}
 .lbl .meta{font-size:6.4pt;color:#333;line-height:1.25}
@@ -333,12 +316,9 @@ svg.casemini{width:76px;height:auto;flex:none}
 .lbl .band{position:absolute;left:0;right:0;top:0;background:#c00;color:#fff;
   font-size:6.8pt;font-weight:800;text-align:center;letter-spacing:.05em;padding:1px 0}
 .lbl.hasband{padding-top:.17in}
-.lbl .marks{display:flex;gap:5px;align-items:center;margin-top:2px}
-/* The case drawing, sized for a 2.5in label. Width is the constraint: the
- * viewBox is 300x88, so 1.05in of width is about 0.31in of height, which fits
- * between the load block and the serial row without pushing either. */
-.lbl .case{width:1in;height:auto;flex:none;display:block;margin-top:1px}
-.lbl .marks .ms{font-size:6.2pt;color:#333;line-height:1.2}
+.lbl .marks{display:flex;gap:3px;align-items:center;margin-top:2px}
+.lbl .marks i{width:8px;height:8px;border-radius:50%;border:1px solid #444;display:block;flex:none}
+.lbl .marks .ms{font-size:6.5pt;color:#444;margin-left:3px}
 
 @media print{
   body{background:#fff;color:#000;padding:0}

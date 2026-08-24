@@ -99,7 +99,7 @@ ok(/__SUPABASE_CONFIG__/.test(embedded), 'Zero takes its backend from the build,
 
 const wf = read('.github/workflows/test.yml');
 for (const t of ['rls_test.sql', 'rls_test2.sql', 'rls_test3.sql', 'rls_test4.sql',
-                 'rls_test5.sql', 'rls_test6.sql']) {
+                 'rls_test5.sql']) {
   ok(wf.includes(t), `CI runs supabase/test/${t}`, 'a suite that CI does not run is a suite that rots');
 }
 const deploy = read('.github/workflows/deploy.yml');

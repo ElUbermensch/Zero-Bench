@@ -1,7 +1,6 @@
 node_modules/
 dist/
 dist-test/
-dist-test-overlay/
 dist-cross/
 bundle.js
 shots/

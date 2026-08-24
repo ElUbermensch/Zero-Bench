@@ -249,40 +249,22 @@ const BenchSync = (() => {
                        why: 'its batch could not sync, so the session cannot either' });
         continue;
       }
-      /* Sessions are two-way now, so the same rule as firearms applies: only
-       * what changed HERE since this device last agreed with the server. Push
-       * runs before pull, so re-sending an untouched copy of a session that
-       * came FROM Zero would overwrite Zero's richer row -- its shot count, its
-       * group -- with Bench's narrower mapping, and the pull would then read
-       * the damage back as truth. */
-      const dirtyS = !s.remote || !s.syncedAt || Number(s.mtime || 0) > Number(s.syncedAt);
-      if (!dirtyS) continue;
       const fa = (DB.firearms || []).find(x => x.id === s.firearm);
       /* Chronograph SUMMARIES are written directly. The trigger that keeps a
        * session's velocity honest recomputes from the `shots` table, and only
        * fires when shots change — Bench records no per-shot string, so nothing
        * will overwrite these. Zero, which does record shots, writes its own
        * sessions and the trigger governs those. */
-      /* rounds_fired is the column that means what Bench's `rounds` means, and
-       * it was being left null while the round count went into `velocity_n`.
-       * Those are different quantities: velocity_n is how many readings the
-       * chronograph took, which is zero on a session that had no chronograph
-       * out. The consequence was that Bench's round usage never reached the
-       * server at all -- so Zero could not see it, and neither could a second
-       * device -- while a session with no velocity data claimed a sample size
-       * equal to its round count. */
-      const chrono = nn(s.vAvg) != null || nn(s.vSd) != null || nn(s.vEs) != null;
       add('range_sessions', {
         id: rid(s), batch_id: b.remote, firearm_id: fa?.remote || null,
         occurred_on: iso(s.date) || iso(new Date().toISOString()),
-        rounds_fired: Math.max(0, Math.round(nn(s.rounds) || 0)),
         temp_f: nn(s.temp),
         velocity_avg_fps: nn(s.vAvg), velocity_sd_fps: nn(s.vSd),
         velocity_es_fps: nn(s.vEs),
-        velocity_n: chrono ? Math.max(0, Math.round(nn(s.rounds) || 0)) : null,
+        velocity_n: nn(s.rounds),
         pressure_signs: s.pressureSigns || 'none',
         notes: s.notes || null, source_app: 'bench',
-      }, s);
+      });
       // A group needs at least two shots and a distance; a chronograph-only
       // session legitimately has neither.
       const g = nn(s.group), dist = nn(s.distance), n = Math.round(nn(s.rounds) || 0);
@@ -411,92 +393,8 @@ const BenchSync = (() => {
    * tables are ignored rather than refused: the cursor only advances for a
    * sync that HAS a handler, and a handler that throws on a table it does not
    * know would abort every table after it. */
-  /* Range sessions, coming BACK.
-   *
-   * Zero pushes a session for every string shot with a Bench-linked load, and
-   * that row carries the one number Bench most wants and cannot derive: how
-   * many rounds actually left the box. Bench had no reader for it, so a batch
-   * shot forty times in Zero still showed a full box here, and the brass never
-   * aged. Rounds fired and brass wear are both DERIVED from sessions in Bench,
-   * so applying the session is all it takes to make both correct.
-   *
-   * Only sessions whose batch this device actually has are applied. A row about
-   * a batch that is not here is not something to invent a local record for.
-   */
-  function applyRangeSessions(DB, rows, helpers) {
-    const stat = { added: 0, updated: 0, removed: 0 };
-    if (!Array.isArray(rows) || !rows.length) return stat;
-    DB.sessions = DB.sessions || [];
-
-    for (const row of rows) {
-      if (!row || !row.id) continue;
-      const local = DB.sessions.find(x => x.remote === row.id) || null;
-
-      if (row.deleted_at) {
-        if (local) { DB.sessions = DB.sessions.filter(x => x !== local); stat.removed++; }
-        continue;
-      }
-
-      const batch = (DB.batches || []).find(b => b.remote === row.batch_id);
-      if (!batch) continue;                    // not a batch this device knows
-      const firearm = (DB.firearms || []).find(f => f.remote === row.firearm_id);
-
-      const patch = {
-        batch: batch.id,
-        firearm: firearm ? firearm.id : (local ? local.firearm : null),
-        date: (row.occurred_on || '').slice(0, 10) || (local ? local.date : null),
-        /* rounds_fired is the honest column. velocity_n is how many readings a
-         * chronograph took, which is not the same number and is null on a
-         * session that had no chronograph out. */
-        rounds: nn(row.rounds_fired) ?? (local ? local.rounds : null),
-        temp: nn(row.temp_f),
-        vAvg: nn(row.velocity_avg_fps), vSd: nn(row.velocity_sd_fps),
-        vEs: nn(row.velocity_es_fps),
-        pressureSigns: row.pressure_signs || 'none',
-        notes: row.notes || '',
-        /* Arrived from the server, so it is clean by definition: stamping it
-         * as sent is what stops Bench pushing Zero's own session back with
-         * Bench's narrower mapping on the very next sync. */
-        mtime: 0, syncedAt: Date.now(),
-      };
-
-      if (local) {
-        const before = JSON.stringify([local.rounds, local.date, local.batch, local.notes]);
-        Object.assign(local, patch);
-        if (before !== JSON.stringify([local.rounds, local.date, local.batch, local.notes])) stat.updated++;
-      } else {
-        DB.sessions.push(Object.assign({ id: helpers.uid('se'), remote: row.id }, patch));
-        stat.added++;
-      }
-    }
-    return stat;
-  }
-
-  /* A group carries the two things a session row does not: the distance it was
-   * shot at, and how big the group was. Bench shows both on the batch. */
-  function applyGroups(DB, rows) {
-    const stat = { added: 0, updated: 0, removed: 0 };
-    if (!Array.isArray(rows) || !rows.length) return stat;
-    for (const row of rows) {
-      if (!row || !row.session_id || row.deleted_at) continue;
-      const s = (DB.sessions || []).find(x => x.remote === row.session_id);
-      if (!s) continue;
-      const dist = nn(row.distance_yd), grp = nn(row.group_es_in);
-      const before = [s.distance, s.group].join('|');
-      if (dist != null) s.distance = dist;
-      if (grp != null) s.group = grp;
-      s.remoteGroup = row.id;
-      if ([s.distance, s.group].join('|') !== before) stat.updated++;
-    }
-    return stat;
-  }
-
   function applyPulled(DB, table, rows, helpers) {
     if (table === 'firearms') return applyFirearms(DB, rows, helpers);
-    if (table === 'range_sessions') return applyRangeSessions(DB, rows, helpers);
-    /* Groups are applied AFTER their sessions, which the table order in
-     * zero-core already guarantees: range_sessions comes before groups. */
-    if (table === 'groups') return applyGroups(DB, rows);
     return null;
   }
 

@@ -54,41 +54,6 @@ section('auth');
   ok(good.ok && c.isSignedIn(), 'signIn with the right password succeeds');
 }
 
-/* ========================== a confirmation link arrives with a session in it */
-/* Supabase's confirm-your-email link lands on the Site URL carrying
- * `#access_token=...&refresh_token=...&type=signup`. Nothing read it, so a new
- * user clicked the link and watched the app load as a stranger. */
-section('a session in the URL fragment');
-{
-  const store = memStore();
-  const seed = mkClient(store);
-  await seed.signUp('confirm@example.com', 'pw');
-  const tok = seed.getSession();
-
-  // A fresh browser: no stored session, an auth callback in the fragment.
-  const fresh = memStore();
-  const loc = { hash: `#access_token=${tok.access_token}&refresh_token=${tok.refresh_token}`
-                    + '&expires_in=3600&token_type=bearer&type=signup',
-                pathname: '/', search: '' };
-  globalThis.location = loc;
-  globalThis.history = { replaceState: (a, b, url) => { loc.hash = ''; loc.replaced = url; } };
-
-  const c = mkClient(fresh);
-  ok(c.isSignedIn(), 'the app comes up signed in rather than as a stranger');
-  ok(loc.hash === '', 'and the token is stripped from the URL, not left in history');
-  ok(loc.replaced === '/', '...replacing rather than pushing');
-
-  /* A Bench deep link lives in the same fragment. Touching it would send a
-   * scanned label to the wrong screen. */
-  const loc2 = { hash: '#/s/B26H13-01D', pathname: '/bench/', search: '' };
-  globalThis.location = loc2;
-  const c2 = mkClient(memStore());
-  ok(!c2.isSignedIn() && loc2.hash === '#/s/B26H13-01D',
-     'a deep link in the same fragment is left completely alone');
-
-  delete globalThis.location; delete globalThis.history;
-}
-
 /* ======================================================= token refresh */
 section('token refresh');
 {
@@ -548,35 +513,6 @@ section('a table whose queue holds more than one row shape');
 }
 
 /* ============================================================== live relay */
-/* ================== a client newer than the server it is talking to */
-/* Migration 0009 adds a parameter to join_relay and a relay_face function. A
- * phone updates itself; a database does not. PostgREST resolves an RPC by the
- * keys in the body, so the new client's join would 404 against a server that
- * has not been migrated -- pair fire simply stops working, on a match morning,
- * for a reason nobody on the firing line can diagnose. */
-section('joining a server that predates the target-overlay migration');
-{
-  mock.state.legacyRelayRpc = true;
-  const host = mkClient(), partner = mkClient();
-  const made = await host.createRelay({ hostName: 'Old Server', targetName: 'SR', distanceYd: 200 });
-  ok(made.ok, 'going live still works');
-
-  const j = await partner.joinRelay(made.relay.code, 'Pete', 'shooter',
-                                    { distanceYd: 200, targetName: 'SR' });
-  ok(j.ok, 'and joining still works — the client retries without the new argument');
-  ok(j.slot === 2, '...with a real firing point, not a degraded seat');
-
-  const st = await partner.pollRelayOnce();
-  ok(st.ok, 'the relay polls normally');
-  /* No face, and that is the correct outcome: the plot falls back to the bare
-   * grid it drew before, rather than the app failing. */
-  ok(partner.relayInfo() && !partner.relayInfo().face,
-     'there is simply no target geometry, which the plot handles by drawing a grid');
-
-  host.stopRelay(); partner.stopRelay();
-  mock.state.legacyRelayRpc = false;
-}
-
 section('live relay');
 {
   const host = mkClient(), coach = mkClient(), stranger = mkClient();
@@ -859,89 +795,6 @@ section('event coverage');
   c2.on(c2.EVENTS.AUTH_SIGNED_IN, () => { throw new Error('listener exploded'); });
   const r = await c2.signUp('boom@example.com', 'pw');
   ok(r.ok, 'a listener that throws does not break the operation that emitted');
-}
-
-/* ========================================================= whole-device backup */
-/* Moving to a second phone used to mean exporting a JSON file and carrying it
- * across by hand, which on a home-screen PWA on iOS mostly meant it could not
- * be carried across at all. A snapshot in one bounded row is the replacement.
- *
- * It is deliberately NOT the outbox: the outbox retries forever so a write
- * made with no signal still lands, and a backup that "will happen later" is
- * one the user believes they have and does not. */
-section('whole-device backup');
-{
-  const c = mkClient(undefined, { appId: 'zero' });
-  await c.signUp('backup@example.com', 'pw');
-
-  const payload = JSON.stringify({ sessions_v1: [{ id: 's1' }], rifles_v1: [] });
-  const put = await c.backupPut({ app: 'zero', payload, counts: { sessions: 1 },
-                                  deviceLabel: 'iPhone', appBuild: 'test' });
-  ok(put.ok, 'a snapshot goes up');
-  ok(c.pendingCount() === 0,
-     '...without touching the outbox — it is a direct write, not queued work');
-
-  const got = await c.backupGet({ app: 'zero' });
-  ok(got.ok && got.found && got.row.payload === payload,
-     'and comes back byte for byte');
-  ok(got.row.counts && got.row.counts.sessions === 1,
-     'the record counts travel, so a restore screen can say what is in there');
-
-  /* The failure this guards: a second backup that INSERTs rather than updates
-   * leaves two rows in a table with one unique slot, and the restore reads
-   * whichever the server happens to return first. */
-  const p2 = JSON.stringify({ sessions_v1: [{ id: 's1' }, { id: 's2' }] });
-  const put2 = await c.backupPut({ app: 'zero', payload: p2 });
-  ok(put2.ok, 'a second backup succeeds');
-  const list = await c.backupList('zero');
-  ok(list.ok && list.data.length === 1,
-     `...over the top of the first, not beside it (${list.ok ? list.data.length : '?'} row)`);
-  const got2 = await c.backupGet({ app: 'zero' });
-  ok(got2.row.payload === p2, 'and it is the newer snapshot that is stored');
-
-  /* The list is what a restore screen renders before committing a phone to
-   * downloading megabytes, so it must not contain the megabytes. */
-  ok(list.data[0].payload === undefined, 'the listing carries no payload');
-  ok(list.data[0].bytes === Buffer.byteLength(p2, 'utf8'),
-     'but does say how big the snapshot is');
-
-  /* Slots are separate rows, which is what makes "keep a known-good copy
-   * before I do something drastic" possible at all. */
-  await c.backupPut({ app: 'zero', slot: 'slot2', payload: '{"a":1}' });
-  const list2 = await c.backupList('zero');
-  ok(list2.data.length === 2, 'a second slot is a second row');
-  ok((await c.backupGet({ app: 'zero' })).row.payload === p2,
-     '...and writing it did not disturb the default slot');
-
-  /* Bench and Zero share an account and must not share a snapshot: restoring
-   * a bench into a shooting log would be nonsense. */
-  const b = mkClient(undefined, { appId: 'bench' });
-  await b.signIn('backup@example.com', 'pw');
-  await b.backupPut({ app: 'bench', payload: '{"bench":true}' });
-  ok((await c.backupGet({ app: 'zero' })).row.payload === p2,
-     "Bench's snapshot does not overwrite Zero's");
-  ok((await b.backupGet({ app: 'bench' })).row.payload === '{"bench":true}',
-     '...and each app reads back its own');
-
-  /* Refused BEFORE the upload, not after: finding out by sending eight
-   * megabytes over a phone connection and being turned down is a bad way to
-   * learn the limit. */
-  const huge = 'x'.repeat(c.BACKUP_MAX_BYTES + 1);
-  const big = await c.backupPut({ app: 'zero', slot: 'slot3', payload: huge });
-  ok(!big.ok && big.reason === 'too large',
-     'an oversized snapshot is refused, with the size and the limit');
-  ok(big.bytes > big.limit, '...and says by how much');
-
-  /* An anonymous device exists to shoot one pair-fire string. It must not be
-   * able to park megabytes per slot on the server. */
-  const anon = mkClient(undefined, { appId: 'zero' });
-  await anon.signInAnonymously();
-  const a = await anon.backupPut({ app: 'zero', payload: '{}' });
-  ok(!a.ok, 'an anonymous device cannot back up');
-
-  const none = mkClient(undefined, { appId: 'zero' });
-  const n = await none.backupPut({ app: 'zero', payload: '{}' });
-  ok(!n.ok && /signed in/.test(n.reason), 'nor can a device with no account');
 }
 
 await mock.stop();

@@ -286,17 +286,12 @@ function findCartridge(name) {
   return DB.cartridges.find(c => cartKey(c.name) === k) || null;
 }
 
-function ensureCartridge(name, geom) {
+function ensureCartridge(name) {
   const clean = (name || '').trim();
   if (!clean) return null;
   const found = findCartridge(clean);
-  /* An existing cartridge keeps its shape. Re-typing a name that already
-   * exists is how you REFER to it, not how you redefine it -- silently
-   * restyling every brass lot in .303 British because someone picked the
-   * default in a hurry is not a thing a text field should be able to do. */
   if (found) return found.id;
-  const c = { id: uid('ct'), name: clean,
-              shape: caseShape(geom), head: caseHead(geom) };
+  const c = { id: uid('ct'), name: clean };
   DB.cartridges.push(c);
   return c.id;
 }
@@ -766,72 +761,9 @@ const fmtDate = (s) => s
 const num = (v, d) => (v === '' || v == null || isNaN(+v) ? (d == null ? null : d) : +v);
 
 /* --------------------------------------------------------------- case SVG */
-/* The silhouette is drawn from the cartridge, not from one hardcoded shape.
- *
- * It used to be a single path with a flange standing proud of the body at the
- * head -- which is a RIMMED case. Almost nothing a precision shooter loads is
- * rimmed: 6.5 Creedmoor, .308, .223 and every other bottleneck rifle round is
- * rimless, and its head is the same diameter as its body with an extractor
- * groove cut in ahead of it. So the drawing on the Identify screen, on every
- * brass row and on every printed label showed a case shape that none of the
- * user's brass actually has. It still read as "a case", which is why it went
- * unnoticed, but the one place the picture has to be right is the one where
- * you are holding the real thing against it.
- *
- * Two properties, because they are genuinely independent: a case can be
- * bottleneck or straight-walled, and separately rimless, rimmed or belted.
- * .303 British is bottleneck AND rimmed; 9mm is straight and rimless; 7mm Rem
- * Mag is bottleneck and belted. Collapsing them into one "necked or rimmed"
- * choice would make three of the six combinations unrepresentable.
- *
- * Vertical reference, in viewBox units: the body spans y 17..71, the neck
- * 28..60, the extractor groove cuts in to 24..64, a rim flange stands out to
- * 11..77 and a belt to 14..74. */
-const CASE_SHAPES = { bottleneck: 'Bottleneck', straight: 'Straight-walled' };
-const CASE_HEADS = { rimless: 'Rimless (extractor groove)', rimmed: 'Rimmed', belted: 'Belted' };
-const NECK_X = 42;
-
-const caseShape = (c) => (c && CASE_SHAPES[c.shape] ? c.shape : 'bottleneck');
-const caseHead = (c) => (c && CASE_HEADS[c.head] ? c.head : 'rimless');
-
-/* Everything the renderer needs for one cartridge: the outline, where the
- * markable body ends, and where the head block is so marks on the case head
- * land on it rather than beside it. */
-function caseGeom(cart) {
-  const shape = caseShape(cart), head = caseHead(cart);
-  const R = 262;                                   // right edge of the drawing
-  const T = 17, B = 71;                            // body
-  const GT = 24, GB = 64;                          // extractor groove
-  const FT = 11, FB = 77;                          // rim flange
-  const LT = 14, LB = 74;                          // belt
-
-  let topHead, botHead, bodyEnd, baseX0, baseY0, baseY1, sepAt = null;
-  if (head === 'rimmed') {
-    bodyEnd = 242; baseX0 = 242; baseY0 = FT; baseY1 = FB; sepAt = 242;
-    topHead = `L242,${T} L242,${FT} L${R},${FT}`;
-    botHead = `L${R},${FB} L242,${FB} L242,${B}`;
-  } else if (head === 'belted') {
-    bodyEnd = 208; baseX0 = 238; baseY0 = T; baseY1 = B;
-    topHead = `L208,${T} L208,${LT} L224,${LT} L224,${GT} L238,${GT} L238,${T} L${R},${T}`;
-    botHead = `L${R},${B} L238,${B} L238,${GB} L224,${GB} L224,${LB} L208,${LB} L208,${B}`;
-  } else {
-    bodyEnd = 226; baseX0 = 240; baseY0 = T; baseY1 = B;
-    topHead = `L226,${T} L226,${GT} L240,${GT} L240,${T} L${R},${T}`;
-    botHead = `L${R},${B} L240,${B} L240,${GB} L226,${GB} L226,${B}`;
-  }
-
-  const topBody = shape === 'straight' ? `M40,${T}` : `M40,28 L78,28 L100,${T}`;
-  const botBody = shape === 'straight' ? `L40,${B} Z` : `L100,${B} L78,60 L40,60 Z`;
-
-  return {
-    shape, head, baseX0, baseX1: R, baseY0, baseY1, sepAt,
-    /* Marks stop short of whatever the head does: a band painted over an
-     * extractor groove or a belt is a band that is not there in life. */
-    bandX1: bodyEnd - 4,
-    path: `${topBody} ${topHead} ${botHead} ${botBody}`,
-  };
-}
-
+const CASE_PATH = 'M40,28 L78,28 L100,17 L248,17 L248,13 L262,13 L262,75 L248,75 '
+                + 'L248,71 L100,71 L78,60 L40,60 Z';
+const HEAD_X = 248, NECK_X = 42;
 let svgSeq = 0;
 
 function caseSvg(marks, opts) {
@@ -839,18 +771,10 @@ function caseSvg(marks, opts) {
   const uidc = 'cc' + (++svgSeq);
   const heads = sc.positions.filter(isHeadPos);
   const bandPos = sc.positions.filter(p => !isHeadPos(p));
-  /* `cart` may be a record or an id, and may be absent -- the Identify screen
-   * draws a case before you have said which cartridge you are holding. A
-   * rimless bottleneck is the right default: it is what almost everything a
-   * precision shooter loads actually is. */
-  const cart = typeof o.cart === 'string' ? byId(DB.cartridges, o.cart) : o.cart;
-  const g = caseGeom(cart);
-
-  const bandX = (p) => g.bandX1 - (p.at ?? 0.5) * (g.bandX1 - NECK_X);
 
   const bands = bandPos.map(p => {
     const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
-    const x = bandX(p);
+    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
     const w = o.mini ? 15 : 17;
     return col
       ? `<rect x="${x - w / 2}" y="10" width="${w}" height="70" fill="${col.hex}"/>`
@@ -858,44 +782,38 @@ function caseSvg(marks, opts) {
         + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
   }).join('');
 
-  /* The case head is the flat base, drawn as the block at the right of the
-   * side view -- the rim on a rimmed case, the head itself on a rimless one.
-   * Several head positions split it into stripes rather than overprinting each
-   * other: a mark you cannot see is a mark you will not check. */
-  const hw = g.baseX1 - g.baseX0, span = (g.baseY1 - g.baseY0) - 4;
+  /* The case head is the flat base, drawn as the rim block at the right of
+   * the side view. Several head positions split it into stripes rather than
+   * overprinting each other -- a mark you cannot see is a mark you will not
+   * check. */
   const rim = heads.map((p, i) => {
     const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
-    const y0 = g.baseY0 + 2 + i * (span / heads.length), h = span / heads.length;
+    const y0 = 13 + i * (62 / heads.length), h = 62 / heads.length;
     return col
-      ? `<rect x="${g.baseX0}" y="${y0}" width="${hw}" height="${h}" fill="${col.hex}"/>`
-      : `<rect x="${g.baseX0 + 0.7}" y="${y0 + 0.7}" width="${hw - 1.4}" height="${h - 1.4}" fill="none" `
+      ? `<rect x="248" y="${y0}" width="14" height="${h}" fill="${col.hex}"/>`
+      : `<rect x="248.7" y="${y0 + 0.7}" width="12.6" height="${h - 1.4}" fill="none" `
         + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
   }).join('');
 
   const ticks = o.mini ? '' : bandPos.map(p => {
-    const x = bandX(p);
+    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
     return `<line x1="${x}" y1="78" x2="${x}" y2="88" stroke="#6c7480" stroke-width="1"/>`
       + `<text x="${x}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${esc(p.label)}</text>`;
   }).join('') + (heads.length && !o.mini
-    // Under the head, not beside it: a label centred to the right of the case
+    // Under the rim, not beside it: a label centred to the right of the case
     // runs off the edge of the viewBox and gets clipped.
-    ? `<line x1="${(g.baseX0 + g.baseX1) / 2}" y1="78" x2="${(g.baseX0 + g.baseX1) / 2}" y2="88" stroke="#6c7480" stroke-width="1"/>`
-      + `<text x="${(g.baseX0 + g.baseX1) / 2}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
+    ? `<line x1="255" y1="78" x2="255" y2="88" stroke="#6c7480" stroke-width="1"/>`
+      + `<text x="255" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
           esc(heads.length === 1 ? heads[0].label : 'Case head')}</text>`
     : '');
   return `<svg class="case${o.mini ? ' casemini' : ''}" viewBox="0 0 300 ${o.mini ? 88 : 106}"
-      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="case marking"
-      data-shape="${g.shape}" data-head="${g.head}">
-    <defs><clipPath id="${uidc}"><path d="${g.path}"/></clipPath></defs>
-    <path d="${g.path}" fill="#b9a06a" stroke="#8d7844" stroke-width="1.5"/>
+      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="case marking">
+    <defs><clipPath id="${uidc}"><path d="${CASE_PATH}"/></clipPath></defs>
+    <path d="${CASE_PATH}" fill="#b9a06a" stroke="#8d7844" stroke-width="1.5"/>
     <g clip-path="url(#${uidc})">${bands}</g>
-    <g clip-path="url(#${uidc})">${rim}</g>
-    <path d="${g.path}" fill="none" stroke="#8d7844" stroke-width="1.5"/>
-    ${/* On a rimmed case the flange needs a line where it meets the body, or
-         the head marks read as part of the body. A rimless or belted case has
-         a groove doing that job in the outline already. */
-      g.sepAt ? `<path d="M${g.sepAt},17 L${g.sepAt},71" stroke="#8d7844" stroke-width="1"/>` : ''}
-    ${ticks}</svg>`;
+    <path d="${CASE_PATH}" fill="none" stroke="#8d7844" stroke-width="1.5"/>
+    <path d="M248,17 L248,71" stroke="#8d7844" stroke-width="1"/>${rim}
+    <path d="M248,13 L262,13 L262,75 L248,75 Z" fill="none" stroke="#8d7844" stroke-width="1.5"/>${ticks}</svg>`;
 }
 
 /* Written this way rather than `p.kind === 'head'` so a scheme saved before
@@ -1089,8 +1007,7 @@ const FORMS = {
 };
 
 /* Transient state for form controls that need it between renders. */
-const UI = { lookup: {}, marks: {}, formKind: null, toast: null, cartNew: {},
-             confirm: null, confirmTimer: null };
+const UI = { lookup: {}, marks: {}, formKind: null, toast: null, cartNew: {} };
 
 /* `rec` is the record being edited, or null when creating. Every control reads
  * its current value from it, so one description of a field serves both. */
@@ -1146,21 +1063,7 @@ function fieldHtml(f, kind, rec) {
           <option value="__new" ${open ? 'selected' : ''}>+ Add new cartridge…</option>
         </select>
         <input type="text" name="${f.k}__new" class="mt6 ${open ? '' : 'hidden'}"
-          placeholder="e.g. 6.5 Creedmoor" autocomplete="off">
-        <div class="row g8 mt6 ${open ? '' : 'hidden'}" data-newcase="${f.k}">
-          <select name="${f.k}__shape" aria-label="Case shape">
-            ${Object.entries(CASE_SHAPES).map(([v, l]) =>
-              `<option value="${v}">${esc(l)}</option>`).join('')}
-          </select>
-          <select name="${f.k}__head" aria-label="Case head">
-            ${Object.entries(CASE_HEADS).map(([v, l]) =>
-              `<option value="${v}">${esc(l)}</option>`).join('')}
-          </select>
-        </div>
-        <span class="fhint ${open ? '' : 'hidden'}" data-newcase="${f.k}">Shape and head are
-          independent: .303 British is bottleneck AND rimmed, 9mm is straight and rimless.
-          They only change the drawing you match brass against — rimless is right for almost
-          every bottleneck rifle cartridge.</span>`;
+          placeholder="e.g. 6.5 Creedmoor" autocomplete="off">`;
       break;
     }
 
@@ -1291,9 +1194,6 @@ function readForm(form, kind) {
       if (v === '__new' || fresh) {
         const found = findCartridge(fresh);
         out[f.k] = found ? found.id : (fresh ? PENDING + fresh : null);
-        // Held beside the pending name, and consumed with it. Creation happens
-        // only after validation passes, so these travel the same route.
-        out['__case_' + f.k] = { shape: fd.get(f.k + '__shape'), head: fd.get(f.k + '__head') };
       } else {
         out[f.k] = v;
       }
@@ -1453,8 +1353,6 @@ const TITLES = {
   inventory: ['Inventory', 'component lots'],
   recipes: ['Recipes', 'load specifications'],
   firearms: ['Firearms', ''],
-  cartridges: ['Cartridges', 'case shape and head'],
-  scanned: ['Scanned label', 'opened in a browser'],
   settings: ['Marking scheme', ''],
   data: ['Data', 'backup and reset'],
   sync: ['Cloud sync', 'shared with Zero'],
@@ -1484,23 +1382,6 @@ function render() {
       <span>${label}</span></button>`).join('');
 
   if (c.v === 'form' && c.arg && c.arg.kind === 'batch') paintDrawPreview();
-
-  /* An armed delete, painted after the view rather than inside it: the views
-   * do not know about confirmation, and should not have to. Every destructive
-   * button in the app gets this behaviour by existing. */
-  if (UI.confirm) {
-    const [act, arg] = [UI.confirm.slice(0, UI.confirm.indexOf(':')),
-                        UI.confirm.slice(UI.confirm.indexOf(':') + 1)];
-    const sel = `[data-act="${act}"]` + (arg ? `[data-arg="${arg}"]` : '');
-    const btn = document.querySelector(sel);
-    if (btn) {
-      btn.textContent = 'Tap again';
-      btn.classList.add('danger', 'armed');
-      btn.setAttribute('aria-label', 'Tap again to confirm deletion');
-    } else {
-      UI.confirm = null;              // the button is not on this screen any more
-    }
-  }
 
   if (UI.toast) {
     const d = document.createElement('div');
@@ -1593,7 +1474,7 @@ VIEWS.lookup = () => {
 
   return `${signedOut ? syncCard() : ''}
   <div class="card">
-    <div class="casewrap mb12">${caseSvg(preview, { cart: identifyCart() })}</div>
+    <div class="casewrap mb12">${caseSvg(preview)}</div>
     ${pickers}
     <div class="row spread">
       <span class="tiny dim">${matches.length} of ${DB.brassLots.length} match</span>
@@ -1615,22 +1496,9 @@ VIEWS.lookup = () => {
   ${signedOut ? '' : syncCard({ compact: true })}`;
 };
 
-/* Which case to draw on the Identify screen, where no cartridge has been
- * chosen yet. If every brass lot recorded is the same kind of case, draw that
- * kind -- the picture is being held against a real case, and someone who loads
- * one cartridge should see their cartridge. Mixed, or nothing recorded, falls
- * back to the default rather than picking a winner. */
-function identifyCart() {
-  const carts = (DB.brassLots || []).map(l => byId(DB.cartridges, l.cartridge)).filter(Boolean);
-  if (!carts.length) return null;
-  const key = (c) => caseShape(c) + '|' + caseHead(c);
-  const first = key(carts[0]);
-  return carts.every(c => key(c) === first) ? carts[0] : null;
-}
-
 function brassRow(l) {
   return `<button class="listitem" data-act="brassDetail" data-arg="${l.id}">
-    ${caseSvg(l.marks, { mini: true, cart: l.cartridge })}
+    ${caseSvg(l.marks, { mini: true })}
     <span class="grow">
       <span class="ttl">${esc(l.headstamp)} · ${esc(cartName(l.cartridge))}</span>
       <span class="sub mono">${esc(l.serial)} · ${esc(codeOf(l.marks))}</span>
@@ -1668,7 +1536,7 @@ VIEWS.brassDetail = (id) => {
         <div class="mono big">${esc(l.serial)}</div>
       </div>
       ${brassChips(l).length ? `<div>${chips(brassChips(l))}</div>` : ''}
-      <div class="casewrap mt12">${caseSvg(l.marks, { cart: l.cartridge })}</div>
+      <div class="casewrap mt12">${caseSvg(l.marks)}</div>
       <div class="small muted center mt8">Marked&nbsp;<b class="mono">${esc(codeOf(l.marks))}</b></div>
     </div>
     <div class="card">
@@ -1849,7 +1717,7 @@ VIEWS.ammoDetail = (id) => {
   <div class="card"><h2>Components</h2>
     ${lot('bulletLot')}${lot('powderLot')}${lot('primerLot')}
     ${brass ? `<button class="listitem mt10" data-act="brassDetail" data-arg="${brass.id}">
-      ${caseSvg(brass.marks, { mini: true, cart: brass.cartridge })}
+      ${caseSvg(brass.marks, { mini: true })}
       <span class="grow"><span class="ttl">${esc(brass.headstamp)}</span>
         <span class="sub mono">${esc(brass.serial)} · ${esc(codeOf(brass.marks))}</span></span>
       <span class="chev">›</span></button>` : ''}
@@ -1915,33 +1783,17 @@ function labelHtml(b) {
     : isOverMax(b) ? 'OVER PUBLISHED MAX'
     : batchMismatches(b).some(m => m.severity === 'stop') ? 'DOES NOT MATCH RECIPE'
     : isUntested(b) ? 'UNTESTED — WORK UP' : '';
-  /* The marking scheme, drawn ON A CASE rather than as a row of dots.
-   *
-   * A row of coloured circles is a legend for a code, not the thing itself.
-   * The label is read at a bench with a box open and a case in the other hand,
-   * and the question being asked is "is this the brass in this box" -- which
-   * means matching a band at a POSITION, not a colour in a sequence. Two
-   * positions the same colour in a different order are two different lots, and
-   * dots in a row make that a counting exercise. The drawing puts each mark
-   * where it actually is on the case, including the head, which has no place
-   * in a row at all.
-   *
-   * Same renderer as the Identify screen and the brass list, so what is
-   * printed and what is matched against on the phone cannot drift. */
-  const caseDiagram = brass ? caseSvg(brass.marks, { mini: true, cart: brass.cartridge }) : '';
+  const dots = brass ? scheme().positions.map(p => {
+    const c = brass.marks[p.id] ? scheme().palette.find(x => x.id === brass.marks[p.id]) : null;
+    return `<i style="background:${c ? c.hex : 'transparent'};${c ? '' : 'border-style:dashed'}"></i>`;
+  }).join('') : '';
   return `<div class="lbl ${band ? 'hasband' : ''}">
     ${band ? `<div class="band">${esc(band)}</div>` : ''}
     <div class="cart">${esc(r ? cartName(r.cartridge) : '')}</div>
     <div class="load">${esc(r ? r.bullet : '')}<br>${esc(r ? r.powder : '')}
       · <b>${b.chargeActual ?? (r ? r.charge : '')} gr</b>
       ${b.coalMean ? ` · COAL ${b.coalMean}"` : ''}<br>${esc(r ? r.primer : '')}</div>
-    ${brass ? `<div class="marks"><span class="ms">${
-      /* The letter code prints beside the drawing, and that is not redundancy:
-       * a mono laser or a thermal printer renders every colour as a grey, and
-       * a label whose entire content is colour becomes unreadable on exactly
-       * the printers most likely to be in a reloading room. The code survives
-       * black and white. */
-      esc(codeOf(brass.marks))} · ${esc(brass.headstamp)} · ${
+    ${brass ? `<div class="marks">${dots}<span class="ms">${esc(brass.headstamp)} · ${
       /* brass.firings is the BASELINE -- firings before the lot was recorded --
        * not the lot's life. Printing it meant a lot bought new and fired four
        * times went in the ammo box labelled "0f". This is the one number on the
@@ -1951,12 +1803,6 @@ function labelHtml(b) {
     <div class="btm"><div class="grow1">
       <div class="ser">${esc(b.serial)}</div>
       <div class="meta">${fmtDate(b.date)} · ${b.qty} rounds</div>
-      ${/* The case sits here, beside the QR, because that is where the space
-           already was: the QR is half an inch tall and the two lines next to it
-           are not, so the drawing costs the label no height at all. Given its
-           own row it overflowed a 1.5in label by exactly its own height -- and
-           a label that does not fit is one that prints clipped. */
-        caseDiagram}
     </div><div class="qr">${qr}</div></div>
   </div>`;
 }
@@ -1966,7 +1812,6 @@ VIEWS.more = () => [
   ['inventory', 'Inventory', `${DB.componentLots.length} component lot${DB.componentLots.length === 1 ? '' : 's'}`],
   ['recipes', 'Recipes', `${DB.recipes.length} load specification${DB.recipes.length === 1 ? '' : 's'}`],
   ['firearms', 'Firearms', `${DB.firearms.length} recorded`],
-  ['cartridges', 'Cartridges', `${DB.cartridges.length} recorded`],
   ['settings', 'Marking scheme', `${scheme().positions.length} positions · ${schemeCapacity()} codes`],
   ...(CORE ? [['sync', 'Cloud sync',
     CORE.isSignedIn() ? `signed in as ${CORE.getUser()?.email || 'you'}` : 'not signed in']] : []),
@@ -1974,8 +1819,7 @@ VIEWS.more = () => [
   /* Reachable from the menu, not only from #/diag. A home-screen app has no
    * address bar, so the URL route was unreachable on exactly the device whose
    * numbers are worth having. */
-  ['diag', 'Display diagnostics', typeof BUILD_ID === 'string'
-    ? 'build ' + BUILD_ID : 'what this device reports about the screen'],
+  ['diag', 'Display diagnostics', 'what this device reports about the screen'],
 ].map(([v, t, s]) => `<button class="listitem" data-act="nav" data-arg="${v}">
     <span class="grow"><span class="ttl">${t}</span><span class="sub">${esc(s)}</span></span>
     <span class="chev">›</span></button>`).join('');
@@ -2013,9 +1857,7 @@ VIEWS.inventory = () => {
         ${uses.length ? `<div class="tiny dim mt4">${uses.slice(0, 4).map(b =>
             `<button class="linkish" data-act="ammoDetail" data-arg="${b.id}">${esc(b.serial)}</button>`
           ).join(' ')}${uses.length > 4 ? ` +${uses.length - 4}` : ''}</div>` : ''}
-        <div class="mt6 row g8">
-          <button class="btn sm" data-act="edit" data-kind="component" data-arg="${c.id}">Edit</button>
-          <button class="btn sm danger" data-act="delComponent" data-arg="${c.id}">Delete</button></div>
+        <div class="mt6"><button class="btn sm danger" data-act="delComponent" data-arg="${c.id}">Delete</button></div>
       </div>`;
     }).join('')}</div>`;
   };
@@ -2164,9 +2006,7 @@ VIEWS.workup = (id) => {
 VIEWS.firearms = () => {
   const body = DB.firearms.length ? DB.firearms.map(f => `<div class="card">
       <div class="spread"><h2 class="m0">${esc(f.name)}</h2>
-        <span class="row g8">
-          <button class="btn sm" data-act="edit" data-kind="firearm" data-arg="${f.id}">Edit</button>
-          <button class="btn sm danger" data-act="delFirearm" data-arg="${f.id}">Delete</button></span></div>
+        <button class="btn sm danger" data-act="delFirearm" data-arg="${f.id}">Delete</button></div>
       <dl class="kv mt8">
         <dt>Cartridge</dt><dd>${esc(cartName(f.cartridge))}</dd>
         ${f.barrel ? `<dt>Barrel</dt><dd>${f.barrel}"${f.twist ? ' · ' + esc(f.twist) : ''}</dd>` : ''}
@@ -2175,38 +2015,6 @@ VIEWS.firearms = () => {
       </dl></div>`).join('')
     : empty('No firearms yet. Needed to attribute range results, and to carry sight height and zero range.');
   return body + `<button class="btn primary wide" data-act="new" data-arg="firearm">+ New firearm</button>`;
-};
-
-/* Cartridges, and the case each one actually is.
- *
- * The shape only ever feeds the drawing, which is why this screen is a list of
- * two dropdowns rather than a form: there is nothing to validate and nothing
- * else it affects. It exists because the alternative was that the case shape
- * could only ever be set on a cartridge created AFTER this update -- and every
- * cartridge the user already has is the one they are actually loading. */
-VIEWS.cartridges = () => {
-  if (!DB.cartridges.length) {
-    return empty('No cartridges yet. They are created as you record a firearm, a recipe or a brass lot.');
-  }
-  return DB.cartridges.map(c => `<div class="card">
-    <div class="spread"><h2 class="m0">${esc(c.name)}</h2>
-      <span class="tiny dim">${DB.brassLots.filter(l => l.cartridge === c.id).length} brass lot(s)</span></div>
-    <div class="casewrap mt8">${caseSvg({}, { mini: true, cart: c })}</div>
-    <div class="row g8 mt8">
-      <label class="f grow"><span>Shape</span>
-        <select data-act="cartShape" data-arg="${c.id}">
-          ${Object.entries(CASE_SHAPES).map(([v, l]) =>
-            `<option value="${v}" ${caseShape(c) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
-        </select></label>
-      <label class="f grow"><span>Head</span>
-        <select data-act="cartHead" data-arg="${c.id}">
-          ${Object.entries(CASE_HEADS).map(([v, l]) =>
-            `<option value="${v}" ${caseHead(c) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
-        </select></label>
-    </div>
-  </div>`).join('')
-   + `<p class="small muted">These change the drawing you match brass against, and nothing else —
-      no recipe, batch or count depends on them.</p>`;
 };
 
 VIEWS.settings = () => {
@@ -2364,137 +2172,7 @@ VIEWS.sync = () => {
   </div>`;
 };
 
-/* ── The whole bench, kept somewhere the other phone can reach ─────────────
- *
- * The file export is a real backup and stays. What it is not is a way to get
- * this bench onto a second device: that needs the file to travel, and on a
- * home-screen PWA on a phone it mostly does not.
- *
- * One row per account holds a snapshot. It is NOT the per-record sync above --
- * that maps Bench's model onto the schema Zero reads, which is lossy in both
- * directions by design (a component lot becomes a product and a purchase; a
- * marking scheme has no equivalent at all). This is Bench's own JSON, byte for
- * byte, and only Bench ever reads it.
- *
- * Restore MERGES by default. The obvious way to use a cloud restore is to load
- * ammunition on the phone at the bench, then pull it onto the tablet -- and a
- * restore that replaced would eat whatever was loaded on the tablet meanwhile.
- * Replace exists beside it, separately confirmed, for making two devices match.
- */
-function cloudCard() {
-  if (!CORE) return '';
-  const st = UI.cloud || {};
-  if (!CORE.isSignedIn()) {
-    return `<div class="card"><h2>Cloud backup</h2>
-      <p class="small muted">Sign in under Cloud sync to keep a copy of this whole
-        bench on your account, and pull it onto another device.</p></div>`;
-  }
-  const row = st.row || null;
-  return `<div class="card"><h2>Cloud backup</h2>
-    <div class="btnrow">
-      <button class="btn primary" data-act="cbUp" ${st.busy ? 'disabled' : ''}>
-        ${st.busy ? '…' : 'Back up now'}</button>
-      <button class="btn" data-act="cbMerge" ${st.busy || !row ? 'disabled' : ''}>Restore</button>
-    </div>
-    <div class="tiny dim mt10">${row
-      ? `Last backed up ${esc(fmtWhen(row.updated_at))}`
-        + `${row.device_label ? ' from ' + esc(row.device_label) : ''}`
-        + ` · ${esc(fmtCounts(row.counts))} · ${esc(fmtBytes(row.bytes))}`
-      : 'Nothing backed up yet on this account.'}</div>
-    <p class="tiny dim mt6">Restore <b>adds</b> what the backup has and this device
-      does not. It never deletes or overwrites what is here, so restoring after a
-      loading session cannot lose the loading session. Edits made on the other
-      device do not cross — for that, use replace.</p>
-    ${row ? `<button class="btn danger wide mt10" data-act="cbReplace" ${st.busy ? 'disabled' : ''}>
-      Replace everything from the cloud</button>` : ''}
-    ${st.msg ? `<div class="banner ${st.ok ? 'ok' : 'bad'} mt10"><div class="small">${esc(st.msg)}</div></div>` : ''}
-  </div>`;
-}
-
-const fmtBytes = (n) => (!Number.isFinite(+n) ? '—'
-  : +n < 1024 ? `${+n} B`
-  : +n < 1048576 ? `${Math.round(+n / 1024)} KB`
-  : `${(+n / 1048576).toFixed(1)} MB`);
-
-const fmtCounts = (c) => {
-  if (!c || typeof c !== 'object') return 'contents unknown';
-  const parts = COLLECTIONS.filter(k => +c[k] > 0).map(k => `${c[k]} ${k}`);
-  return parts.length ? parts.join(' · ') : 'empty';
-};
-
-const fmtWhen = (iso) => {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return 'at an unknown time';
-  const mins = Math.floor((Date.now() - t) / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins} min ago`;
-  if (mins < 1440) return `${Math.floor(mins / 60)} h ago`;
-  return new Date(t).toLocaleDateString();
-};
-
-/* Enough to tell two devices apart, and nothing that identifies a person. */
-function deviceLabel() {
-  const ua = navigator.userAgent || '';
-  if (/iPad/.test(ua)) return 'iPad';
-  if (/iPhone/.test(ua)) return 'iPhone';
-  if (/Android/.test(ua)) return 'Android';
-  if (/Macintosh/.test(ua)) return 'Mac';
-  if (/Windows/.test(ua)) return 'Windows';
-  return 'this device';
-}
-
-/* Union by id, per collection. The dumbest rule that cannot destroy anything:
- * a record whose id is already here is left exactly as it is, and a record the
- * snapshot has never heard of is untouched. */
-function mergeSnapshot(db, incoming) {
-  const stats = {};
-  for (const k of COLLECTIONS) {
-    if (!Array.isArray(incoming[k])) continue;
-    const have = new Set((db[k] || []).filter(r => r && r.id).map(r => r.id));
-    let added = 0;
-    for (const r of incoming[k]) {
-      if (!r || typeof r !== 'object' || !r.id || have.has(r.id)) continue;
-      db[k] = db[k] || [];
-      db[k].push(r); have.add(r.id); added++;
-    }
-    if (added) stats[k] = added;
-  }
-  /* The marking scheme is settings rather than records, and an empty one here
-   * with a filled-in one in the backup is the case that matters: a new device
-   * has the default scheme and should adopt the one the account uses. */
-  if (incoming.meta && incoming.meta.scheme && !hasScheme(DB)) {
-    db.meta = Object.assign({}, db.meta, { scheme: incoming.meta.scheme });
-    stats.scheme = 1;
-  }
-  return stats;
-}
-
-const hasScheme = (db) => {
-  const s = db && db.meta && db.meta.scheme;
-  return !!(s && Object.keys(s).length);
-};
-
-async function loadCloudInfo() {
-  if (!CORE || !CORE.isSignedIn()) return;
-  UI.cloud = UI.cloud || {};
-  try {
-    const r = await CORE.backupList('bench');
-    if (r.ok) UI.cloud.row = (r.data || []).find(x => x.slot === 'default') || null;
-    /* A 404 is the migration not being applied on this project, which is a
-     * thing to go and do rather than a thing wrong with the phone. */
-    else if (r.status === 404) {
-      UI.cloud.msg = 'Cloud backup is not set up on this account yet (migration 0010).';
-      UI.cloud.ok = false;
-    }
-  } catch (e) { /* leave the card in its "nothing yet" state */ }
-  if (cur().v === 'data') render();
-}
-
 VIEWS.data = () => {
-  /* Fired off rather than awaited: the view is synchronous, and a card that
-   * says "nothing backed up yet" for 200ms is better than a screen that waits
-   * on the network before it draws anything at all. */
-  if (CORE && CORE.isSignedIn() && !UI.cloud) { UI.cloud = {}; loadCloudInfo(); }
   const counts = [['Cartridges', DB.cartridges.length], ['Firearms', DB.firearms.length],
     ['Component lots', DB.componentLots.length], ['Brass lots', DB.brassLots.length],
     ['Recipes', DB.recipes.length], ['Batches', DB.batches.length], ['Sessions', DB.sessions.length]];
@@ -2503,15 +2181,12 @@ VIEWS.data = () => {
         ? 'Data is saved on this device. Clearing site data erases it — export regularly.'
         : '<b>Not persisting.</b> This browser is blocking local storage, so everything is in memory and will vanish on reload. Export before closing.'}
     </div></div>
-    ${cloudCard()}
-    <div class="card"><h2>Backup · file</h2>
+    <div class="card"><h2>Backup</h2>
       <div class="btnrow">
         <button class="btn primary" data-act="export">Export JSON</button>
         <button class="btn" data-act="importBtn">Import JSON</button>
         <input type="file" id="importFile" accept="application/json,.json" class="hidden">
       </div>
-      <p class="tiny dim mt10">A file you keep. Importing one REPLACES this device —
-        unlike a cloud restore, which merges.</p>
     </div>
     <div class="card"><h2>Contents</h2><dl class="kv">${counts.map(([k, v]) =>
       `<dt>${k}</dt><dd class="mono">${v}</dd>`).join('')}</dl></div>
@@ -2533,39 +2208,6 @@ VIEWS.data = () => {
  * Rather than guess a fourth time, this prints the numbers from the device that
  * actually disagrees. Reached only by URL, so it costs nothing in the UI.
  * ========================================================================*/
-/* Where a scanned QR lands when this browser has never seen the record.
- *
- * The cause is almost never a missing batch. A camera opens a scanned URL in
- * the browser, and on iOS an installed home-screen app keeps its own storage
- * container -- so the browser has no brass, no batches, no session, and the
- * app it opens looks empty. Explaining that is the whole job of this screen,
- * plus handing over the one thing that makes the next step quick: the serial,
- * in a form you can paste into the app that does have the data. */
-VIEWS.scanned = (serial) => {
-  const s = serial || UI.scanned || '';
-  const local = DB.batches.length + DB.brassLots.length;
-  return `<div class="card">
-    <h2>Scanned ${esc(s)}</h2>
-    <p class="small muted">This browser has no record of it${local ? '' : ', and no records at all'}.
-      That is expected when you scan with a phone camera: the camera opens the
-      <b>browser</b>, and the Bench you keep on your home screen stores its data
-      separately. Same app, different box of records.</p>
-    <div class="serialbig mono">${esc(s)}</div>
-    <div class="row g8 mt10">
-      <button class="btn primary grow" data-act="copySerial" data-arg="${esc(s)}">Copy serial</button>
-      <button class="btn grow" data-act="tab" data-arg="lookup">Look it up here</button>
-    </div>
-    <p class="tiny dim mt10">Open Bench from your home screen and paste it into
-      <b>Identify &rsaquo; By serial</b>. If you have not installed Bench yet, this
-      page is it — use Share &rsaquo; Add to Home Screen, sign in, and the records
-      follow your account.</p>
-  </div>
-  ${CORE && !CORE.isSignedIn() ? `<div class="card"><h2>Or sign in here</h2>
-    <p class="small muted">Signing in on this browser pulls your firearms and, in
-      time, the rest. It is a second copy of the same account, not a second
-      account.</p>${syncCard()}</div>` : ''}`;
-};
-
 VIEWS.diag = () => {
   /* The first version of this read the nav's rect DURING render, before the
    * tab buttons had been rebuilt -- so it measured a 1px-tall bar and reported
@@ -2714,89 +2356,6 @@ async function doAuth(mode) {
  * Remote ids are assigned onto the local records and SAVED FIRST. If the
  * network step ran before the save, a retry would mint fresh ids and duplicate
  * every row on the server — the same trap Zero's sync had to avoid. */
-/* ── Cloud backup, the whole bench in one row ──────────────────────────── */
-async function doCloudBackup() {
-  if (!CORE || !CORE.isSignedIn()) return;
-  UI.cloud = { ...(UI.cloud || {}), busy: true, msg: null };
-  render();
-  try {
-    const payload = JSON.stringify(DB);
-    const counts = {};
-    for (const k of COLLECTIONS) counts[k] = (DB[k] || []).length;
-    const r = await CORE.backupPut({
-      app: 'bench', slot: 'default', payload, counts,
-      deviceLabel: deviceLabel(),
-      appBuild: (typeof window !== 'undefined' && window.__BUILD__) || null,
-    });
-    if (r.ok) {
-      UI.cloud = { busy: false, ok: true,
-                   msg: `Backed up — ${fmtBytes(r.bytes)}.` };
-      await loadCloudInfo();
-    } else if (r.reason === 'too large') {
-      UI.cloud = { ...UI.cloud, busy: false, ok: false,
-        msg: `Too large to back up (${fmtBytes(r.bytes)}, limit ${fmtBytes(r.limit)}). `
-           + 'Export a file instead.' };
-    } else {
-      UI.cloud = { ...UI.cloud, busy: false, ok: false,
-        msg: 'Backup failed: ' + (r.reason || 'unknown') + (r.status ? ` (${r.status})` : '') };
-    }
-  } catch (e) {
-    UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'Backup failed: ' + (e && e.message || e) };
-  }
-  render();
-}
-
-async function doCloudRestore(mode) {
-  if (!CORE || !CORE.isSignedIn()) return;
-  UI.cloud = { ...(UI.cloud || {}), busy: true, msg: null };
-  render();
-  try {
-    const got = await CORE.backupGet({ app: 'bench', slot: 'default' });
-    if (!got.ok || !got.found) {
-      UI.cloud = { ...UI.cloud, busy: false, ok: false,
-        msg: got.ok ? 'Nothing backed up on this account yet.'
-                    : 'Could not read the backup' + (got.status ? ` (${got.status})` : '') };
-      return render();
-    }
-    let incoming = null;
-    try { incoming = JSON.parse(got.row.payload); } catch (e) { incoming = null; }
-    if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.brassLots)) {
-      UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'That backup is not readable.' };
-      return render();
-    }
-
-    const n = (o, k) => (Array.isArray(o[k]) ? o[k].length : 0);
-    const tally = (o) => COLLECTIONS.reduce((a, k) => a + n(o, k), 0);
-
-    if (mode === 'replace') {
-      const detail = COLLECTIONS.filter(k => n(DB, k) || n(incoming, k))
-        .map(k => `  ${k}: ${n(DB, k)} → ${n(incoming, k)}`).join('\n');
-      if (!confirm(`Replace everything on this device with the cloud backup?\n\n${detail}\n\n`
-          + `${tally(DB)} record${tally(DB) === 1 ? '' : 's'} here are discarded and `
-          + `${tally(incoming)} restored. This cannot be undone.`)) {
-        UI.cloud = { ...UI.cloud, busy: false };
-        return render();
-      }
-      Store.save(incoming); DB = loadDb();
-      UI.cloud = { ...UI.cloud, busy: false, ok: true, msg: `Replaced — ${tally(DB)} records.` };
-      save();
-      toast('Restored from the cloud.');
-      return reset('lookup');
-    }
-
-    const stats = mergeSnapshot(DB, incoming);
-    save();
-    const added = Object.entries(stats).map(([k, v]) => `${v} ${k}`).join(', ');
-    UI.cloud = { ...UI.cloud, busy: false, ok: true,
-      msg: added ? `Merged from the cloud: ${added} added.`
-                 : 'Already up to date — nothing in the backup that is not already here.' };
-    render();
-  } catch (e) {
-    UI.cloud = { ...UI.cloud, busy: false, ok: false, msg: 'Restore failed: ' + (e && e.message || e) };
-    render();
-  }
-}
-
 async function doSync() {
   if (!CORE || !CORE.isSignedIn()) return;
   UI.sync = { ...(UI.sync || {}), busy: true, msg: null };
@@ -2833,7 +2392,7 @@ async function doSync() {
       at: new Date().toLocaleTimeString(),
       msg: r.ok
         ? `Sent ${queued} record${queued === 1 ? '' : 's'}, pulled ${r.stats.pulled}.`
-          + (fromOther ? ` From Zero: ${fromOther}.` : '')
+          + (fromOther ? ` Firearms from Zero: ${fromOther}.` : '')
           + (blocked.length ? ` ${blocked.length} could not be represented — see below.` : '')
         : 'Sync failed: ' + r.reason,
     };
@@ -2909,7 +2468,7 @@ function applyEdit(kind, id, d) {
    * modification time Bench re-pushed every firearm on every sync, and since
    * push runs before pull that overwrote edits made in Zero with Bench's stale
    * copy -- then read the stale value back and called it agreement. */
-  if (kind === 'firearm' || kind === 'session') rec.mtime = Date.now();
+  if (kind === 'firearm') rec.mtime = Date.now();
   if (kind === 'brass') rec.qty = brassOnHand(rec);   // kept in step for exports
   const home = HOMES[kind];
   const msg = 'Changes saved.';
@@ -2967,7 +2526,7 @@ const SAVERS = {
    * sessions fired out of it, so logging one IS the decrement -- and deleting a
    * mistyped one puts the rounds back, and un-ages the brass, for free. */
   session: (d) => {
-    DB.sessions.push(Object.assign({ id: uid('se'), mtime: Date.now() }, FIELDS.session(d)));
+    DB.sessions.push(Object.assign({ id: uid('se') }, FIELDS.session(d)));
     return ['goDetail', ['ammoDetail', d.batch], 'Session saved — batch is no longer untested.'];
   },
 
@@ -3125,40 +2684,7 @@ const ACTIONS = {
   syClearRej: () => { CORE.clearRejected && CORE.clearRejected(); render(); },
   sySync: () => doSync(),
 
-  cbUp:      () => doCloudBackup(),
-  cbMerge:   () => doCloudRestore('merge'),
-  cbReplace: () => doCloudRestore('replace'),
-
   serialgo: () => doSerialLookup(),
-
-  /* Clipboard, with a fallback: navigator.clipboard is unavailable on an
-   * insecure origin and can be refused outright, and the whole point of the
-   * screen this sits on is to hand the serial over. */
-  copySerial: async (a) => {
-    const text = String(a || '');
-    let done = false;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-        done = true;
-      }
-    } catch (e) { done = false; }
-    if (!done) {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        done = document.execCommand && document.execCommand('copy');
-        ta.remove();
-      } catch (e) { done = false; }
-    }
-    toast(done ? `Copied ${text}` : `Select and copy: ${text}`);
-    render();
-  },
   clearpick: () => { UI.lookup = {}; render(); },
   pick: (a, el) => { const v = el.dataset.val;
     UI.lookup[el.dataset.pos] = v === '?' ? '?' : (v === '' ? null : v); render(); },
@@ -3257,41 +2783,12 @@ const ACTIONS = {
 };
 
 /* ------------------------------------------------------------- listeners */
-/* Actions that destroy a record. Every one of them used to fire on the first
- * tap, which on a phone is one mis-aimed thumb away from losing a brass lot
- * with four firings of history on it. guardedDelete refuses to delete anything
- * a batch still points at, which is a different protection entirely: it stops
- * you breaking a reference, not from deleting the thing you did not mean to
- * touch.
- *
- * Two taps, and the second one is on a button that has changed its label, so
- * it cannot be satisfied by a double tap. Handled here rather than in each
- * view because there are seven of these and the eighth would have been added
- * without one. */
-const DESTRUCTIVE = new Set(['delFirearm', 'delBrass', 'delRecipe', 'delComponent',
-                             'delBatch', 'delSession', 'unadjust']);
-
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const fn = ACTIONS[el.dataset.act];
   if (!fn) return;
   if (el.tagName === 'BUTTON' && el.type !== 'submit') e.preventDefault();
-
-  const key = el.dataset.act + ':' + (el.dataset.arg || '');
-  if (DESTRUCTIVE.has(el.dataset.act) && UI.confirm !== key) {
-    UI.confirm = key;
-    render();
-    /* It expires. A confirmation left armed across a screen change is a
-     * delete waiting for an unrelated tap on the same spot. */
-    clearTimeout(UI.confirmTimer);
-    UI.confirmTimer = setTimeout(() => {
-      if (UI.confirm === key) { UI.confirm = null; render(); }
-    }, 5000);
-    return;
-  }
-  UI.confirm = null;
-  clearTimeout(UI.confirmTimer);
   fn(el.dataset.arg, el);
 });
 
@@ -3345,13 +2842,6 @@ document.addEventListener('change', (e) => {
     UI.cartNew[el.dataset.key] = el.value === '__new';
     const txt = el.form && el.form.querySelector(`[name="${el.dataset.key}__new"]`);
     if (txt) { txt.classList.toggle('hidden', el.value !== '__new'); if (el.value === '__new') txt.focus(); }
-    /* The case-type controls belong to the same "adding a new one" state as
-     * the text box, and are hidden with it -- offering a case shape for a
-     * cartridge you picked from the list would imply it is about to change. */
-    if (el.form) {
-      el.form.querySelectorAll(`[data-newcase="${el.dataset.key}"]`).forEach(n =>
-        n.classList.toggle('hidden', el.value !== '__new'));
-    }
     return;
   }
   if (el.name === 'kind' && cur().v === 'form') {   // component type drives which fields show
@@ -3372,19 +2862,6 @@ document.addEventListener('input', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
-
-  /* Case shape and head. Saved on change and redrawn, with no Save button:
-   * the only thing either one affects is a picture on the same screen, so the
-   * change and its consequence are visible in one move. */
-  if (el.dataset.act === 'cartShape' || el.dataset.act === 'cartHead') {
-    const c = byId(DB.cartridges, el.dataset.arg);
-    if (!c) return;
-    if (el.dataset.act === 'cartShape') c.shape = el.value; else c.head = el.value;
-    save();
-    render();
-    return;
-  }
-
   const sc = scheme(), i = +el.dataset.idx;
   switch (el.dataset.act) {
     case 'posLabel': sc.positions[i].label = el.value; save(); break;
@@ -3434,9 +2911,8 @@ document.addEventListener('submit', (e) => {
 
   for (const f of FORMS[kind].fields) {
     if (f.t === 'cartridge' && typeof d[f.k] === 'string' && d[f.k].startsWith(PENDING)) {
-      d[f.k] = ensureCartridge(d[f.k].slice(PENDING.length), d['__case_' + f.k]);
+      d[f.k] = ensureCartridge(d[f.k].slice(PENDING.length));
     }
-    delete d['__case_' + f.k];
   }
 
   const [mode, target, msg] = editId ? applyEdit(kind, editId, d) : SAVERS[kind](d);
@@ -3480,21 +2956,10 @@ function openDeepLink() {
     history.replaceState(null, '', location.pathname + location.search);
   }
   if (!found) {
-    /* Almost always the same cause, and it is not a missing record.
-     *
-     * A phone camera opens a scanned URL in the BROWSER. On iOS an installed
-     * home-screen app has its own storage container, entirely separate from
-     * Safari's -- so the browser that just opened has no brass, no batches and
-     * no session, and every scan lands on an app that looks wiped. The old
-     * behaviour was a toast saying nothing on this device carries that serial,
-     * which is true, useless, and reads like the record is gone.
-     *
-     * A screen instead of a toast, because there is something to do here: the
-     * serial is what the app's own By-serial box wants, so it is shown large
-     * and copyable. */
-    UI.scanned = m[1];
-    stack = [{ v: 'scanned', arg: m[1] }];
-    return true;
+    // Say so rather than silently showing the home screen: a serial that
+    // resolves to nothing on THIS device usually means the wrong device.
+    toast(`Nothing on this device carries serial ${m[1]}.`);
+    return false;
   }
   stack = [{ v: 'lookup' }, { v: found[0], arg: found[1] }];
   return true;
@@ -3520,14 +2985,6 @@ if (CORE && CORE.isSignedIn() && (typeof navigator === 'undefined' || navigator.
  * supported way to use this app and must not throw. */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
-    /* The build id rides in the query string. The worker is the one file whose
-     * job is to notice a new build, which makes it the one file a stale cache
-     * ruins completely -- and a stale copy WAS being served from the bare URL
-     * while the same path with any query returned the current one. A URL that
-     * changes every build cannot be answered from a cache of the last one.
-     * Scope is taken from the path, so the query changes nothing about it. */
-    navigator.serviceWorker
-      .register('sw.js?v=' + encodeURIComponent(typeof BUILD_ID === 'string' ? BUILD_ID : 'dev'))
-      .catch(() => {});
+    navigator.serviceWorker.register('sw.js').catch(() => {});
   });
 }

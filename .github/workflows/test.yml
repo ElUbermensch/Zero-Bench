@@ -41,7 +41,7 @@ jobs:
           rc=0
           for t in supabase/test/rls_test.sql supabase/test/rls_test2.sql \
                    supabase/test/rls_test3.sql supabase/test/rls_test4.sql \
-                   supabase/test/rls_test5.sql supabase/test/rls_test6.sql; do
+                   supabase/test/rls_test5.sql; do
             echo "== $t"
             psql -d shooting -v ON_ERROR_STOP=1 -f "$t" 2>&1 | tee out.txt || rc=1
             # A psql ERROR aborts the script without ever printing FAIL, so

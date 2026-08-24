@@ -1577,6 +1577,36 @@ const ZeroCore = (() => {
       // not the session, and signing back in should still deliver it.
     }
 
+    /** Take a session out of the URL fragment, if one is there. Returns true
+     *  when it adopted one, so a caller can react (and a test can assert). */
+    function adoptSessionFromUrl() {
+      if (typeof location === 'undefined' || !location.hash) return false;
+      const hash = location.hash.replace(/^#/, '');
+      // Bench deep links live in this fragment too (#/s/SERIAL). Only touch it
+      // when it is unmistakably an auth callback.
+      if (!/(^|&)access_token=/.test(hash)) return false;
+      const q = new URLSearchParams(hash);
+      const access = q.get('access_token'), refresh = q.get('refresh_token');
+      if (!access || !refresh) return false;
+      const ttl = Number(q.get('expires_in') || 3600) * 1000;
+      setSession({ access_token: access, refresh_token: refresh,
+                   expires_at: nowMs() + ttl, user: null });
+      /* Strip it before anything else can read it. replaceState rather than
+       * assigning location.hash, which would leave an entry in history. */
+      try {
+        if (history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+      } catch (e) {}
+      /* The token carries the user id in its payload but not the email, and
+       * the UI shows an email. Fetching it is one request and only happens on
+       * this path. */
+      raw('/auth/v1/user', { method: 'GET', headers: authHeaders() })
+        .then(r => (r.ok ? r.json() : null))
+        .then(u => { if (u && u.id && session) { session.user = u; store.set(K.session, session);
+                                                 emit(EVENTS.AUTH_SIGNED_IN, { user: u }); } })
+        .catch(() => {});
+      return true;
+    }
+
     const getSession = () => session;
     const getUser = () => (session && session.user) || null;
     const isSignedIn = () => !!(session && session.access_token);
@@ -2299,6 +2329,7 @@ const ZeroCore = (() => {
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
+      adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
@@ -2314,6 +2345,20 @@ const ZeroCore = (() => {
      * default: it shipped un-opted-in from both apps, and the consequence was
      * a queued write that could never leave the device. */
     if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    /* A confirmation link lands here carrying a session in the URL fragment.
+     *
+     * Supabase's confirm-your-email link goes to the project's Site URL with
+     * `#access_token=...&refresh_token=...&type=signup` on the end. Nothing
+     * read it, so a new user clicked the link, watched the app load as a
+     * stranger, and had to go and sign in by hand -- after a page that, with
+     * Site URL left at its localhost default, does not resolve at all.
+     *
+     * Adopted and then STRIPPED from the URL immediately: a bearer token that
+     * stays in the address bar is one that goes into history, gets shared in a
+     * screenshot, and is read by anything that can see a referrer. This is the
+     * same thing Supabase's own client calls detectSessionInUrl. */
+    if (cfg.detectSessionInUrl !== false) { try { adoptSessionFromUrl(); } catch (e) {} }
 
     return instance;
   }
@@ -4205,7 +4250,7 @@ export default function App() {
                 sessions={sessions} ammo={ammo} getTarget={getTarget}
                 onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
                 firearms={firearms} onFirearmsUpdated={saveFirearms}
-                onGoToAmmo={()=>setTab('firearms')} />
+                onGoToAmmo={()=>setTab('targets')} />
               <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup</div>
                 <div style={{display:'flex',gap:8}}>
@@ -4237,11 +4282,20 @@ export default function App() {
           )}
           {tab==='analytics' && <><LeaderboardCard core={core} /><AnalyticsTab sessions={sessions} getTarget={getTarget} firearms={firearms} matches={matches} /></>}
           {tab==='dope' && <DopeTab sessions={sessions} firearms={firearms} getTarget={getTarget} />}
-          {tab==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />}
+          {tab==='targets' && (
+            <>
+              {/* Targets+ : the targets, and the utilities that had nowhere to
+                  live. Importing loads from Bench is one read of one view and
+                  has no business being reachable only by pressing "Sync now",
+                  which pushes everything and pulls seventeen tables. */}
+              <BenchImport core={core} ammo={ammo} onSaveAmmo={saveAmmo} />
+              <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />
+            </>
+          )}
           {tab==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
         </div>
         <div className="tabbar">
-          {[['sessions','▤','Sessions'],['analytics','◰','Analytics'],['dope','▦','DOPE'],['firearms','⌖','Firearms'],['targets','◎','Targets']].map(([t,ico,lbl])=>(
+          {[['sessions','▤','Sessions'],['analytics','◰','Analytics'],['dope','▦','DOPE'],['firearms','⌖','Firearms'],['targets','◎','Targets+']].map(([t,ico,lbl])=>(
             <button key={t} className={`tab ${tab===t?'on':''}`} onClick={()=>setTab(t)}>
               <span className="tabi">{ico}</span><span className="tabl">{lbl}</span>
             </button>
@@ -8483,15 +8537,26 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
  * ammoStats (per-session groups about their own centers, shot-weighted MR —
  * see ammoStats for why raw cross-session pooling would be wrong).
  */
-function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) {
-  const [form, setForm] = useState(null); // null | {id?, name, rifleId, bullet, powder, charge, oal, notes}
-  const [confirmDel, setConfirmDel] = useState(null);
+/* Importing loads from Bench, as its own thing.
+ *
+ * It reads ONE view -- v_ballistic_profiles -- and writes nothing. It is not a
+ * sync, and it should never have required one: pressing "Sync now" to see a
+ * batch pushes every queued row and pulls seventeen tables to answer a
+ * question that is a single GET. This is that GET, in a component that can sit
+ * wherever it is wanted rather than only inside the ammunition list.
+ *
+ * `compact` renders the small chip pair for a header; otherwise it renders as
+ * a card with its own heading, for a menu screen.
+ */
+function BenchImport({ core, ammo, onSaveAmmo, compact }) {
   const [pickOpen, setPickOpen] = useState(false);
   const [profiles, setProfiles] = useState(null);   // null=loading, []=empty, [rows]
   const [pickErr, setPickErr] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshed, setRefreshed] = useState(null);
   const linkedCount = ammo.filter(a => a.batchId).length;
+
+  if (!core || !core.isSignedIn()) return null;
 
   async function openPicker() {
     setPickOpen(true); setProfiles(null); setPickErr(null);
@@ -8525,6 +8590,95 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
     setRefreshed(next ? 'updated' : 'current');
     setTimeout(() => setRefreshed(null), 2500);
   }
+
+  const list = pickOpen && (
+    <div className="tcard" style={{padding:'11px 13px'}} data-bench-picker="1">
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+        <div className="lbl">Batches from Bench</div>
+        <button onClick={()=>setPickOpen(false)} style={{background:'none',border:'none',color:'var(--dim)',cursor:'pointer',fontSize:14,padding:0}}>×</button>
+      </div>
+      {profiles === null && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>loading…</div>}
+      {pickErr && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)'}}>{pickErr}</div>}
+      {profiles && !pickErr && profiles.length === 0 && (
+        <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',lineHeight:1.6}}>
+          No batches came back. A batch only appears here once Bench has pushed
+          BOTH the batch and the recipe it points at, and only while it is not
+          quarantined. In Bench, open <b>More › Cloud sync</b> and press ⇅ Sync now:
+          the two lists there — “Not sent” and “Refused by the server” — say which
+          of those it is.
+        </div>)}
+      {profiles && profiles.map(p => {
+        const linkedAlready = ammo.some(a => a.batchId === p.batch_id);
+        return (
+          <div key={p.batch_id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderTop:'1px solid var(--bdr)'}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:11,color:'var(--ink)'}}>{p.serial}
+                {p.untested && <span style={{color:'var(--acc)',fontSize:8,marginLeft:6}}>UNTESTED</span>}
+                {p.over_published_max && <span style={{color:'var(--red)',fontSize:8,marginLeft:6}}>OVER MAX</span>}
+              </div>
+              <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                {[p.load_name, p.cartridge,
+                  p.powder_name && `${p.charge_actual_gr ?? p.charge_gr ?? '?'}gr ${p.powder_name}`,
+                  p.muzzle_velocity_fps && `${Math.round(p.muzzle_velocity_fps)}fps`,
+                  p.qty_remaining!=null?`${p.qty_remaining} rds`:null].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+            <button className="badd" disabled={linkedAlready} onClick={()=>importBatch(p)}
+              style={{fontSize:9,padding:'4px 9px',opacity:linkedAlready?0.35:1}}>{linkedAlready?'linked':'import'}</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  if (compact) {
+    return (
+      <>
+        <div style={{display:'flex',gap:6}}>
+          {linkedCount > 0 && (
+            <button className="badd" onClick={refreshNow} disabled={refreshing}
+              title="Re-read every linked batch from Bench"
+              style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1}}>
+              {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
+          )}
+          <button className="badd" onClick={openPicker}
+            style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ Bench</button>
+        </div>
+        {list}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="tcard" style={{padding:'11px 13px'}}>
+        <div className="lbl">Loads from Bench</div>
+        <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
+          Reads the batches loaded in Bench and brings the ones you pick across with
+          bullet, powder, charge, COAL and their safety state. This is a read of one
+          view — it does not push anything and is not a sync.
+          {linkedCount ? ` ${linkedCount} load${linkedCount===1?'':'s'} linked so far.` : ''}
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <button className="badd" style={{flex:1}} onClick={openPicker}>⇣ Import batches</button>
+          {linkedCount > 0 && (
+            <button className="badd" onClick={refreshNow} disabled={refreshing}
+              style={{flex:1,background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',opacity:refreshing?0.5:1}}>
+              {refreshing ? 'reading…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳ Refresh linked'}</button>
+          )}
+        </div>
+      </div>
+      {list}
+    </>
+  );
+}
+
+function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) {
+  const [form, setForm] = useState(null); // null | {id?, name, rifleId, bullet, powder, charge, oal, notes}
+  const [confirmDel, setConfirmDel] = useState(null);
+  /* The Bench importer is its own component now -- it is a read of one view,
+   * not part of managing loads, and it is wanted in more than one place. */
+  const linkedCount = ammo.filter(a => a.batchId).length;
   const blank = { name:'', rifleId:'', bullet:'', powder:'', charge:'', oal:'', notes:'' };
   const fname = id => firearms.find(f=>f.id===id)?.name || '';
 
@@ -8547,76 +8701,16 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
         <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.14em',textTransform:'uppercase'}}>Ammunition</div>
         {!form && (
           <div style={{display:'flex',gap:6}}>
-            {core && core.isSignedIn() && linkedCount > 0 && (
-              <button className="badd" onClick={refreshNow} disabled={refreshing}
-                title="Re-read every linked batch from Bench"
-                style={{fontSize:11,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--dim)',opacity:refreshing?0.5:1}}>
-                {refreshing ? '…' : refreshed === 'updated' ? '✓ updated' : refreshed === 'current' ? '✓ current' : '⟳'}</button>
-            )}
-            {core && core.isSignedIn() && (
-              <button className="badd" onClick={openPicker}
-                style={{fontSize:11,padding:'5px 11px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>⇣ Bench</button>
-            )}
+            <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} compact />
             <button className="badd" onClick={()=>setForm({...blank})} style={{fontSize:11,padding:'5px 11px'}}>+ load</button>
           </div>
         )}
       </div>
 
-      {!form && !pickOpen && core && core.isSignedIn() && linkedCount === 0 && (
-        /* The "⇣ Bench" chip above is 11px and lives in a header two screens
-           deep. Someone who has never imported a batch has no reason to know
-           it is a thing, which made a working feature indistinguishable from a
-           missing one. Once anything is linked this disappears and the chip is
-           enough. */
-        <div className="tcard" style={{padding:'11px 13px'}}>
-          <div className="lbl">Loads from Bench</div>
-          <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,margin:'6px 0 9px'}}>
-            Batches loaded in Bench come across with bullet, powder, charge, COAL and
-            their safety state, so you do not retype a load you already recorded.
-            Sessions shot with one push their group size back to the batch.
-          </div>
-          <button className="badd" style={{width:'100%'}} onClick={openPicker}>⇣ Import batches from Bench</button>
-        </div>
-      )}
-
-      {pickOpen && (
-        <div className="tcard" style={{padding:'11px 13px'}}>
-          <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
-            <div className="lbl">Batches from Bench</div>
-            <button onClick={()=>setPickOpen(false)} style={{background:'none',border:'none',color:'var(--dim)',cursor:'pointer',fontSize:14,padding:0}}>×</button>
-          </div>
-          {profiles === null && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>loading…</div>}
-          {pickErr && <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)'}}>{pickErr}</div>}
-          {profiles && !pickErr && profiles.length === 0 && (
-            <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',lineHeight:1.6}}>
-              No batches came back. A batch only appears here once Bench has pushed
-              BOTH the batch and the recipe it points at, and only while it is not
-              quarantined. In Bench, open <b>More › Cloud sync</b> and press ⇅ Sync now:
-              the two lists there — “Not sent” and “Refused by the server” — say which
-              of those it is.
-            </div>)}
-          {profiles && profiles.map(p => {
-            const linkedAlready = ammo.some(a => a.batchId === p.batch_id);
-            return (
-              <div key={p.batch_id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderTop:'1px solid var(--bdr)'}}>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontFamily:'var(--fm)',fontSize:11,color:'var(--ink)'}}>{p.serial}
-                    {p.untested && <span style={{color:'var(--acc)',fontSize:8,marginLeft:6}}>UNTESTED</span>}
-                    {p.over_published_max && <span style={{color:'var(--red)',fontSize:8,marginLeft:6}}>OVER MAX</span>}
-                  </div>
-                  <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {[p.load_name, p.cartridge,
-                      p.powder_name && `${p.charge_actual_gr ?? p.charge_gr ?? '?'}gr ${p.powder_name}`,
-                      p.muzzle_velocity_fps && `${Math.round(p.muzzle_velocity_fps)}fps`,
-                      p.qty_remaining!=null?`${p.qty_remaining} rds`:null].filter(Boolean).join(' · ')}
-                  </div>
-                </div>
-                <button className="badd" disabled={linkedAlready} onClick={()=>importBatch(p)}
-                  style={{fontSize:9,padding:'4px 9px',opacity:linkedAlready?0.35:1}}>{linkedAlready?'linked':'import'}</button>
-              </div>
-            );
-          })}
-        </div>
+      {/* The first-run card and the picker itself both live in BenchImport,
+          which is rendered from the header above and from Targets+. */}
+      {!form && core && core.isSignedIn() && linkedCount === 0 && (
+        <BenchImport core={core} ammo={ammo} onSaveAmmo={onSaveAmmo} />
       )}
 
       {form && (

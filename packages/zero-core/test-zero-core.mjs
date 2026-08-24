@@ -54,6 +54,41 @@ section('auth');
   ok(good.ok && c.isSignedIn(), 'signIn with the right password succeeds');
 }
 
+/* ========================== a confirmation link arrives with a session in it */
+/* Supabase's confirm-your-email link lands on the Site URL carrying
+ * `#access_token=...&refresh_token=...&type=signup`. Nothing read it, so a new
+ * user clicked the link and watched the app load as a stranger. */
+section('a session in the URL fragment');
+{
+  const store = memStore();
+  const seed = mkClient(store);
+  await seed.signUp('confirm@example.com', 'pw');
+  const tok = seed.getSession();
+
+  // A fresh browser: no stored session, an auth callback in the fragment.
+  const fresh = memStore();
+  const loc = { hash: `#access_token=${tok.access_token}&refresh_token=${tok.refresh_token}`
+                    + '&expires_in=3600&token_type=bearer&type=signup',
+                pathname: '/', search: '' };
+  globalThis.location = loc;
+  globalThis.history = { replaceState: (a, b, url) => { loc.hash = ''; loc.replaced = url; } };
+
+  const c = mkClient(fresh);
+  ok(c.isSignedIn(), 'the app comes up signed in rather than as a stranger');
+  ok(loc.hash === '', 'and the token is stripped from the URL, not left in history');
+  ok(loc.replaced === '/', '...replacing rather than pushing');
+
+  /* A Bench deep link lives in the same fragment. Touching it would send a
+   * scanned label to the wrong screen. */
+  const loc2 = { hash: '#/s/B26H13-01D', pathname: '/bench/', search: '' };
+  globalThis.location = loc2;
+  const c2 = mkClient(memStore());
+  ok(!c2.isSignedIn() && loc2.hash === '#/s/B26H13-01D',
+     'a deep link in the same fragment is left completely alone');
+
+  delete globalThis.location; delete globalThis.history;
+}
+
 /* ======================================================= token refresh */
 section('token refresh');
 {

@@ -384,6 +384,42 @@ console.log('\nservice worker scope');
   await ctx3.close();
 }
 
+/* ================================== importing is a read, and has its own home */
+/* "Import could be a separate button so we're not running the whole thing to
+ * sync every single time." It always was a single read of one view -- but the
+ * only way to reach it was inside the ammunition list, so it read as part of
+ * syncing. It has a home on Targets+ now, and this pins the claim that using
+ * it pushes nothing. */
+console.log('\nimport is its own button, and its own request');
+{
+  /* Back to the home screen first. Earlier sections leave the app inside a
+   * session detail, where the tab bar is not what is on screen. */
+  await page.reload();
+  await page.waitForTimeout(900);
+  await page.click('.tabbar button:has-text("Targets+")');
+  await page.waitForTimeout(500);
+  const onTargets = await page.textContent('body');
+  ok(onTargets.includes('Loads from Bench'),
+     'Targets+ carries the Bench importer');
+  ok(onTargets.includes('does not push anything and is not a sync'),
+     '...and says plainly that it is a read');
+
+  const pushesBefore = JSON.stringify(mock.state.hits.push);
+  const pullsBefore = { ...mock.state.hits.pull };
+  await page.click('button:has-text("⇣ Import batches")');
+  await page.waitForTimeout(700);
+
+  ok((await page.textContent('body')).includes('B26H14-02X'),
+     'the batch list comes back');
+  ok(JSON.stringify(mock.state.hits.push) === pushesBefore,
+     'and NOTHING was pushed to get it');
+  const pulled = Object.keys(mock.state.hits.pull)
+    .filter(t => (mock.state.hits.pull[t] || 0) > (pullsBefore[t] || 0));
+  ok(pulled.length === 1 && pulled[0] === 'v_ballistic_profiles',
+     `exactly one view was read (${pulled.join(', ') || 'none'})`);
+}
+
+
 console.log('\nhygiene');
 ok(errs.length === 0, 'no JS errors across the whole run'
    + (errs.length ? ' — ' + errs.slice(0, 3).join(' | ') : ''));

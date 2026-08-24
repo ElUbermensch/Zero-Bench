@@ -286,12 +286,17 @@ function findCartridge(name) {
   return DB.cartridges.find(c => cartKey(c.name) === k) || null;
 }
 
-function ensureCartridge(name) {
+function ensureCartridge(name, geom) {
   const clean = (name || '').trim();
   if (!clean) return null;
   const found = findCartridge(clean);
+  /* An existing cartridge keeps its shape. Re-typing a name that already
+   * exists is how you REFER to it, not how you redefine it -- silently
+   * restyling every brass lot in .303 British because someone picked the
+   * default in a hurry is not a thing a text field should be able to do. */
   if (found) return found.id;
-  const c = { id: uid('ct'), name: clean };
+  const c = { id: uid('ct'), name: clean,
+              shape: caseShape(geom), head: caseHead(geom) };
   DB.cartridges.push(c);
   return c.id;
 }
@@ -761,9 +766,72 @@ const fmtDate = (s) => s
 const num = (v, d) => (v === '' || v == null || isNaN(+v) ? (d == null ? null : d) : +v);
 
 /* --------------------------------------------------------------- case SVG */
-const CASE_PATH = 'M40,28 L78,28 L100,17 L248,17 L248,13 L262,13 L262,75 L248,75 '
-                + 'L248,71 L100,71 L78,60 L40,60 Z';
-const HEAD_X = 248, NECK_X = 42;
+/* The silhouette is drawn from the cartridge, not from one hardcoded shape.
+ *
+ * It used to be a single path with a flange standing proud of the body at the
+ * head -- which is a RIMMED case. Almost nothing a precision shooter loads is
+ * rimmed: 6.5 Creedmoor, .308, .223 and every other bottleneck rifle round is
+ * rimless, and its head is the same diameter as its body with an extractor
+ * groove cut in ahead of it. So the drawing on the Identify screen, on every
+ * brass row and on every printed label showed a case shape that none of the
+ * user's brass actually has. It still read as "a case", which is why it went
+ * unnoticed, but the one place the picture has to be right is the one where
+ * you are holding the real thing against it.
+ *
+ * Two properties, because they are genuinely independent: a case can be
+ * bottleneck or straight-walled, and separately rimless, rimmed or belted.
+ * .303 British is bottleneck AND rimmed; 9mm is straight and rimless; 7mm Rem
+ * Mag is bottleneck and belted. Collapsing them into one "necked or rimmed"
+ * choice would make three of the six combinations unrepresentable.
+ *
+ * Vertical reference, in viewBox units: the body spans y 17..71, the neck
+ * 28..60, the extractor groove cuts in to 24..64, a rim flange stands out to
+ * 11..77 and a belt to 14..74. */
+const CASE_SHAPES = { bottleneck: 'Bottleneck', straight: 'Straight-walled' };
+const CASE_HEADS = { rimless: 'Rimless (extractor groove)', rimmed: 'Rimmed', belted: 'Belted' };
+const NECK_X = 42;
+
+const caseShape = (c) => (c && CASE_SHAPES[c.shape] ? c.shape : 'bottleneck');
+const caseHead = (c) => (c && CASE_HEADS[c.head] ? c.head : 'rimless');
+
+/* Everything the renderer needs for one cartridge: the outline, where the
+ * markable body ends, and where the head block is so marks on the case head
+ * land on it rather than beside it. */
+function caseGeom(cart) {
+  const shape = caseShape(cart), head = caseHead(cart);
+  const R = 262;                                   // right edge of the drawing
+  const T = 17, B = 71;                            // body
+  const GT = 24, GB = 64;                          // extractor groove
+  const FT = 11, FB = 77;                          // rim flange
+  const LT = 14, LB = 74;                          // belt
+
+  let topHead, botHead, bodyEnd, baseX0, baseY0, baseY1, sepAt = null;
+  if (head === 'rimmed') {
+    bodyEnd = 242; baseX0 = 242; baseY0 = FT; baseY1 = FB; sepAt = 242;
+    topHead = `L242,${T} L242,${FT} L${R},${FT}`;
+    botHead = `L${R},${FB} L242,${FB} L242,${B}`;
+  } else if (head === 'belted') {
+    bodyEnd = 208; baseX0 = 238; baseY0 = T; baseY1 = B;
+    topHead = `L208,${T} L208,${LT} L224,${LT} L224,${GT} L238,${GT} L238,${T} L${R},${T}`;
+    botHead = `L${R},${B} L238,${B} L238,${GB} L224,${GB} L224,${LB} L208,${LB} L208,${B}`;
+  } else {
+    bodyEnd = 226; baseX0 = 240; baseY0 = T; baseY1 = B;
+    topHead = `L226,${T} L226,${GT} L240,${GT} L240,${T} L${R},${T}`;
+    botHead = `L${R},${B} L240,${B} L240,${GB} L226,${GB} L226,${B}`;
+  }
+
+  const topBody = shape === 'straight' ? `M40,${T}` : `M40,28 L78,28 L100,${T}`;
+  const botBody = shape === 'straight' ? `L40,${B} Z` : `L100,${B} L78,60 L40,60 Z`;
+
+  return {
+    shape, head, baseX0, baseX1: R, baseY0, baseY1, sepAt,
+    /* Marks stop short of whatever the head does: a band painted over an
+     * extractor groove or a belt is a band that is not there in life. */
+    bandX1: bodyEnd - 4,
+    path: `${topBody} ${topHead} ${botHead} ${botBody}`,
+  };
+}
+
 let svgSeq = 0;
 
 function caseSvg(marks, opts) {
@@ -771,10 +839,18 @@ function caseSvg(marks, opts) {
   const uidc = 'cc' + (++svgSeq);
   const heads = sc.positions.filter(isHeadPos);
   const bandPos = sc.positions.filter(p => !isHeadPos(p));
+  /* `cart` may be a record or an id, and may be absent -- the Identify screen
+   * draws a case before you have said which cartridge you are holding. A
+   * rimless bottleneck is the right default: it is what almost everything a
+   * precision shooter loads actually is. */
+  const cart = typeof o.cart === 'string' ? byId(DB.cartridges, o.cart) : o.cart;
+  const g = caseGeom(cart);
+
+  const bandX = (p) => g.bandX1 - (p.at ?? 0.5) * (g.bandX1 - NECK_X);
 
   const bands = bandPos.map(p => {
     const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
-    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
+    const x = bandX(p);
     const w = o.mini ? 15 : 17;
     return col
       ? `<rect x="${x - w / 2}" y="10" width="${w}" height="70" fill="${col.hex}"/>`
@@ -782,38 +858,44 @@ function caseSvg(marks, opts) {
         + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
   }).join('');
 
-  /* The case head is the flat base, drawn as the rim block at the right of
-   * the side view. Several head positions split it into stripes rather than
-   * overprinting each other -- a mark you cannot see is a mark you will not
-   * check. */
+  /* The case head is the flat base, drawn as the block at the right of the
+   * side view -- the rim on a rimmed case, the head itself on a rimless one.
+   * Several head positions split it into stripes rather than overprinting each
+   * other: a mark you cannot see is a mark you will not check. */
+  const hw = g.baseX1 - g.baseX0, span = (g.baseY1 - g.baseY0) - 4;
   const rim = heads.map((p, i) => {
     const col = marks && marks[p.id] ? sc.palette.find(c => c.id === marks[p.id]) : null;
-    const y0 = 13 + i * (62 / heads.length), h = 62 / heads.length;
+    const y0 = g.baseY0 + 2 + i * (span / heads.length), h = span / heads.length;
     return col
-      ? `<rect x="248" y="${y0}" width="14" height="${h}" fill="${col.hex}"/>`
-      : `<rect x="248.7" y="${y0 + 0.7}" width="12.6" height="${h - 1.4}" fill="none" `
+      ? `<rect x="${g.baseX0}" y="${y0}" width="${hw}" height="${h}" fill="${col.hex}"/>`
+      : `<rect x="${g.baseX0 + 0.7}" y="${y0 + 0.7}" width="${hw - 1.4}" height="${h - 1.4}" fill="none" `
         + `stroke="#7a828f" stroke-width="1.4" stroke-dasharray="3 3"/>`;
   }).join('');
 
   const ticks = o.mini ? '' : bandPos.map(p => {
-    const x = HEAD_X - (p.at ?? 0.5) * (HEAD_X - NECK_X);
+    const x = bandX(p);
     return `<line x1="${x}" y1="78" x2="${x}" y2="88" stroke="#6c7480" stroke-width="1"/>`
       + `<text x="${x}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${esc(p.label)}</text>`;
   }).join('') + (heads.length && !o.mini
-    // Under the rim, not beside it: a label centred to the right of the case
+    // Under the head, not beside it: a label centred to the right of the case
     // runs off the edge of the viewBox and gets clipped.
-    ? `<line x1="255" y1="78" x2="255" y2="88" stroke="#6c7480" stroke-width="1"/>`
-      + `<text x="255" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
+    ? `<line x1="${(g.baseX0 + g.baseX1) / 2}" y1="78" x2="${(g.baseX0 + g.baseX1) / 2}" y2="88" stroke="#6c7480" stroke-width="1"/>`
+      + `<text x="${(g.baseX0 + g.baseX1) / 2}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
           esc(heads.length === 1 ? heads[0].label : 'Case head')}</text>`
     : '');
   return `<svg class="case${o.mini ? ' casemini' : ''}" viewBox="0 0 300 ${o.mini ? 88 : 106}"
-      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="case marking">
-    <defs><clipPath id="${uidc}"><path d="${CASE_PATH}"/></clipPath></defs>
-    <path d="${CASE_PATH}" fill="#b9a06a" stroke="#8d7844" stroke-width="1.5"/>
+      xmlns="http://www.w3.org/2000/svg" role="img" aria-label="case marking"
+      data-shape="${g.shape}" data-head="${g.head}">
+    <defs><clipPath id="${uidc}"><path d="${g.path}"/></clipPath></defs>
+    <path d="${g.path}" fill="#b9a06a" stroke="#8d7844" stroke-width="1.5"/>
     <g clip-path="url(#${uidc})">${bands}</g>
-    <path d="${CASE_PATH}" fill="none" stroke="#8d7844" stroke-width="1.5"/>
-    <path d="M248,17 L248,71" stroke="#8d7844" stroke-width="1"/>${rim}
-    <path d="M248,13 L262,13 L262,75 L248,75 Z" fill="none" stroke="#8d7844" stroke-width="1.5"/>${ticks}</svg>`;
+    <g clip-path="url(#${uidc})">${rim}</g>
+    <path d="${g.path}" fill="none" stroke="#8d7844" stroke-width="1.5"/>
+    ${/* On a rimmed case the flange needs a line where it meets the body, or
+         the head marks read as part of the body. A rimless or belted case has
+         a groove doing that job in the outline already. */
+      g.sepAt ? `<path d="M${g.sepAt},17 L${g.sepAt},71" stroke="#8d7844" stroke-width="1"/>` : ''}
+    ${ticks}</svg>`;
 }
 
 /* Written this way rather than `p.kind === 'head'` so a scheme saved before
@@ -1064,7 +1146,21 @@ function fieldHtml(f, kind, rec) {
           <option value="__new" ${open ? 'selected' : ''}>+ Add new cartridge…</option>
         </select>
         <input type="text" name="${f.k}__new" class="mt6 ${open ? '' : 'hidden'}"
-          placeholder="e.g. 6.5 Creedmoor" autocomplete="off">`;
+          placeholder="e.g. 6.5 Creedmoor" autocomplete="off">
+        <div class="row g8 mt6 ${open ? '' : 'hidden'}" data-newcase="${f.k}">
+          <select name="${f.k}__shape" aria-label="Case shape">
+            ${Object.entries(CASE_SHAPES).map(([v, l]) =>
+              `<option value="${v}">${esc(l)}</option>`).join('')}
+          </select>
+          <select name="${f.k}__head" aria-label="Case head">
+            ${Object.entries(CASE_HEADS).map(([v, l]) =>
+              `<option value="${v}">${esc(l)}</option>`).join('')}
+          </select>
+        </div>
+        <span class="fhint ${open ? '' : 'hidden'}" data-newcase="${f.k}">Shape and head are
+          independent: .303 British is bottleneck AND rimmed, 9mm is straight and rimless.
+          They only change the drawing you match brass against — rimless is right for almost
+          every bottleneck rifle cartridge.</span>`;
       break;
     }
 
@@ -1195,6 +1291,9 @@ function readForm(form, kind) {
       if (v === '__new' || fresh) {
         const found = findCartridge(fresh);
         out[f.k] = found ? found.id : (fresh ? PENDING + fresh : null);
+        // Held beside the pending name, and consumed with it. Creation happens
+        // only after validation passes, so these travel the same route.
+        out['__case_' + f.k] = { shape: fd.get(f.k + '__shape'), head: fd.get(f.k + '__head') };
       } else {
         out[f.k] = v;
       }
@@ -1354,6 +1453,7 @@ const TITLES = {
   inventory: ['Inventory', 'component lots'],
   recipes: ['Recipes', 'load specifications'],
   firearms: ['Firearms', ''],
+  cartridges: ['Cartridges', 'case shape and head'],
   settings: ['Marking scheme', ''],
   data: ['Data', 'backup and reset'],
   sync: ['Cloud sync', 'shared with Zero'],
@@ -1492,7 +1592,7 @@ VIEWS.lookup = () => {
 
   return `${signedOut ? syncCard() : ''}
   <div class="card">
-    <div class="casewrap mb12">${caseSvg(preview)}</div>
+    <div class="casewrap mb12">${caseSvg(preview, { cart: identifyCart() })}</div>
     ${pickers}
     <div class="row spread">
       <span class="tiny dim">${matches.length} of ${DB.brassLots.length} match</span>
@@ -1514,9 +1614,22 @@ VIEWS.lookup = () => {
   ${signedOut ? '' : syncCard({ compact: true })}`;
 };
 
+/* Which case to draw on the Identify screen, where no cartridge has been
+ * chosen yet. If every brass lot recorded is the same kind of case, draw that
+ * kind -- the picture is being held against a real case, and someone who loads
+ * one cartridge should see their cartridge. Mixed, or nothing recorded, falls
+ * back to the default rather than picking a winner. */
+function identifyCart() {
+  const carts = (DB.brassLots || []).map(l => byId(DB.cartridges, l.cartridge)).filter(Boolean);
+  if (!carts.length) return null;
+  const key = (c) => caseShape(c) + '|' + caseHead(c);
+  const first = key(carts[0]);
+  return carts.every(c => key(c) === first) ? carts[0] : null;
+}
+
 function brassRow(l) {
   return `<button class="listitem" data-act="brassDetail" data-arg="${l.id}">
-    ${caseSvg(l.marks, { mini: true })}
+    ${caseSvg(l.marks, { mini: true, cart: l.cartridge })}
     <span class="grow">
       <span class="ttl">${esc(l.headstamp)} · ${esc(cartName(l.cartridge))}</span>
       <span class="sub mono">${esc(l.serial)} · ${esc(codeOf(l.marks))}</span>
@@ -1554,7 +1667,7 @@ VIEWS.brassDetail = (id) => {
         <div class="mono big">${esc(l.serial)}</div>
       </div>
       ${brassChips(l).length ? `<div>${chips(brassChips(l))}</div>` : ''}
-      <div class="casewrap mt12">${caseSvg(l.marks)}</div>
+      <div class="casewrap mt12">${caseSvg(l.marks, { cart: l.cartridge })}</div>
       <div class="small muted center mt8">Marked&nbsp;<b class="mono">${esc(codeOf(l.marks))}</b></div>
     </div>
     <div class="card">
@@ -1735,7 +1848,7 @@ VIEWS.ammoDetail = (id) => {
   <div class="card"><h2>Components</h2>
     ${lot('bulletLot')}${lot('powderLot')}${lot('primerLot')}
     ${brass ? `<button class="listitem mt10" data-act="brassDetail" data-arg="${brass.id}">
-      ${caseSvg(brass.marks, { mini: true })}
+      ${caseSvg(brass.marks, { mini: true, cart: brass.cartridge })}
       <span class="grow"><span class="ttl">${esc(brass.headstamp)}</span>
         <span class="sub mono">${esc(brass.serial)} · ${esc(codeOf(brass.marks))}</span></span>
       <span class="chev">›</span></button>` : ''}
@@ -1801,17 +1914,33 @@ function labelHtml(b) {
     : isOverMax(b) ? 'OVER PUBLISHED MAX'
     : batchMismatches(b).some(m => m.severity === 'stop') ? 'DOES NOT MATCH RECIPE'
     : isUntested(b) ? 'UNTESTED — WORK UP' : '';
-  const dots = brass ? scheme().positions.map(p => {
-    const c = brass.marks[p.id] ? scheme().palette.find(x => x.id === brass.marks[p.id]) : null;
-    return `<i style="background:${c ? c.hex : 'transparent'};${c ? '' : 'border-style:dashed'}"></i>`;
-  }).join('') : '';
+  /* The marking scheme, drawn ON A CASE rather than as a row of dots.
+   *
+   * A row of coloured circles is a legend for a code, not the thing itself.
+   * The label is read at a bench with a box open and a case in the other hand,
+   * and the question being asked is "is this the brass in this box" -- which
+   * means matching a band at a POSITION, not a colour in a sequence. Two
+   * positions the same colour in a different order are two different lots, and
+   * dots in a row make that a counting exercise. The drawing puts each mark
+   * where it actually is on the case, including the head, which has no place
+   * in a row at all.
+   *
+   * Same renderer as the Identify screen and the brass list, so what is
+   * printed and what is matched against on the phone cannot drift. */
+  const caseDiagram = brass ? caseSvg(brass.marks, { mini: true, cart: brass.cartridge }) : '';
   return `<div class="lbl ${band ? 'hasband' : ''}">
     ${band ? `<div class="band">${esc(band)}</div>` : ''}
     <div class="cart">${esc(r ? cartName(r.cartridge) : '')}</div>
     <div class="load">${esc(r ? r.bullet : '')}<br>${esc(r ? r.powder : '')}
       · <b>${b.chargeActual ?? (r ? r.charge : '')} gr</b>
       ${b.coalMean ? ` · COAL ${b.coalMean}"` : ''}<br>${esc(r ? r.primer : '')}</div>
-    ${brass ? `<div class="marks">${dots}<span class="ms">${esc(brass.headstamp)} · ${
+    ${brass ? `<div class="marks"><span class="ms">${
+      /* The letter code prints beside the drawing, and that is not redundancy:
+       * a mono laser or a thermal printer renders every colour as a grey, and
+       * a label whose entire content is colour becomes unreadable on exactly
+       * the printers most likely to be in a reloading room. The code survives
+       * black and white. */
+      esc(codeOf(brass.marks))} · ${esc(brass.headstamp)} · ${
       /* brass.firings is the BASELINE -- firings before the lot was recorded --
        * not the lot's life. Printing it meant a lot bought new and fired four
        * times went in the ammo box labelled "0f". This is the one number on the
@@ -1821,6 +1950,12 @@ function labelHtml(b) {
     <div class="btm"><div class="grow1">
       <div class="ser">${esc(b.serial)}</div>
       <div class="meta">${fmtDate(b.date)} · ${b.qty} rounds</div>
+      ${/* The case sits here, beside the QR, because that is where the space
+           already was: the QR is half an inch tall and the two lines next to it
+           are not, so the drawing costs the label no height at all. Given its
+           own row it overflowed a 1.5in label by exactly its own height -- and
+           a label that does not fit is one that prints clipped. */
+        caseDiagram}
     </div><div class="qr">${qr}</div></div>
   </div>`;
 }
@@ -1830,6 +1965,7 @@ VIEWS.more = () => [
   ['inventory', 'Inventory', `${DB.componentLots.length} component lot${DB.componentLots.length === 1 ? '' : 's'}`],
   ['recipes', 'Recipes', `${DB.recipes.length} load specification${DB.recipes.length === 1 ? '' : 's'}`],
   ['firearms', 'Firearms', `${DB.firearms.length} recorded`],
+  ['cartridges', 'Cartridges', `${DB.cartridges.length} recorded`],
   ['settings', 'Marking scheme', `${scheme().positions.length} positions · ${schemeCapacity()} codes`],
   ...(CORE ? [['sync', 'Cloud sync',
     CORE.isSignedIn() ? `signed in as ${CORE.getUser()?.email || 'you'}` : 'not signed in']] : []),
@@ -1837,7 +1973,8 @@ VIEWS.more = () => [
   /* Reachable from the menu, not only from #/diag. A home-screen app has no
    * address bar, so the URL route was unreachable on exactly the device whose
    * numbers are worth having. */
-  ['diag', 'Display diagnostics', 'what this device reports about the screen'],
+  ['diag', 'Display diagnostics', typeof BUILD_ID === 'string'
+    ? 'build ' + BUILD_ID : 'what this device reports about the screen'],
 ].map(([v, t, s]) => `<button class="listitem" data-act="nav" data-arg="${v}">
     <span class="grow"><span class="ttl">${t}</span><span class="sub">${esc(s)}</span></span>
     <span class="chev">›</span></button>`).join('');
@@ -2037,6 +2174,38 @@ VIEWS.firearms = () => {
       </dl></div>`).join('')
     : empty('No firearms yet. Needed to attribute range results, and to carry sight height and zero range.');
   return body + `<button class="btn primary wide" data-act="new" data-arg="firearm">+ New firearm</button>`;
+};
+
+/* Cartridges, and the case each one actually is.
+ *
+ * The shape only ever feeds the drawing, which is why this screen is a list of
+ * two dropdowns rather than a form: there is nothing to validate and nothing
+ * else it affects. It exists because the alternative was that the case shape
+ * could only ever be set on a cartridge created AFTER this update -- and every
+ * cartridge the user already has is the one they are actually loading. */
+VIEWS.cartridges = () => {
+  if (!DB.cartridges.length) {
+    return empty('No cartridges yet. They are created as you record a firearm, a recipe or a brass lot.');
+  }
+  return DB.cartridges.map(c => `<div class="card">
+    <div class="spread"><h2 class="m0">${esc(c.name)}</h2>
+      <span class="tiny dim">${DB.brassLots.filter(l => l.cartridge === c.id).length} brass lot(s)</span></div>
+    <div class="casewrap mt8">${caseSvg({}, { mini: true, cart: c })}</div>
+    <div class="row g8 mt8">
+      <label class="f grow"><span>Shape</span>
+        <select data-act="cartShape" data-arg="${c.id}">
+          ${Object.entries(CASE_SHAPES).map(([v, l]) =>
+            `<option value="${v}" ${caseShape(c) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+        </select></label>
+      <label class="f grow"><span>Head</span>
+        <select data-act="cartHead" data-arg="${c.id}">
+          ${Object.entries(CASE_HEADS).map(([v, l]) =>
+            `<option value="${v}" ${caseHead(c) === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+        </select></label>
+    </div>
+  </div>`).join('')
+   + `<p class="small muted">These change the drawing you match brass against, and nothing else —
+      no recipe, batch or count depends on them.</p>`;
 };
 
 VIEWS.settings = () => {
@@ -2893,6 +3062,13 @@ document.addEventListener('change', (e) => {
     UI.cartNew[el.dataset.key] = el.value === '__new';
     const txt = el.form && el.form.querySelector(`[name="${el.dataset.key}__new"]`);
     if (txt) { txt.classList.toggle('hidden', el.value !== '__new'); if (el.value === '__new') txt.focus(); }
+    /* The case-type controls belong to the same "adding a new one" state as
+     * the text box, and are hidden with it -- offering a case shape for a
+     * cartridge you picked from the list would imply it is about to change. */
+    if (el.form) {
+      el.form.querySelectorAll(`[data-newcase="${el.dataset.key}"]`).forEach(n =>
+        n.classList.toggle('hidden', el.value !== '__new'));
+    }
     return;
   }
   if (el.name === 'kind' && cur().v === 'form') {   // component type drives which fields show
@@ -2913,6 +3089,19 @@ document.addEventListener('input', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
+
+  /* Case shape and head. Saved on change and redrawn, with no Save button:
+   * the only thing either one affects is a picture on the same screen, so the
+   * change and its consequence are visible in one move. */
+  if (el.dataset.act === 'cartShape' || el.dataset.act === 'cartHead') {
+    const c = byId(DB.cartridges, el.dataset.arg);
+    if (!c) return;
+    if (el.dataset.act === 'cartShape') c.shape = el.value; else c.head = el.value;
+    save();
+    render();
+    return;
+  }
+
   const sc = scheme(), i = +el.dataset.idx;
   switch (el.dataset.act) {
     case 'posLabel': sc.positions[i].label = el.value; save(); break;
@@ -2962,8 +3151,9 @@ document.addEventListener('submit', (e) => {
 
   for (const f of FORMS[kind].fields) {
     if (f.t === 'cartridge' && typeof d[f.k] === 'string' && d[f.k].startsWith(PENDING)) {
-      d[f.k] = ensureCartridge(d[f.k].slice(PENDING.length));
+      d[f.k] = ensureCartridge(d[f.k].slice(PENDING.length), d['__case_' + f.k]);
     }
+    delete d['__case_' + f.k];
   }
 
   const [mode, target, msg] = editId ? applyEdit(kind, editId, d) : SAVERS[kind](d);
@@ -3036,6 +3226,14 @@ if (CORE && CORE.isSignedIn() && (typeof navigator === 'undefined' || navigator.
  * supported way to use this app and must not throw. */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    /* The build id rides in the query string. The worker is the one file whose
+     * job is to notice a new build, which makes it the one file a stale cache
+     * ruins completely -- and a stale copy WAS being served from the bare URL
+     * while the same path with any query returned the current one. A URL that
+     * changes every build cannot be answered from a cache of the last one.
+     * Scope is taken from the path, so the query changes nothing about it. */
+    navigator.serviceWorker
+      .register('sw.js?v=' + encodeURIComponent(typeof BUILD_ID === 'string' ? BUILD_ID : 'dev'))
+      .catch(() => {});
   });
 }

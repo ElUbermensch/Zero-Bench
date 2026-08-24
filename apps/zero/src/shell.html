@@ -18,7 +18,19 @@
 /* Registered from the page, not the bundle, so a bundle parse error still
  * leaves a working installed shell to load the next build over. */
 if ('serviceWorker' in navigator) {
-  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  /* Registered with the build id in the query string, and that is load-bearing.
+   *
+   * The worker is the one file whose entire job is to notice that a new build
+   * exists -- so it is the one file that must never be answered from a cache.
+   * `Cache-Control: must-revalidate` is set on it in vercel.json and a stale
+   * copy was served anyway: the bare URL returned a previous deployment's
+   * worker while the same URL with any query string returned the current one.
+   * Whatever layer was holding it, a URL that changes every build cannot be
+   * held at all. The scope comes from the PATH, so a query string does not
+   * narrow or move it. */
+  addEventListener('load', () => navigator.serviceWorker
+    .register('sw.js?v=' + encodeURIComponent(window.__BUILD__ || 'dev'))
+    .catch(() => {}));
 }
 </script>
 </body></html>

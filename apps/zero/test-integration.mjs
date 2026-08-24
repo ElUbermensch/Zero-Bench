@@ -77,6 +77,15 @@ console.log('\nboot');
 ok((await page.textContent('body')).includes('league night'), 'the seeded session renders');
 ok((await page.textContent('body')).includes('Cloud sync'), 'the sync card is present on the home screen');
 
+console.log('\nbuild stamp');
+{
+  const stamped = await page.evaluate(() => window.__BUILD__ || null);
+  ok(typeof stamped === 'string' && stamped.length > 4,
+     `the page carries a build stamp (${stamped})`);
+  const shown = await page.textContent('body');
+  ok(shown.includes(stamped), 'and the sync card shows it, so it is readable from a phone');
+}
+
 console.log('\nserver config + account');
 await page.waitForTimeout(300);
 await page.fill('input[placeholder="email"]', 'jaxon@example.com');

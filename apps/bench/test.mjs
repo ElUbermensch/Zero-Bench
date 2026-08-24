@@ -189,6 +189,122 @@ section('cartridges');
   ok(after.length === 2, `case and spacing variants reuse the existing cartridge (${after.join(' | ')})`);
 }
 
+/* ============================================== the case is the right shape */
+/* The drawing used to be one hardcoded silhouette with a flange standing proud
+ * at the head -- a RIMMED case. Almost nothing a precision shooter loads is
+ * rimmed; a bottleneck rifle case is rimless, with an extractor groove cut in
+ * ahead of a head the same diameter as the body. The picture is held against
+ * a real case, so being wrong about that is the one thing it cannot be. */
+section('a case is drawn as the case it actually is');
+{
+  const geo = await page.evaluate(() => ({
+    def: caseGeom(null),
+    rimmed: caseGeom({ shape: 'bottleneck', head: 'rimmed' }),
+    belted: caseGeom({ shape: 'bottleneck', head: 'belted' }),
+    straight: caseGeom({ shape: 'straight', head: 'rimless' }),
+  }));
+
+  ok(geo.def.head === 'rimless' && geo.def.shape === 'bottleneck',
+     'the default is a rimless bottleneck, which is what almost everything is');
+
+  /* The groove is the whole point: an indent, drawn by stepping the outline IN
+   * to a smaller diameter and back out, rather than a flange stepping out. */
+  ok(/L226,24 L240,24/.test(geo.def.path),
+     'a rimless case has an extractor groove cut into its outline');
+  ok(!/,11 /.test(geo.def.path) && !/,77/.test(geo.def.path),
+     '...and nothing standing proud of the body');
+  ok(geo.def.baseY0 === 17 && geo.def.baseY1 === 71,
+     'its head is the same diameter as its body');
+
+  ok(/L242,11/.test(geo.rimmed.path) && geo.rimmed.baseY0 === 11,
+     'a rimmed case has a flange standing proud instead');
+  ok(geo.rimmed.sepAt === 242, '...with a line where the flange meets the body');
+  ok(geo.def.sepAt === null, 'a rimless case needs no such line — the groove is the break');
+
+  ok(/L208,14 L224,14/.test(geo.belted.path), 'a belted case has a belt ahead of its groove');
+  ok(/L224,24 L238,24/.test(geo.belted.path), '...and still has the groove');
+
+  ok(!/L78,28/.test(geo.straight.path), 'a straight-walled case has no neck');
+  ok(/^M40,17/.test(geo.straight.path), '...its body runs full diameter to the mouth');
+
+  /* Marks must not be painted over a groove or a belt: a band there is a band
+   * that cannot exist on the real case. */
+  ok(geo.def.bandX1 < 226 && geo.belted.bandX1 < 208,
+     `the markable body stops short of the head features (${geo.def.bandX1}, ${geo.belted.bandX1})`);
+
+  const drawn = await page.evaluate(() => [
+    caseSvg({}, { cart: { shape: 'bottleneck', head: 'rimmed' } }),
+    caseSvg({}, { cart: { shape: 'straight', head: 'belted' } }),
+  ]);
+  ok(/data-head="rimmed"/.test(drawn[0]) && /data-shape="straight"/.test(drawn[1]),
+     'the drawing reports what it drew, so a screenshot is checkable');
+}
+
+/* ============================ choosing the case shape when naming a cartridge */
+section('a new cartridge carries its case shape');
+{
+  await page.evaluate(() => reset('firearms'));
+  await page.waitForTimeout(150);
+  await tapText('New firearm');
+  await page.waitForTimeout(200);
+
+  // The controls appear with the free-text box, because they belong to the
+  // act of creating one rather than to picking an existing one.
+  await page.selectOption('[name="cartridge"]', '__new');
+  await page.waitForTimeout(150);
+  ok(await page.locator('[name="cartridge__shape"]').isVisible(),
+     'naming a new cartridge offers its case shape');
+  ok(await page.locator('[name="cartridge__head"]').isVisible(), '...and its head');
+
+  await fill('name', 'Lee Enfield');
+  await fill('cartridge__new', '.303 British');
+  await page.selectOption('[name="cartridge__shape"]', 'bottleneck');
+  await page.selectOption('[name="cartridge__head"]', 'rimmed');
+  await submit();
+  await page.waitForTimeout(200);
+
+  const saved = await page.evaluate(() =>
+    DB.cartridges.find(c => c.name === '.303 British'));
+  ok(saved && saved.head === 'rimmed' && saved.shape === 'bottleneck',
+     `the cartridge records what was chosen (${saved && saved.shape}/${saved && saved.head})`);
+
+  /* Re-typing an existing name REFERS to it. Silently restyling every brass
+   * lot in .303 British because someone left the default selected is not
+   * something a text field should be able to do. */
+  const idBefore = saved.id;
+  await tapText('New firearm');
+  await page.waitForTimeout(200);
+  await page.selectOption('[name="cartridge"]', '__new');
+  await page.waitForTimeout(120);
+  await fill('name', 'Second Enfield');
+  await fill('cartridge__new', '.303 british');
+  await page.selectOption('[name="cartridge__head"]', 'rimless');
+  await submit();
+  await page.waitForTimeout(200);
+  const after = await page.evaluate(() => DB.cartridges.filter(c => /303/i.test(c.name)));
+  ok(after.length === 1 && after[0].id === idBefore, 'the name resolves to the same cartridge');
+  ok(after[0].head === 'rimmed', '...and its case shape is not overwritten by the default');
+}
+
+/* ================================= and an existing cartridge can be corrected */
+section('the cartridges already recorded can be given a shape');
+{
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(150);
+  ok((await page.textContent('#view')).includes('Cartridges'),
+     'More lists the cartridges — the feature is useless if it only applies to new ones');
+  await page.click('[data-act="nav"][data-arg="cartridges"]');
+  await page.waitForTimeout(250);
+
+  const sel = page.locator('[data-act="cartHead"]').first();
+  await sel.selectOption('belted');
+  await page.waitForTimeout(250);
+  const head = await page.evaluate(() => DB.cartridges[0].head);
+  ok(head === 'belted', 'changing it saves immediately');
+  const shown = await page.locator('svg.case').first().getAttribute('data-head');
+  ok(shown === 'belted', '...and the drawing on the same screen redraws to match');
+}
+
 /* ======================================================== editing a firearm */
 /* A firearm was the one record with no way back into it. Everything about it
  * is the kind of thing that gets corrected -- a scope swap changes the sight
@@ -552,8 +668,13 @@ section('the case head is a marking position, not just a band');
 
   // It has to actually be drawable, or a lot marked there cannot be identified.
   const svg = await page.evaluate(() => caseSvg({ [scheme().positions.at(-1).id]: 'R' }));
-  ok(/x="248"[^>]*fill="#d92b2b"/.test(svg),
-     'a marked case head paints the base of the case in the diagram');
+  /* Asserted against the geometry the renderer reports, not against a
+   * coordinate typed into the test. The base moved when the case stopped being
+   * drawn as a rimmed one, and a hardcoded x="248" only proved that nothing
+   * had changed -- not that the mark lands on the head. */
+  const baseX = await page.evaluate(() => caseGeom(null).baseX0);
+  ok(new RegExp(`x="${baseX}"[^>]*fill="#d92b2b"`).test(svg),
+     `a marked case head paints the base of the case in the diagram (x=${baseX})`);
   ok(/Case head/.test(svg), '...and the diagram labels it');
   // The label lives under the rim. Centred beside the case it ran off the
   // 300-unit viewBox and was clipped, which is invisible until you look.
@@ -567,7 +688,8 @@ section('the case head is a marking position, not just a band');
   const ids = await page.evaluate(() => scheme().positions.filter(p => p.kind === 'head').map(p => p.id));
   const svg2 = await page.evaluate((ids2) =>
     caseSvg({ [ids2[0]]: 'R', [ids2[1]]: 'B' }), ids);
-  const heights = [...svg2.matchAll(/x="248" y="([\d.]+)" width="14" height="([\d.]+)"/g)];
+  const heights = [...svg2.matchAll(
+    new RegExp(`x="${baseX}" y="([\\d.]+)" width="[\\d.]+" height="([\\d.]+)"`, 'g'))];
   ok(heights.length === 2 && heights[0][1] !== heights[1][1],
      'two head marks split the base into stripes rather than overprinting');
 
@@ -1314,6 +1436,76 @@ section('label');
   ok(fitv.sh <= fitv.h && fitv.sw <= fitv.w,
      `label content fits its 2.5x1.5in box (${fitv.sw}x${fitv.sh} in ${fitv.w}x${fitv.h})`);
   await page.locator('.lbl .qr').first().screenshot({ path: 'shots/qr.png' });
+
+  /* The marking scheme prints as a DRAWING OF A CASE, not a row of dots.
+   *
+   * The label is read at a bench with a box open and a case in the other hand.
+   * The question is "is this the brass in this box", which means matching a
+   * band at a position -- and a row of circles turns that into a counting
+   * exercise, with no place at all to show a mark on the case head. */
+  const caseOnLabel = await page.locator('.lbl svg.case').count();
+  ok(caseOnLabel === 1, `the label draws the case, not a row of dots (${caseOnLabel})`);
+  ok((await page.locator('.lbl .marks i').count()) === 0, 'the dot row is gone');
+
+  const marked = await page.evaluate(() => {
+    const sc = scheme();
+    const lot = DB.brassLots.find(l => l.id === DB.batches[0].brassLot);
+    const want = sc.positions.map(p => lot.marks[p.id]).filter(Boolean)
+      .map(id => sc.palette.find(c => c.id === id).hex.toLowerCase());
+    const got = [...document.querySelectorAll('.lbl svg.case rect[fill]')]
+      .map(r => r.getAttribute('fill').toLowerCase())
+      .filter(f => f !== 'none');
+    return { want, got, code: codeOf(lot.marks) };
+  });
+  ok(marked.want.length > 0 && marked.want.every(h => marked.got.includes(h)),
+     `every mark is painted in its own colour at its own position (${marked.want.join(', ')})`);
+
+  const labelText = await page.textContent('.lbl');
+  ok(labelText.includes(marked.code),
+     `the letter code prints too (${marked.code}) — a mono printer turns every colour into a grey`);
+
+  /* Backgrounds are dropped when printing unless the page asks otherwise, and
+   * this label has one that carries a safety meaning. A quarantine banner that
+   * prints white is worse than none: the label looks complete. */
+  const adj = await page.evaluate(() =>
+    getComputedStyle(document.querySelector('.lbl')).printColorAdjust
+    || getComputedStyle(document.querySelector('.lbl')).webkitPrintColorAdjust);
+  ok(adj === 'exact', `the label forces colours to print (${adj})`);
+
+  /* And with a warning band, which adds a sixth of an inch of padding at the
+   * top. The fit above has two pixels of slack; a banner eats sixteen. This is
+   * the case that actually clips, and it is the label you least want clipped. */
+  await page.evaluate(() => { DB.batches[0].quarantine = 'seating depth suspect'; save(); render(); });
+  await page.waitForTimeout(250);
+  const fitBand = await page.evaluate(() => {
+    const el = document.querySelector('.lbl');
+    const r = el.getBoundingClientRect();
+    return { h: Math.round(r.height), sh: el.scrollHeight, banded: el.classList.contains('hasband') };
+  });
+  ok(fitBand.banded, 'a quarantined batch prints with its warning band');
+  ok(fitBand.sh <= fitBand.h,
+     `...and still fits the label (${fitBand.sh} in ${fitBand.h})`);
+  await shot('07b-label-banded');
+  await page.evaluate(() => { delete DB.batches[0].quarantine; save(); render(); });
+  await page.waitForTimeout(200);
+
+  /* A sheet of eight. Each case drawing carries its own <clipPath id>, and the
+   * bands are painted through it -- so if two labels on one page shared an id,
+   * every case after the first would clip against the wrong path and the marks
+   * would land somewhere else or vanish. Eight labels, eight distinct ids. */
+  await page.click('[data-act="printSheet"]');
+  await page.waitForTimeout(300);
+  const sheet = await page.evaluate(() => {
+    const cases = [...document.querySelectorAll('#sheet .lbl svg.case')];
+    const ids = cases.map(c => c.querySelector('clipPath')?.id).filter(Boolean);
+    const used = cases.map(c => c.querySelector('g[clip-path]')?.getAttribute('clip-path'));
+    return { n: cases.length, unique: new Set(ids).size,
+             matched: cases.every((c, i) => used[i] === `url(#${ids[i]})`) };
+  });
+  ok(sheet.n === 8, `the sheet prints eight labels (${sheet.n})`);
+  ok(sheet.unique === 8, `each case drawing has its own clip id (${sheet.unique} distinct)`);
+  ok(sheet.matched, '...and each one clips against its own, not a neighbour\'s');
+
   await shot('07-label');
 }
 
@@ -1584,6 +1776,40 @@ section('installable and offline');
       !/ERR_INTERNET_DISCONNECTED|status of 404/.test(e)));
   await shot('08-offline');
   await ctx.setOffline(false);
+}
+
+/* ============================================================== build stamp */
+/* Which build is on the phone, readable from the phone. Without it, "the fix
+ * did not work" and "the fix is not on this device" look identical, and the
+ * wrong half of the system gets debugged. */
+section('the build says which build it is');
+{
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(150);
+  const more = await page.textContent('#view');
+  ok(/build .+/.test(more), 'the More screen names the build');
+  const id = await page.evaluate(() => (typeof BUILD_ID === 'string' ? BUILD_ID : null));
+  ok(typeof id === 'string' && id.length > 4, `and it is injected at build time (${id})`);
+  ok(more.includes(id), '...the same one the screen shows');
+
+  /* The worker is registered at a URL that changes every build. A cache
+   * anywhere in the chain -- browser, CDN, proxy -- can hold `sw.js`, and
+   * holding THAT file means an installed app never learns a new build exists.
+   * Observed in production: the bare URL served a previous deployment's worker
+   * while the same path with any query string served the current one. */
+  const swUrl = await page.evaluate(async () => {
+    const rs = await navigator.serviceWorker.getRegistrations();
+    return rs.map(r => (r.active || r.installing || r.waiting)?.scriptURL).find(Boolean) || null;
+  });
+  ok(!!swUrl && /sw\.js\?v=/.test(swUrl), `the worker is registered with a build query (${swUrl})`);
+  ok(!!swUrl && swUrl.includes(encodeURIComponent(id).slice(0, 8)),
+     '...carrying this build, so a new build cannot be answered from the old one');
+  const scope = await page.evaluate(async () => {
+    const rs = await navigator.serviceWorker.getRegistrations();
+    return rs[0]?.scope || null;
+  });
+  ok(!!scope && scope.endsWith('/bench/'),
+     `and the query does not move the scope, which comes from the path (${scope})`);
 }
 
 /* ================================================================== hygiene */

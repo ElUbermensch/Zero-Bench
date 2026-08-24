@@ -1454,6 +1454,7 @@ const TITLES = {
   recipes: ['Recipes', 'load specifications'],
   firearms: ['Firearms', ''],
   cartridges: ['Cartridges', 'case shape and head'],
+  scanned: ['Scanned label', 'opened in a browser'],
   settings: ['Marking scheme', ''],
   data: ['Data', 'backup and reset'],
   sync: ['Cloud sync', 'shared with Zero'],
@@ -2399,6 +2400,39 @@ VIEWS.data = () => {
  * Rather than guess a fourth time, this prints the numbers from the device that
  * actually disagrees. Reached only by URL, so it costs nothing in the UI.
  * ========================================================================*/
+/* Where a scanned QR lands when this browser has never seen the record.
+ *
+ * The cause is almost never a missing batch. A camera opens a scanned URL in
+ * the browser, and on iOS an installed home-screen app keeps its own storage
+ * container -- so the browser has no brass, no batches, no session, and the
+ * app it opens looks empty. Explaining that is the whole job of this screen,
+ * plus handing over the one thing that makes the next step quick: the serial,
+ * in a form you can paste into the app that does have the data. */
+VIEWS.scanned = (serial) => {
+  const s = serial || UI.scanned || '';
+  const local = DB.batches.length + DB.brassLots.length;
+  return `<div class="card">
+    <h2>Scanned ${esc(s)}</h2>
+    <p class="small muted">This browser has no record of it${local ? '' : ', and no records at all'}.
+      That is expected when you scan with a phone camera: the camera opens the
+      <b>browser</b>, and the Bench you keep on your home screen stores its data
+      separately. Same app, different box of records.</p>
+    <div class="serialbig mono">${esc(s)}</div>
+    <div class="row g8 mt10">
+      <button class="btn primary grow" data-act="copySerial" data-arg="${esc(s)}">Copy serial</button>
+      <button class="btn grow" data-act="tab" data-arg="lookup">Look it up here</button>
+    </div>
+    <p class="tiny dim mt10">Open Bench from your home screen and paste it into
+      <b>Identify &rsaquo; By serial</b>. If you have not installed Bench yet, this
+      page is it — use Share &rsaquo; Add to Home Screen, sign in, and the records
+      follow your account.</p>
+  </div>
+  ${CORE && !CORE.isSignedIn() ? `<div class="card"><h2>Or sign in here</h2>
+    <p class="small muted">Signing in on this browser pulls your firearms and, in
+      time, the rest. It is a second copy of the same account, not a second
+      account.</p>${syncCard()}</div>` : ''}`;
+};
+
 VIEWS.diag = () => {
   /* The first version of this read the nav's rect DURING render, before the
    * tab buttons had been rebuilt -- so it measured a 1px-tall bar and reported
@@ -2876,6 +2910,35 @@ const ACTIONS = {
   sySync: () => doSync(),
 
   serialgo: () => doSerialLookup(),
+
+  /* Clipboard, with a fallback: navigator.clipboard is unavailable on an
+   * insecure origin and can be refused outright, and the whole point of the
+   * screen this sits on is to hand the serial over. */
+  copySerial: async (a) => {
+    const text = String(a || '');
+    let done = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        done = true;
+      }
+    } catch (e) { done = false; }
+    if (!done) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        done = document.execCommand && document.execCommand('copy');
+        ta.remove();
+      } catch (e) { done = false; }
+    }
+    toast(done ? `Copied ${text}` : `Select and copy: ${text}`);
+    render();
+  },
   clearpick: () => { UI.lookup = {}; render(); },
   pick: (a, el) => { const v = el.dataset.val;
     UI.lookup[el.dataset.pos] = v === '?' ? '?' : (v === '' ? null : v); render(); },
@@ -3197,10 +3260,21 @@ function openDeepLink() {
     history.replaceState(null, '', location.pathname + location.search);
   }
   if (!found) {
-    // Say so rather than silently showing the home screen: a serial that
-    // resolves to nothing on THIS device usually means the wrong device.
-    toast(`Nothing on this device carries serial ${m[1]}.`);
-    return false;
+    /* Almost always the same cause, and it is not a missing record.
+     *
+     * A phone camera opens a scanned URL in the BROWSER. On iOS an installed
+     * home-screen app has its own storage container, entirely separate from
+     * Safari's -- so the browser that just opened has no brass, no batches and
+     * no session, and every scan lands on an app that looks wiped. The old
+     * behaviour was a toast saying nothing on this device carries that serial,
+     * which is true, useless, and reads like the record is gone.
+     *
+     * A screen instead of a toast, because there is something to do here: the
+     * serial is what the app's own By-serial box wants, so it is shown large
+     * and copyable. */
+    UI.scanned = m[1];
+    stack = [{ v: 'scanned', arg: m[1] }];
+    return true;
   }
   stack = [{ v: 'lookup' }, { v: found[0], arg: found[1] }];
   return true;

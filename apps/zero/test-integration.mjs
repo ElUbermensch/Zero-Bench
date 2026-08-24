@@ -77,6 +77,60 @@ console.log('\nboot');
 ok((await page.textContent('body')).includes('league night'), 'the seeded session renders');
 ok((await page.textContent('body')).includes('Cloud sync'), 'the sync card is present on the home screen');
 
+/* ============================================ backup export, on both paths */
+/* `<a download>` is not honoured in a home-screen PWA on iOS: the tap does
+ * nothing, or opens the JSON in place with no way to keep it. The button
+ * looked like it worked and produced no file -- which is also why moving data
+ * to a second device failed, because there was never a file to move. Where a
+ * share sheet exists the file goes through it instead. */
+console.log('\nbackup export');
+{
+  // Share sheet available: the file must go through it, and the download
+  // fallback must NOT also fire.
+  await page.evaluate(() => {
+    window.__shared = null; window.__downloads = 0;
+    navigator.share = async (d) => { window.__shared = d; };
+    navigator.canShare = (d) => !!(d && d.files && d.files.length);
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.download) { window.__downloads++; return; }
+      return click.apply(this, arguments);
+    };
+  });
+  await page.click('button:has-text("⤓ Export")');
+  await page.waitForTimeout(400);
+  const shared = await page.evaluate(() => ({
+    name: window.__shared?.files?.[0]?.name || null,
+    type: window.__shared?.files?.[0]?.type || null,
+    downloads: window.__downloads,
+  }));
+  ok(/^zero-backup-\d{4}-\d{2}-\d{2}\.json$/.test(shared.name || ''),
+     `the backup goes to the share sheet as a named file (${shared.name})`);
+  ok(shared.type === 'application/json', '...typed so the receiving app knows what it is');
+  ok(shared.downloads === 0, '...and the download path does not also fire');
+
+  // A dismissed sheet is a cancel, not a reason to try a download that would
+  // silently do nothing on the platform where the sheet exists.
+  await page.evaluate(() => {
+    window.__downloads = 0;
+    navigator.share = async () => { const e = new Error('cancelled'); e.name = 'AbortError'; throw e; };
+  });
+  await page.click('button:has-text("⤓ Export")');
+  await page.waitForTimeout(400);
+  ok((await page.evaluate(() => window.__downloads)) === 0,
+     'dismissing the share sheet cancels, rather than falling through to a silent download');
+
+  // No share sheet: the download is the right answer and must still happen.
+  await page.evaluate(() => {
+    window.__downloads = 0;
+    delete navigator.share; delete navigator.canShare;
+  });
+  await page.click('button:has-text("⤓ Export")');
+  await page.waitForTimeout(400);
+  ok((await page.evaluate(() => window.__downloads)) === 1,
+     'with no share sheet it falls back to a download');
+}
+
 console.log('\nbuild stamp');
 {
   const stamped = await page.evaluate(() => window.__BUILD__ || null);
@@ -143,8 +197,36 @@ mock.seed('v_ballistic_profiles', {
   qty_remaining: 60, qty_loaded: 100, loaded_on: '2026-07-30',
   quarantined: false, untested: true, over_published_max: false, recipe_status: 'workup',
 });
+/* A FIREARM IS ADDED FIRST, deliberately.
+ *
+ * FirearmsTab returns from two places -- an empty state and a populated one --
+ * and the populated branch dropped the `core` prop when it was written out by
+ * hand a second time. Every cloud control in the ammunition section is gated
+ * on `core && core.isSignedIn()`, so the "⇣ Bench" button, the refresh button
+ * and the import card all disappeared the moment a user added their first
+ * firearm. This suite never saw it because it ran the whole picker flow with
+ * no firearms recorded, which is the one state a real user is never in for
+ * long. It runs in the populated branch now. */
+await page.evaluate(() => {
+  const list = JSON.parse(localStorage.getItem('rifles_v1') || '[]');
+  list.push({ id: 'r-fixture', name: 'Leander SR-01', caliber: '.223 Wylde',
+              barrelLife: 4000, roundsAtStart: 310, notes: '', ts: 1, mtime: 1 });
+  localStorage.setItem('rifles_v1', JSON.stringify(list));
+});
+await page.reload();
+await page.waitForTimeout(800);
 await page.click('button:has-text("Firearms")');
 await page.waitForTimeout(400);
+ok((await page.textContent('body')).includes('Leander SR-01'), 'the firearm is there');
+ok(await page.locator('button:has-text("⇣ Bench")').count() > 0,
+   'the Bench importer is still offered once a firearm exists');
+/* The big call-to-action card is for someone who has linked NOTHING. This
+ * fixture already has one linked load, so its absence here is the rule
+ * working, not the bug above: the small chip is the affordance once you know
+ * the feature exists. */
+ok(await page.locator('button:has-text("Import batches from Bench")').count() === 0,
+   '...and the first-run card steps aside once a load is already linked');
+
 await page.click('button:has-text("⇣ Bench")');
 await page.waitForTimeout(600);
 const body1 = await page.textContent('body');
@@ -301,6 +383,42 @@ console.log('\nservice worker scope');
     ...errs.filter(e => !/status of 404|Failed to load|ERR_/.test(e)));
   await ctx3.close();
 }
+
+/* ================================== importing is a read, and has its own home */
+/* "Import could be a separate button so we're not running the whole thing to
+ * sync every single time." It always was a single read of one view -- but the
+ * only way to reach it was inside the ammunition list, so it read as part of
+ * syncing. It has a home on Targets+ now, and this pins the claim that using
+ * it pushes nothing. */
+console.log('\nimport is its own button, and its own request');
+{
+  /* Back to the home screen first. Earlier sections leave the app inside a
+   * session detail, where the tab bar is not what is on screen. */
+  await page.reload();
+  await page.waitForTimeout(900);
+  await page.click('.tabbar button:has-text("Targets+")');
+  await page.waitForTimeout(500);
+  const onTargets = await page.textContent('body');
+  ok(onTargets.includes('Loads from Bench'),
+     'Targets+ carries the Bench importer');
+  ok(onTargets.includes('does not push anything and is not a sync'),
+     '...and says plainly that it is a read');
+
+  const pushesBefore = JSON.stringify(mock.state.hits.push);
+  const pullsBefore = { ...mock.state.hits.pull };
+  await page.click('button:has-text("⇣ Import batches")');
+  await page.waitForTimeout(700);
+
+  ok((await page.textContent('body')).includes('B26H14-02X'),
+     'the batch list comes back');
+  ok(JSON.stringify(mock.state.hits.push) === pushesBefore,
+     'and NOTHING was pushed to get it');
+  const pulled = Object.keys(mock.state.hits.pull)
+    .filter(t => (mock.state.hits.pull[t] || 0) > (pullsBefore[t] || 0));
+  ok(pulled.length === 1 && pulled[0] === 'v_ballistic_profiles',
+     `exactly one view was read (${pulled.join(', ') || 'none'})`);
+}
+
 
 console.log('\nhygiene');
 ok(errs.length === 0, 'no JS errors across the whole run'

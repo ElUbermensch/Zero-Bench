@@ -1635,12 +1635,26 @@ section('the QR on the label opens the record');
   ok((await page.textContent('#view')).includes('By serial'),
      'Back goes to Identify rather than out of the app');
 
-  // A serial from someone else's bench resolves to nothing here, and says so.
+  /* A serial this browser has never seen gets a SCREEN, not a toast.
+   *
+   * The cause is almost never a missing batch: a phone camera opens a scanned
+   * URL in the browser, and on iOS an installed home-screen app keeps its own
+   * storage container. So the browser that opens has no records at all, and
+   * every scan landed on an app that looked wiped with a toast saying nothing
+   * carries that serial -- true, useless, and reading like the record is gone. */
   await page.goto('about:blank');
   await page.goto(BASE + '#/s/B26Z99-99Z');
   await page.waitForTimeout(600);
-  ok((await page.textContent('body')).includes('Nothing on this device carries serial'),
-     'an unknown serial says so instead of silently showing the home screen');
+  const scanned = await page.textContent('body');
+  ok(scanned.includes('B26Z99-99Z'), 'the scanned serial is shown');
+  ok(/camera opens the/i.test(scanned) && /home screen/i.test(scanned),
+     'and the screen explains WHY this browser has no record of it');
+  ok(await page.locator('[data-act="copySerial"]').count() === 1,
+     'with a copy button, because pasting it into the real app is the next step');
+  ok((await page.textContent('.serialbig')).trim() === 'B26Z99-99Z',
+     '...and the serial is selectable by hand if the clipboard is refused');
+  ok((await page.evaluate(() => location.hash)) === '',
+     'the link is still consumed');
 }
 
 section('import cannot quietly replace a bench');

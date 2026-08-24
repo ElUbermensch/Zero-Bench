@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1117">
+<meta name="description" content="Precision shooting log: sessions, shot plotting, DOPE, analytics and live pair fire. Works offline.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Zero">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Zero</title>
+<style>
+@font-face{font-family:'DM Sans';font-style:normal;font-weight:400;font-display:swap;src:url('./fonts/dm-sans-latin-400-normal.woff2') format('woff2')}
+@font-face{font-family:'DM Sans';font-style:normal;font-weight:500;font-display:swap;src:url('./fonts/dm-sans-latin-500-normal.woff2') format('woff2')}
+@font-face{font-family:'DM Sans';font-style:normal;font-weight:700;font-display:swap;src:url('./fonts/dm-sans-latin-700-normal.woff2') format('woff2')}
+@font-face{font-family:'Space Mono';font-style:normal;font-weight:400;font-display:swap;src:url('./fonts/space-mono-latin-400-normal.woff2') format('woff2')}
+@font-face{font-family:'Space Mono';font-style:normal;font-weight:700;font-display:swap;src:url('./fonts/space-mono-latin-700-normal.woff2') format('woff2')}
+</style>
+<script>window.__BUILD__="local · 2026-08-24 19:50Z"</script>
+</head>
+<body style="margin:0;background:#0f1117">
+<div id="root"></div>
+<script src="bundle.js"></script>
+<script>
+/* Registered from the page, not the bundle, so a bundle parse error still
+ * leaves a working installed shell to load the next build over. */
+if ('serviceWorker' in navigator) {
+  /* Registered with the build id in the query string, and that is load-bearing.
+   *
+   * The worker is the one file whose entire job is to notice that a new build
+   * exists -- so it is the one file that must never be answered from a cache.
+   * `Cache-Control: must-revalidate` is set on it in vercel.json and a stale
+   * copy was served anyway: the bare URL returned a previous deployment's
+   * worker while the same URL with any query string returned the current one.
+   * Whatever layer was holding it, a URL that changes every build cannot be
+   * held at all. The scope comes from the PATH, so a query string does not
+   * narrow or move it. */
+  addEventListener('load', () => navigator.serviceWorker
+    .register('sw.js?v=' + encodeURIComponent(window.__BUILD__ || 'dev'))
+    .catch(() => {}));
+}
+</script>
+</body></html>

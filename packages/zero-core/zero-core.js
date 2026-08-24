@@ -444,6 +444,36 @@ const ZeroCore = (() => {
       // not the session, and signing back in should still deliver it.
     }
 
+    /** Take a session out of the URL fragment, if one is there. Returns true
+     *  when it adopted one, so a caller can react (and a test can assert). */
+    function adoptSessionFromUrl() {
+      if (typeof location === 'undefined' || !location.hash) return false;
+      const hash = location.hash.replace(/^#/, '');
+      // Bench deep links live in this fragment too (#/s/SERIAL). Only touch it
+      // when it is unmistakably an auth callback.
+      if (!/(^|&)access_token=/.test(hash)) return false;
+      const q = new URLSearchParams(hash);
+      const access = q.get('access_token'), refresh = q.get('refresh_token');
+      if (!access || !refresh) return false;
+      const ttl = Number(q.get('expires_in') || 3600) * 1000;
+      setSession({ access_token: access, refresh_token: refresh,
+                   expires_at: nowMs() + ttl, user: null });
+      /* Strip it before anything else can read it. replaceState rather than
+       * assigning location.hash, which would leave an entry in history. */
+      try {
+        if (history.replaceState) history.replaceState(null, '', location.pathname + location.search);
+      } catch (e) {}
+      /* The token carries the user id in its payload but not the email, and
+       * the UI shows an email. Fetching it is one request and only happens on
+       * this path. */
+      raw('/auth/v1/user', { method: 'GET', headers: authHeaders() })
+        .then(r => (r.ok ? r.json() : null))
+        .then(u => { if (u && u.id && session) { session.user = u; store.set(K.session, session);
+                                                 emit(EVENTS.AUTH_SIGNED_IN, { user: u }); } })
+        .catch(() => {});
+      return true;
+    }
+
     const getSession = () => session;
     const getUser = () => (session && session.user) || null;
     const isSignedIn = () => !!(session && session.access_token);
@@ -1166,6 +1196,7 @@ const ZeroCore = (() => {
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
+      adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
@@ -1181,6 +1212,20 @@ const ZeroCore = (() => {
      * default: it shipped un-opted-in from both apps, and the consequence was
      * a queued write that could never leave the device. */
     if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    /* A confirmation link lands here carrying a session in the URL fragment.
+     *
+     * Supabase's confirm-your-email link goes to the project's Site URL with
+     * `#access_token=...&refresh_token=...&type=signup` on the end. Nothing
+     * read it, so a new user clicked the link, watched the app load as a
+     * stranger, and had to go and sign in by hand -- after a page that, with
+     * Site URL left at its localhost default, does not resolve at all.
+     *
+     * Adopted and then STRIPPED from the URL immediately: a bearer token that
+     * stays in the address bar is one that goes into history, gets shared in a
+     * screenshot, and is read by anything that can see a referrer. This is the
+     * same thing Supabase's own client calls detectSessionInUrl. */
+    if (cfg.detectSessionInUrl !== false) { try { adoptSessionFromUrl(); } catch (e) {} }
 
     return instance;
   }

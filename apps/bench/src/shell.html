@@ -164,6 +164,32 @@ nav.tabs{flex:0 0 auto;z-index:40;display:flex;
  * higher -- side by side, the reloading app looked misaligned. Whether to sit
  * above the home indicator is a decision the two apps have to make the same
  * way, and Zero's is the one already in front of users. */
+/* The strip under the bar, and why it is a separate element.
+ *
+ * The bar is the last row of a `height:100dvh` column. On iOS in standalone
+ * mode that column can end ABOVE the physical bottom of the screen, and the
+ * home-indicator strip below it then paints the page background — a darker
+ * band under the icons that reads as a misaligned bar. Zero does not have this
+ * because its bar is `position:fixed; bottom:0`, and on the same device that
+ * IS the physical bottom. Two apps side by side on one home screen, one of
+ * them visibly short.
+ *
+ * Reserving `var(--safe-b)` inside the bar is the textbook fix and was
+ * rejected on purpose: 34px of bar-coloured space under the icons reads as
+ * padding, not as safety margin, on a bar only 57px tall. iOS draws the
+ * indicator over native tab bars rather than above them.
+ *
+ * So: a fixed element in the bar's own colour, pinned to the bottom, BEHIND
+ * the bar (z-index 39 against the bar's 40). Where the column already reaches
+ * the physical bottom the bar covers it completely and it costs nothing. Where
+ * it does not, it fills exactly the gap. Correct under both behaviours without
+ * having to detect which is in play, and it moves nothing.
+ *
+ * Chromium reports no insets, so `--safe-b` is 0 here and this is a zero-height
+ * element in every headless render. tools/spacing-audit.mjs overrides the
+ * variable to reproduce the device. */
+.tabshim{position:fixed;left:0;right:0;bottom:0;z-index:39;pointer-events:none;
+  height:var(--safe-b);background:rgba(30,33,39,.97)}
 nav.tabs button{flex:1;background:none;border:0;color:var(--ink3);padding:8px 4px 10px;
   display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10.5px;
   cursor:pointer;min-height:var(--tap);justify-content:center}
@@ -388,6 +414,7 @@ svg.casemini{width:76px;height:auto;flex:none}
 </header>
 <main id="view"></main>
 <nav class="tabs noprint" id="tabs" aria-label="Sections"></nav>
+<div class="tabshim noprint" aria-hidden="true"></div>
 <!--APP-->
 </body>
 </html>

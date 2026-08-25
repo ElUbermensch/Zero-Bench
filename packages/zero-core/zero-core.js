@@ -784,7 +784,16 @@ const ZeroCore = (() => {
            * grows an inverse, it starts from the cursor and never sees
            * anything written before today. Advancing a cursor over data
            * nobody read is how a sync engine quietly loses history. */
-          for (const t of cfg.tables) {
+          /* WHAT TO PULL is the caller's to declare. Left to itself this walked
+           * every table in the schema on every sync, including the public
+           * leaderboard -- world-readable by design, so "everything every
+           * customer has ever posted", downloaded to a phone and discarded. A
+           * table with no inverse should not be fetched at all, rather than
+           * fetched and thrown away. */
+          const wanted = Array.isArray(o.tables) && o.tables.length
+            ? cfg.tables.filter(t => o.tables.includes(t))
+            : cfg.tables;
+          for (const t of wanted) {
             const rows = await pullTable(t, false);
             const { applied, skipped, consumed } = reconcile(t, rows, o.apply);
             if (consumed) commitCursor(t, rows);

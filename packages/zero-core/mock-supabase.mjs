@@ -511,14 +511,10 @@ export function startMock(opts = {}) {
              * server would refuse with 23505 while this mock happily stacked
              * twelve more holes on the target. */
             if (t === 'shots' && row.session_id && row.shot_no != null) {
-              const clash = [...table(t).values()].find(x =>
-                x.session_id === row.session_id && x.shot_no === row.shot_no
-                && x.id !== row.id);
-              if (clash) {
-                return json(res, 409, { code: '23505',
-                  message: 'duplicate key value violates unique constraint '
-                           + '"shots_session_id_shot_no_key"' });
-              }
+              /* (session_id, shot_no) is NOT unique any more -- see 0012. Two
+               * devices on one account cannot coordinate a number offline, and
+               * uniqueness let the second one to sync dead-letter itself
+               * forever. A shot is identified by its id. */
               if (row.wind_call_dir != null && !['L', 'R'].includes(row.wind_call_dir)) {
                 return json(res, 400, { code: '23514',
                   message: 'new row violates check constraint "shots_wind_call_dir_check"' });

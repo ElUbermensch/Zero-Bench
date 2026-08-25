@@ -31,12 +31,34 @@
 alter table public.shots
   drop constraint if exists shots_session_id_shot_no_key;
 
-create unique index if not exists shots_session_shot_no_live_idx
+-- ...and then not unique at all, which took one more round of adversarial
+-- review to reach.
+--
+-- Stable numbers plus a partial index fixes the DELETE case. It does not fix
+-- the two-device case, and one account on two devices is a feature this product
+-- sells: both restore the same 12-shot session from the cloud backup, each logs
+-- a shot 13 at different times, and the second one to sync is refused 23505 --
+-- permanently, because the number is now persisted, so every later sync
+-- re-sends the same doomed row. Making the number stable is what turned a
+-- transient collision into a permanent one.
+--
+-- No scheme two offline devices can run without coordinating avoids this. So
+-- the constraint goes. It was never load-bearing: a shot's identity is its
+-- `id`, the upsert is keyed on `id`, and a double push already collapses onto
+-- the same row. All the unique key ever added was a way for two honest devices
+-- to lock each other out of a session.
+--
+-- shot_no stays as what it actually is -- the ordinal a shooter reads, "shot 7
+-- of 12" -- and duplicates within a session are possible and harmless: they
+-- sort adjacent and each still has its own row and its own coordinates.
+create index if not exists shots_session_shot_no_idx
   on public.shots (session_id, shot_no)
   where deleted_at is null;
 
-comment on index public.shots_session_shot_no_live_idx is
-  'Partial on deleted_at: a tombstoned shot releases its number. An unconditional unique key made a mid-string delete permanently un-syncable.';
+drop index if exists public.shots_session_shot_no_live_idx;
+
+comment on index public.shots_session_shot_no_idx is
+  'Ordering, not identity. A shot is identified by its id; shot_no is the ordinal a shooter reads. Unique here let two devices on one account permanently dead-letter each other.';
 
 -- ---------------------------------------------------------------------------
 -- 2. RETRACTING A LEADERBOARD ENTRY DID NOT RETRACT IT

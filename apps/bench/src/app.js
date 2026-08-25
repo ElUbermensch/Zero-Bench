@@ -2964,9 +2964,22 @@ async function doSync() {
     const pulled = { added: 0, updated: 0, removed: 0 };
     const r = await CORE.sync({
       trigger: 'manual',
+      /* Pull ONLY what this app has an inverse for. Everything else was being
+       * downloaded and thrown away on every sync -- including the public
+       * leaderboard, which grows with the whole customer base and is nobody's
+       * to hold locally. */
+      tables: ['firearms', 'range_sessions', 'groups', 'shots'],
+      /* RETURNING `s` is what tells zero-core this table was understood and its
+       * cursor may move. applyPulled answers null for a table Bench has no
+       * inverse for, and that null is the signal to leave the cursor alone.
+       *
+       * Forgetting the return does not fail loudly: it makes every sync
+       * re-download all seventeen tables from 1970 and report thousands of
+       * rows "pulled" that changed nothing. */
       apply: (table, rows) => {
         const s = BenchSync.applyPulled(DB, table, rows, { ensureCartridge, uid });
         if (s) { pulled.added += s.added; pulled.updated += s.updated; pulled.removed += s.removed; }
+        return s;
       },
     });
     if (pulled.added || pulled.updated || pulled.removed) save();

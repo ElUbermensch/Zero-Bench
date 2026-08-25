@@ -232,6 +232,38 @@ ok(kept === before, 'remote ids are persisted locally, so they survive a reload'
  * the schema Zero reads, so a component lot becomes two rows and a marking
  * scheme has no equivalent at all. None of that is a backup, and none of it
  * gets a new phone to the state the old one is in. This does. */
+/* ==================================== the cursor actually moves, and only here */
+/* The contract that bit: zero-core commits a table's cursor only when the apply
+ * handler RETURNS something for it. Bench's handler computed its result and
+ * forgot to return it, so every sync re-downloaded all seventeen tables from
+ * 1970 and reported thousands of rows "pulled" that changed nothing. Nothing
+ * failed — it just got slower forever, on a phone, on someone's data plan.
+ *
+ * Asserted two ways, because either alone is satisfiable by accident. */
+section('the pull cursor');
+{
+  const cursors = await page.evaluate(() => CORE.cursors);
+  ok(Object.keys(cursors).length > 0,
+     `the sync moved at least one cursor (${Object.keys(cursors).join(', ') || 'none'})`);
+  ok(!!cursors.firearms,
+     'firearms — a table Bench has an inverse for — advanced');
+  /* And the other half: a table Bench cannot apply must not be pulled at all,
+   * let alone skipped past. The public leaderboard is the one that matters —
+   * it grows with the whole customer base and is nobody's to hold locally. */
+  ok(!cursors.leaderboard_entries,
+     'the public leaderboard was never pulled, so there is no cursor for it');
+
+  const before = { ...mock.state.hits.pull };
+  await page.click('[data-act="tab"][data-arg="lookup"]');
+  await page.waitForTimeout(150);
+  await page.click('button[data-act="sySync"]');
+  await page.waitForTimeout(1200);
+  const touched = Object.keys(mock.state.hits.pull)
+    .filter(t => (mock.state.hits.pull[t] || 0) > (before[t] || 0));
+  ok(!touched.includes('leaderboard_entries') && !touched.includes('recipes'),
+     `a second sync pulls only what Bench applies (${touched.join(', ') || 'nothing'})`);
+}
+
 section('cloud backup');
 const openData = async () => {
   await page.click('[data-act="tab"][data-arg="more"]');

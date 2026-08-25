@@ -1988,7 +1988,16 @@ const ZeroCore = (() => {
            * grows an inverse, it starts from the cursor and never sees
            * anything written before today. Advancing a cursor over data
            * nobody read is how a sync engine quietly loses history. */
-          for (const t of cfg.tables) {
+          /* WHAT TO PULL is the caller's to declare. Left to itself this walked
+           * every table in the schema on every sync, including the public
+           * leaderboard -- world-readable by design, so "everything every
+           * customer has ever posted", downloaded to a phone and discarded. A
+           * table with no inverse should not be fetched at all, rather than
+           * fetched and thrown away. */
+          const wanted = Array.isArray(o.tables) && o.tables.length
+            ? cfg.tables.filter(t => o.tables.includes(t))
+            : cfg.tables;
+          for (const t of wanted) {
             const rows = await pullTable(t, false);
             const { applied, skipped, consumed } = reconcile(t, rows, o.apply);
             if (consumed) commitCursor(t, rows);
@@ -4053,6 +4062,9 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
       let pulled = null;
       const r = await core.sync({
         trigger: 'manual',
+        /* Only what Zero has an inverse for. Pulling the rest fetched the
+         * entire public leaderboard on every sync and discarded it. */
+        tables: ['firearms'],
         /* The RETURN VALUE is what tells zero-core the cursor may move for
          * this table. Returning nothing means "I did not understand this
          * table", and its rows stay on the wrong side of the cursor so that

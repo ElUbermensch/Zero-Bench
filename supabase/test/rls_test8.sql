@@ -98,13 +98,14 @@ end $$;
 -- One shot number per session, so a re-push updates rather than stacking.
 do $$
 begin
-  begin
-    insert into public.shots (session_id, shot_no, ring, poi_x_in, poi_y_in)
-    values ('50000000-0000-0000-0000-000000000001', 3, '9', 0, 0);
-    perform test.check(false, 'a duplicate shot number must be refused');
-  exception when unique_violation then
-    perform test.check(true, 'shot numbers are unique per session, so a re-push cannot stack a second string');
-  end;
+  /* Deliberately NOT unique -- see 0012. Two devices on one account each log a
+   * shot 13 offline; whichever syncs second used to be refused 23505 and, since
+   * the number is persisted, re-refused forever. A shot is identified by its
+   * id; shot_no is the ordinal a shooter reads. */
+  insert into public.shots (session_id, shot_no, ring, poi_x_in, poi_y_in)
+  values ('50000000-0000-0000-0000-000000000001', 3, '9', 0, 0);
+  perform test.check(true,
+    'a second device''s shot with the same ordinal is accepted, not dead-lettered forever');
   begin
     insert into public.shots (session_id, shot_no, ring, poi_x_in, poi_y_in, wind_call_dir)
     values ('50000000-0000-0000-0000-000000000001', 13, '9', 0, 0, 'sideways');
@@ -198,7 +199,10 @@ begin
   perform test.check(jsonb_array_length(r.target_face -> 'rings') = 3, '...and carries its rings');
   perform test.check(r.distance_yd = 100 and r.group_es_in = 0.42,
     '...joined to the group that was measured on it');
-  perform test.check(r.shots_recorded = 12,
+  /* 13, not 12: the duplicate-ordinal insert above is a real extra hole. That
+   * is the point of dropping the unique key -- a second device's shot is a
+   * shot, not a constraint violation. */
+  perform test.check(r.shots_recorded = 13,
     '...and says how many holes are on file, so a client knows whether a plot is drawable');
 end $$;
 

@@ -1849,6 +1849,61 @@ section('hygiene');
      + (errors.length ? '\n        ' + errors.slice(0, 4).join('\n        ') : ''));
 }
 
+/* ================================================ the wrong-powder warning */
+/* THE most safety-relevant logic in either app. Bench compares the components a
+ * batch was actually built with against the ones its recipe cites, and raises a
+ * "DOES NOT MATCH RECIPE" band — on screen and on the printed box label —
+ * because charge weights are not transferable between powders.
+ *
+ * It got this wrong in the one case that matters most. `coreTokens` strips the
+ * maker as noise, which is right for bullets ("Berger 140 Hybrid" vs "140
+ * Hybrid") and wrong for powder: strip the makers off "Hodgdon H4350" and "IMR
+ * 4350" and you have `h4350` against `4350`, which the containment rule then
+ * calls a match. Two different powders, different burn rates, and no warning
+ * anywhere — while the batch is checked against the OTHER powder's published
+ * maximum. H4350/IMR4350, H4831/IMR4831 and H4895/IMR4895 are exactly the pairs
+ * a handloader confuses at the bench.
+ *
+ * Asserted as a battery rather than one case, because the fix has to hold a
+ * line: strict enough to catch these, loose enough that "Fed GM210M" still
+ * matches "Federal 210M" — a warning that cries wolf is a warning nobody
+ * reads. */
+console.log('\nthe wrong-powder warning');
+{
+  const cases = [
+    ['Hodgdon H4350', 'IMR 4350', false, 'same number, DIFFERENT powder'],
+    ['Hodgdon H4831', 'IMR 4831', false, '...and 4831'],
+    ['Hodgdon H4895', 'IMR 4895', false, '...and 4895'],
+    ['Alliant Reloder 16', 'Alliant Reloder 26', false, 'different Reloder'],
+    ['Berger 140gr Hybrid', 'Berger 140gr VLD', false, 'same weight, different bullet'],
+    ['Hodgdon H4350', 'H4350', true, 'a maker on one side only is not a contradiction'],
+    ['Berger 140gr Hybrid', 'Berger 140 Hybrid', true, 'the same bullet spelled differently'],
+    ['Fed GM210M', 'Federal 210M', true, 'one maker under two spellings'],
+  ];
+  const got = await page.evaluate((cs) => cs.map(([a, b]) => namesAgree(a, b)), cases);
+  cases.forEach(([a, b, want, why], i) => {
+    ok(got[i] === want,
+       `${why}: ${a} vs ${b} -> ${got[i]}${got[i] === want ? '' : ` (want ${want})`}`);
+  });
+
+  /* And end to end, because agreeing on names is only half of it: the batch
+   * screen has to actually raise the band. */
+  const banner = await page.evaluate(() => {
+    DB.cartridges = [{ id: 'cz', name: '6.5 Creedmoor' }];
+    DB.componentLots = [{ id: 'lz', serial: 'C-Z', kind: 'powder', name: 'IMR 4350',
+                          lot: 'X', qty: 8, unit: 'lb', cost: 300 }];
+    DB.recipes = [{ id: 'rz', name: 'workup', cartridge: 'cz', powder: 'Hodgdon H4350',
+                    bullet: 'Berger 140gr Hybrid', primer: 'Fed GM210M',
+                    charge: 41.5, source: 'Hodgdon', sourceMax: 41.8 }];
+    DB.batches = [{ id: 'bz', serial: 'B26Z01-01A', recipe: 'rz', powderLot: 'lz',
+                    date: '2026-08-01', qty: 50 }];
+    save();
+    return batchMismatches(DB.batches[0]).map(m => `${m.what}:${m.severity}`);
+  });
+  ok(banner.includes('Powder:stop'),
+     `the batch raises a STOP-severity powder mismatch (${banner.join(', ') || 'nothing'})`);
+}
+
 /* ============================================ the strip under the tab bar */
 /* Bench's bar is the last row of a `height:100dvh` column. On iOS in
  * standalone mode that column can end ABOVE the physical bottom of the screen,

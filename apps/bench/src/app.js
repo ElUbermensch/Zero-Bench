@@ -645,6 +645,13 @@ const MAKERS = new Set([
   'starline', 'peterson', 'adg', 'alpha', 'nammo', 'lehigh', 'speer',
 ]);
 
+/* One maker, one name. These are spellings of the same company, not different
+ * companies, and the mismatch check below compares makers directly. */
+const MAKER_ALIAS = {
+  fed: 'federal', win: 'winchester', rem: 'remington', vv: 'vihtavuori',
+  sw: 'shooters', world: 'shooters', edge: 'cutting',
+};
+
 function nameTokens(s) {
   return String(s || '')
     .toLowerCase()
@@ -667,6 +674,32 @@ function coreTokens(s) {
  *  unnamed component is an absence, not a mismatch, and saying "mismatch"
  *  about it would be a lie. */
 function namesAgree(a, b) {
+  /* THE MAKER IS NOT NOISE WHEN BOTH SIDES NAME ONE.
+   *
+   * Stripping makers is right for "Berger 140 Hybrid" against "140 Hybrid".
+   * It is dangerous for powder, because the catalogues collide on purpose:
+   * Hodgdon H4350 and IMR 4350 are DIFFERENT POWDERS with different burn rates
+   * and charge weights that are not transferable between them. Strip the
+   * makers and you are left with `h4350` against `4350`; the containment rule
+   * below then reports that they agree, and the batch that was built with the
+   * wrong one raises no mismatch banner, prints no warning band on its box
+   * label, and is checked against the other powder's published maximum.
+   *
+   * H4350/IMR4350, H4831/IMR4831 and H4895/IMR4895 are the classic three, and
+   * they are exactly the pairs a handloader confuses at the bench.
+   *
+   * So: if both names declare a maker and the makers are different, the
+   * components are different. No token arithmetic can overturn that. A name
+   * with no maker on it is not evidence either way and falls through. */
+  /* Canonicalised first: "Fed GM210M" and "Federal 210M" are one maker under
+   * two spellings, and treating them as two would refuse a match that is
+   * plainly correct -- turning a safety warning into noise, which is how
+   * safety warnings stop being read. */
+  const canon = (t) => MAKER_ALIAS[t] || t;
+  const makersOf = (s) => new Set(nameTokens(s).filter(t => MAKERS.has(t)).map(canon));
+  const ma = makersOf(a), mb = makersOf(b);
+  if (ma.size && mb.size && ![...ma].some(t => mb.has(t))) return false;
+
   const A = coreTokens(a), B = coreTokens(b);
   if (!A.size || !B.size) return null;
   const shared = [...A].filter(t => B.has(t)).length;
@@ -1166,7 +1199,13 @@ function fieldHtml(f, kind, rec) {
 
     case 'marks': {
       const sc = scheme();
-      const clash = DB.brassLots.find(l => marksEqual(l.marks, UI.marks));
+      /* The record being EDITED is not a clash with itself. Reopening a lot to
+       * fix a typo greeted the user with a red "Already used by <this very
+       * lot>" banner, and the rational response to that — pick a different
+       * colour code to clear the error — divorces the record from the brass
+       * that is physically painted in the box. */
+      const clash = DB.brassLots.find(l =>
+        marksEqual(l.marks, UI.marks) && (!rec || l.id !== rec.id));
       const pickers = sc.positions.map(p => {
         let sw = sc.allowBlank
           ? `<button type="button" class="sw none ${UI.marks[p.id] == null ? 'on' : ''}"
@@ -3209,7 +3248,16 @@ function guardedDelete(kind, id) {
       b.bulletLot === id || b.powderLot === id || b.primerLot === id).length,
     firearm: () => DB.sessions.filter(s => s.firearm === id).length,
   }[kind]();
-  if (uses) { toast(`Still used by ${uses} batch${uses === 1 ? '' : 'es'} — not deleted.`); render(); return; }
+  /* Name the blocker for what it actually is. A firearm is referenced by
+   * SESSIONS, never by a batch, and "still used by 2 batches" sent the user to
+   * the Ammo tab to look for something that cannot exist there. An error that
+   * misdescribes the obstacle is worse than one that says nothing. */
+  const blocker = { brass: 'batch', recipe: 'batch', component: 'batch',
+                    firearm: 'range session' }[kind];
+  if (uses) {
+    toast(`Still used by ${uses} ${blocker}${uses === 1 ? '' : 's'} — not deleted.`);
+    render(); return;
+  }
   const arr = { brass: 'brassLots', recipe: 'recipes', component: 'componentLots', firearm: 'firearms' }[kind];
   /* Firearms are the one collection that comes BACK from the server, so a
    * local delete has to be published as a tombstone. Without it the row is
@@ -3396,9 +3444,34 @@ const ACTIONS = {
       ? { id: uid('p'), label: 'Case head', hint: 'around the primer', at: null, kind: 'head' }
       : { id: uid('p'), label: 'New band', hint: '', at: 0.5, kind: 'band' });
     save(); render(); },
+  /* Removing a position is not a settings tweak, it is a re-interpretation of
+   * every case already painted. Two lots marked red/blue and red/green both
+   * become "R" the moment the head band goes, and Identify — the whole reason
+   * the cases are painted — then cannot tell them apart. One tap, no
+   * confirmation, no undo, and the brass is already in the boxes. */
   posDel: (a, el) => { const sc = scheme();
     if (sc.positions.length <= 1) { toast('Keep at least one position.'); return; }
-    sc.positions.splice(+el.dataset.idx, 1); save(); render(); },
+    const idx = +el.dataset.idx;
+    const pos = sc.positions[idx];
+    const key = pos && (pos.key || pos.id || pos.name);
+    const marked = (DB.brassLots || []).filter(b => b.marks && b.marks[key] != null).length;
+
+    /* Which lots would stop being distinguishable if this position stopped
+     * counting. That is the number worth putting in front of someone. */
+    const codeWithout = (b) => sc.positions
+      .filter((_, i) => i !== idx)
+      .map(p => (b.marks || {})[p.key || p.id || p.name] || '-').join('');
+    const codes = (DB.brassLots || []).map(codeWithout);
+    const collisions = codes.length - new Set(codes).size;
+
+    if (marked || collisions) {
+      if (!confirm(`Remove the "${pos.name || key}" position?\n\n`
+        + (marked ? `${marked} brass lot${marked === 1 ? '' : 's'} carry a colour there.\n` : '')
+        + (collisions ? `${collisions} lot${collisions === 1 ? '' : 's'} would no longer have a unique colour code, `
+                      + 'so Identify could not tell them apart.\n' : '')
+        + '\nThe cases are already painted. This cannot be undone.')) { render(); return; }
+    }
+    sc.positions.splice(idx, 1); save(); render(); },
   palToggle: (a, el) => { const sc = scheme(), c = sc.palette[+el.dataset.idx];
     if (c.on && sc.palette.filter(x => x.on).length <= 1) { toast('Keep at least one colour.'); return; }
     c.on = !c.on; save(); render(); },

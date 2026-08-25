@@ -162,6 +162,42 @@ ok(Array.isArray(probe.pub) && probe.pub.length === 2,
 section('hygiene');
 ok(errs.length === 0, 'no JS errors' + (errs.length?' — '+errs.slice(0,3).join(' | '):''));
 
+/* ======================================================= taking it back down */
+/* `retractEntry` was implemented, exported, tested at the zero-core level —
+ * and wired to no UI at all, so a published score could never be withdrawn. A
+ * new user taps publish to find out what it does, or publishes a session they
+ * then notice says 600 yards instead of 100, and there is no way back. Worse,
+ * deleting the session left the entry live on a public board with the id that
+ * addressed it gone. */
+section('retracting');
+{
+  /* A is sitting in the session detail from the publish section above. */
+  if (!(await A.page.locator('button:has-text("published")').count())) {
+    await A.page.click('.tabbar button:has-text("Sessions")'); await A.page.waitForTimeout(300);
+    await A.page.click('text=A league night'); await A.page.waitForTimeout(400);
+  }
+
+  ok(await A.page.locator('button:has-text("published")').count() === 1,
+     'a published session shows it is published');
+
+  A.page.once('dialog', d => d.accept());
+  await A.page.click('button:has-text("published")');
+  await A.page.waitForTimeout(900);
+
+  /* Counted for A specifically: B has published too, and the point is that A's
+   * row stopped existing rather than that the table emptied. */
+  const aId = mock.state.users.get('a@example.com').id;
+  const mine = [...(mock.state.rows.get('leaderboard_entries')?.values() || [])]
+    .filter(r => r.user_id === aId);
+  ok(mine.length === 0, `the entry is GONE from the table, not tombstoned (${mine.length} left)`);
+  ok(!mine.some(r => r.deleted_at), '...not merely marked deleted and still readable');
+  ok(await A.page.locator('button:has-text("⇧ publish")').count() === 1,
+     '...and the button offers to publish again, so it is a state and not a one-way door');
+  const lbId = await A.page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].lbId);
+  ok(!lbId, 'the local record stops claiming to be published');
+}
+
 await browser.close(); server.close(); await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

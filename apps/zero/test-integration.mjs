@@ -687,6 +687,85 @@ console.log('\nhygiene');
 ok(errs.length === 0, 'no JS errors across the whole run'
    + (errs.length ? ' — ' + errs.slice(0, 3).join(' | ') : ''));
 
+/* ================================================================ crash floor */
+/* A single-file React app with no route boundaries: ANY throw during render
+ * unmounts the whole tree. White screen, on a phone, at a range, and the only
+ * escape a user knows is deleting the app -- which deletes their data, because
+ * the data lives in this browser.
+ *
+ * Not hypothetical twice over. A useState placed after a conditional return in
+ * SessionDetail took the app down on "+ shot". And a session record whose
+ * `shots` is a string rather than an array -- a shape a partial write or an
+ * older export can produce -- takes it down at boot, before the user can reach
+ * anything at all.
+ *
+ * The boundary is the floor. The export button ON the boundary is the point:
+ * a crash must never hold someone's season hostage. */
+console.log('\ncrash floor');
+{
+  /* First, the case that should never REACH the boundary. A session whose
+   * `shots` is a string is the likeliest corruption — a partial write, an
+   * older export, a hand-edited backup — and it used to take the whole app
+   * down at boot, before the user could reach anything at all. It is repaired
+   * on load now: the string goes, the session stays. */
+  await page.evaluate(() => {
+    localStorage.setItem('sessions_v1',
+      '[{"id":"boom","name":"survivor","shots":"not-an-array","targetId":"any",'
+      + '"rangeYards":100,"date":"2026-08-13","ts":1}]');
+  });
+  await page.reload();
+  await page.waitForTimeout(900);
+  {
+    const b = await page.textContent('body');
+    ok(!/hit a bug and stopped/.test(b),
+       'a session with a corrupt shot string is repaired at boot, not crashed on');
+    ok(/survivor/.test(b),
+       '...and the session itself survives — losing the string beats losing the session');
+  }
+
+  /* Then the floor itself, with a corruption nothing guards: an ammo list
+   * holding a null. The boundary is what stands between that and a white
+   * screen with a season behind it. */
+  await page.evaluate(() => {
+    localStorage.setItem('ammo_v1', '[null]');
+  });
+  await page.reload();
+  await page.waitForTimeout(900);
+
+  const body = await page.textContent('body');
+  ok(/hit a bug and stopped/.test(body),
+     'an unguarded corruption lands on the boundary instead of a white screen');
+  ok(/still on this device/.test(body),
+     '...saying the data is still there, which is the first thing anyone needs to know');
+
+  /* The rescue has to work when React is dead, so it reads localStorage
+   * directly. Assert the file actually comes out. */
+  await page.evaluate(() => {
+    window.__downloads = 0; window.__shared = null;
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.download) { window.__downloads++; return; }
+      return click.apply(this, arguments);
+    };
+  });
+  await page.click('button:has-text("Save my data")');
+  await page.waitForTimeout(400);
+  ok(await page.evaluate(() => window.__downloads) === 1,
+     'and the rescue export produces a file from the crashed app');
+
+  ok(await page.locator('button:has-text("Reload")').count() === 1,
+     '...with a way back that is not "delete the app"');
+
+  await page.evaluate(() => {
+    localStorage.removeItem('sessions_v1'); localStorage.removeItem('ammo_v1');
+  });
+  await page.reload();
+  await page.waitForTimeout(800);
+  ok(!/hit a bug and stopped/.test(await page.textContent('body')),
+     'and the app comes back once the bad record is gone');
+}
+
+
 await browser.close(); server.close(); await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

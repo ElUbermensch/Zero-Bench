@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, Component } from "react";
 
 const MOA_PER_100YD = 1.0472;
 
@@ -4202,7 +4202,7 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
   );
 }
 
-export default function App() {
+function App() {
   const [tab, setTab] = useState('sessions');
   /* Which submenu is open under More. null is the menu itself. Kept separate
      from `screen` because a submenu is still the tab bar's world -- the tab
@@ -4240,7 +4240,27 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      try { const r = await window.storage.get('sessions_v1'); if (r) setSessions(JSON.parse(r.value)); } catch { bootFailed.current.sessions = true; }
+      /* Sessions are the record with the most structure and the most ways to
+       * arrive malformed -- a partial write, an older export, a hand-edited
+       * backup. A session that is not an object, or whose `shots` is not an
+       * array, takes every render path that touches it down with it, and in a
+       * single-file app that is the whole app. The error boundary catches
+       * that, but a user should not meet the error boundary over one bad row
+       * when the other four hundred are fine.
+       *
+       * Repaired, not dropped: `shots: []` keeps the session, its date, its
+       * name and its load. Losing the string is bad; losing the session is
+       * worse. */
+      try {
+        const r = await window.storage.get('sessions_v1');
+        if (r) {
+          const raw = JSON.parse(r.value);
+          setSessions(Array.isArray(raw)
+            ? raw.filter(x => x && typeof x === 'object')
+                 .map(x => (Array.isArray(x.shots) ? x : { ...x, shots: [] }))
+            : []);
+        }
+      } catch { bootFailed.current.sessions = true; }
       try { const r = await window.storage.get('matches_v1'); if (r) setMatches(JSON.parse(r.value)); } catch { bootFailed.current.matches = true; }
       try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(JSON.parse(r.value)); } catch { bootFailed.current.customTargets = true; }
       try { const r = await window.storage.get('deleted_builtins_v1'); if (r) setDeletedBuiltins(JSON.parse(r.value)); } catch { bootFailed.current.deletedBuiltins = true; }
@@ -4649,7 +4669,15 @@ export default function App() {
         });
         saveSessions(u);
       }}
-      onDelSess={()=>{ if (liveSess===sess.id) endLive(); saveSessions(sessions.filter(s=>s.id!==sess.id)); setScreen('home'); setActiveSess(null); }}
+      /* Deleting the session takes its published score with it. Otherwise the
+         entry stays live on a public board and the id that addressed it is
+         gone with the session — unreachable, permanently. */
+      onDelSess={()=>{
+        if (liveSess===sess.id) endLive();
+        if (sess.lbId && core && core.isSignedIn()) {
+          try { core.retractEntry(sess.lbId); } catch (e) {}
+        }
+        saveSessions(sessions.filter(s=>s.id!==sess.id)); setScreen('home'); setActiveSess(null); }}
       core={core}
       live={liveSess === sess.id}
       hostName={relayName}
@@ -4657,6 +4685,7 @@ export default function App() {
       onGoLive={name => goLive(sess, tgt, name)}
       onJoinLive={() => joinLive(sess, tgt)}
       onEndLive={endLive}
+      onRetracted={s => saveSessions(sessions.map(x => x.id === s.id ? { ...x, lbId: null } : x))}
       onPublish={s => {
         const entry = leaderboardEntryFor(s, getTarget(s.targetId), s.lbId);
         if (!entry) return;
@@ -5851,8 +5880,14 @@ function CopyButton({ text }) {
   );
 }
 
-function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack, onAddShot, onDelShot, onDelSess, core, onPublish, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
+function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack, onAddShot, onDelShot, onDelSess, core, onPublish, onRetracted, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
   const [addingShot, setAddingShot] = useState(false);
+  /* Above `if (addingShot) return ...` deliberately. A hook after a
+   * conditional return is only called on some renders, which changes the hook
+   * order between them -- React throws, and in a single-file app with no error
+   * boundary that is a white screen. It put one there: opening "+ shot" from a
+   * session detail crashed the whole app. */
+  const [retracting, setRetracting] = useState(false);
   const [confirmDelSess, setConfirmDelSess] = useState(false);
   const [confirmDelShot, setConfirmDelShot] = useState(null);
   const [shareText, setShareText] = useState(null);
@@ -5907,6 +5942,26 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
     />;
   }
 
+  /* Taking a published score down. Confirmed, because it is public and someone
+   * may be looking at it, and reported honestly if the server refuses --
+   * telling a user their score is gone when it is not is the failure this
+   * whole path exists to avoid. */
+  async function doRetract() {
+    if (!session.lbId) return;
+    if (!window.confirm('Take this score off the public leaderboard?\n\n'
+        + 'It stops being visible to everyone. You can publish it again later.')) return;
+    setRetracting(true);
+    try {
+      const r = await core.retractEntry(session.lbId);
+      if (r && r.ok) onRetracted(session);
+      else window.alert('Could not take it down' + (r && r.status ? ` (${r.status})` : '')
+                        + '. It is still on the board — try again when you have signal.');
+    } catch (e) {
+      window.alert('Could not take it down: ' + (e?.message || e));
+    }
+    setRetracting(false);
+  }
+
   return (
     <>
       <style>{S}</style>
@@ -5914,10 +5969,19 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
         <div className="hdr">
           <button className="bback" onClick={onBack}>← {match ? match.name||match.type : 'sessions'}</button>
           <div style={{display:'flex',gap:6}}>
+            {/* Published is a STATE you can leave, not a one-way door.
+                `retractEntry` existed and was wired to nothing, so a score put
+                on a public board — by a new user tapping "publish" to find out
+                what it does, or after noticing they typed 600 where they meant
+                100 — could never be taken down. Deleting the session made it
+                worse: the entry stayed live and the id that addressed it went
+                with the session. */}
             {core && core.isSignedIn() && leaderboardEntryFor(session, target, session.lbId) && (
-              <button className="badd" onClick={()=>onPublish(session)}
-                style={{background:'none',border:'1px solid var(--bdr)',color: session.lbId ? 'var(--green)' : 'var(--ink)'}}>
-                {session.lbId ? '✓ published' : '⇧ publish'}</button>
+              <button className="badd" disabled={retracting}
+                onClick={() => (session.lbId ? doRetract() : onPublish(session))}
+                style={{background:'none',border:'1px solid var(--bdr)',
+                        color: session.lbId ? 'var(--green)' : 'var(--ink)'}}>
+                {retracting ? '…' : session.lbId ? '✓ published' : '⇧ publish'}</button>
             )}
             <button className="badd" onClick={()=>setAddingShot(true)}>+ shot</button>
           </div>
@@ -10006,4 +10070,97 @@ function TargetPreviewStatic({ rings }) {
       </svg>
     </div>
   );
+}
+
+
+/* ── The last line of defence ──────────────────────────────────────────────
+ *
+ * This is a single-file React app with no route boundaries, so ANY throw
+ * during render unmounts the entire tree: a white screen, on a phone, at a
+ * range, with no way back except deleting and reinstalling the app — which
+ * takes the user's data with it, because the data lives in this browser.
+ *
+ * That is not hypothetical. A `useState` placed after a conditional return in
+ * SessionDetail did exactly this: tapping "+ shot" changed the hook order and
+ * took the whole app down. It was caught by a test only because the relay
+ * suite happens to log a shot.
+ *
+ * So: catch it, say something true, and — above all — do not trap the data
+ * behind the crash. The export button here is the point of the whole screen.
+ * Everything else is manners.
+ */
+class Boundary extends Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) {
+    // Kept for the diagnostics screen and for anything the user reads out.
+    try {
+      window.__lastCrash = { message: String(err && err.message || err),
+                             stack: String(info && info.componentStack || ''),
+                             at: new Date().toISOString() };
+    } catch (e) { /* never throw from the thing that handles throws */ }
+  }
+
+  rescue() {
+    /* Straight out of localStorage, not out of React state: the component
+     * tree is what just died, and nothing here may depend on it. */
+    try {
+      const data = {};
+      for (const k of ['sessions_v1', 'matches_v1', 'custom_targets_v1',
+                       'deleted_builtins_v1', 'rifles_v1', 'ammo_v1']) {
+        const raw = localStorage.getItem(k);
+        if (raw) data[k] = JSON.parse(raw);
+      }
+      const text = JSON.stringify({ schema: 'zero-backup', version: 1,
+        exportedAt: new Date().toISOString(), data }, null, 2);
+      const name = `zero-rescue-${new Date().toISOString().slice(0, 10)}.json`;
+      const file = new File([text], name, { type: 'application/json' });
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: 'Zero data' }).catch(() => {});
+        return;
+      }
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      window.alert('Could not export: ' + (e && e.message || e));
+    }
+  }
+
+  render() {
+    if (!this.state.err) return this.props.children;
+    const wrap = { minHeight: '100dvh', background: '#0d0f14', color: '#e8eaf0',
+                   fontFamily: 'ui-sans-serif,system-ui,sans-serif',
+                   padding: '28px 22px', display: 'flex', flexDirection: 'column',
+                   gap: 14, justifyContent: 'center' };
+    const mono = { fontFamily: 'ui-monospace,monospace', fontSize: 11, color: '#8a93a6' };
+    const btn = { padding: '13px 16px', borderRadius: 9, fontSize: 14, cursor: 'pointer',
+                  border: '1px solid #2a2f3d', background: 'none', color: '#e8eaf0' };
+    return (
+      <div style={wrap}>
+        <div style={{ fontSize: 19, fontWeight: 700 }}>Zero hit a bug and stopped.</div>
+        <div style={{ fontSize: 14, lineHeight: 1.55, color: '#b9c0d0' }}>
+          Your sessions are still on this device — this screen is the app failing to
+          draw, not your data going missing. Save a copy before anything else, then
+          reload.
+        </div>
+        <button style={{ ...btn, background: '#e8912a', color: '#1a1206',
+                         border: 'none', fontWeight: 700 }}
+                onClick={() => this.rescue()}>⤓ Save my data</button>
+        <button style={btn} onClick={() => window.location.reload()}>Reload</button>
+        <div style={mono}>
+          build {(typeof window !== 'undefined' && window.__BUILD__) || 'unknown'}
+        </div>
+        <div style={{ ...mono, whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>
+          {String(this.state.err && this.state.err.message || this.state.err)}
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function Root() {
+  return <Boundary><App /></Boundary>;
 }

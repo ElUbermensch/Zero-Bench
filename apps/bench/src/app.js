@@ -1794,7 +1794,16 @@ function targetPlot(sess, opts) {
   const spanX = Math.max(...xs) - Math.min(...xs);
   const spanY = Math.max(...ys) - Math.min(...ys);
   const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
-  const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+  /* NEGATED, because the shots are drawn negated.
+   *
+   * `sy(v) = -v` flips target inches (up is positive) into SVG coordinates
+   * (down is positive), but this centre was computed from the UN-flipped
+   * numbers -- so the viewBox was centred at +cy while the marks sat at -cy,
+   * mirroring the crop about the horizontal axis. A group centred on the
+   * aiming point looked fine, which is why it survived a screenshot; a group
+   * an inch high drifted an inch the wrong way, and a tall string walked out
+   * of frame entirely. */
+  const cy = -(Math.max(...ys) + Math.min(...ys)) / 2;
 
   let half = Math.max(spanX, spanY) / 2 * 1.9;
   half = Math.max(half, innerR * 1.2, 0.75);               // never a meaningless empty crop

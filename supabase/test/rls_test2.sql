@@ -110,9 +110,15 @@ begin
   perform test.check(n = 2, 'the class view now holds both shooters'' entries');
 end $$;
 
--- A retracts: soft delete hides it from everyone, keeps the tombstone
+-- A retracts. A REAL delete, not a tombstone.
+--
+-- It used to be `set deleted_at = now()`, and this suite asserted the entry
+-- left the VIEW — which it did, while the row stayed readable by every other
+-- account straight off the table the view is built on. The board is
+-- world-readable by design; that is exactly why a withdrawal has to remove the
+-- row rather than mark it.
 select test.as_user('11111111-1111-1111-1111-111111111111');
-update public.leaderboard_entries set deleted_at = now()
+delete from public.leaderboard_entries
  where id = 'ee000000-0000-0000-0000-000000000001';
 
 select test.as_user('22222222-2222-2222-2222-222222222222');
@@ -120,7 +126,14 @@ do $$
 declare n integer;
 begin
   select count(*) into n from public.v_leaderboard where handle = 'Jaxon';
-  perform test.check(n = 0, 'retraction: a soft-deleted entry leaves the leaderboard for everyone');
+  perform test.check(n = 0, 'retraction: a withdrawn entry leaves the leaderboard for everyone');
+
+  -- The half that was missing, and the reason this was a privacy defect: the
+  -- board is world-readable, so "gone from the view" is not gone.
+  select count(*) into n from public.leaderboard_entries
+   where id = 'ee000000-0000-0000-0000-000000000001';
+  perform test.check(n = 0,
+    'retraction: ...and off the raw table too, which every account can read');
 end $$;
 
 reset role;

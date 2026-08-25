@@ -1602,8 +1602,17 @@ const ZeroCore = (() => {
             body: JSON.stringify({ refresh_token: session.refresh_token }),
           });
           if (!res.ok) {
-            setSession(null, 'refresh-failed');
-            emit(EVENTS.AUTH_ERROR, { phase: 'refresh', error: { status: res.status } });
+            /* Only a REFUSAL kills the session. GoTrue answers 429 when it is
+             * rate limiting and 5xx while it is being deployed, and treating
+             * either as "your token is dead" signs every user out at once over
+             * a transient server hiccup -- with their unsent work still in the
+             * outbox and no idea why they are looking at a sign-in form. A
+             * network exception is already handled that way below; an HTTP
+             * error deserves the same reading. */
+            const refused = res.status === 400 || res.status === 401 || res.status === 403;
+            if (refused) setSession(null, 'refresh-failed');
+            emit(EVENTS.AUTH_ERROR, { phase: 'refresh', error: { status: res.status },
+                                      fatal: refused });
             return false;
           }
           const json = await res.json();
@@ -1734,6 +1743,18 @@ const ZeroCore = (() => {
      * it would start from the cursor and never see anything written before
      * that day. Advancing a cursor over data nobody read is how a sync engine
      * quietly loses history. */
+    /* Move one table's cursor to the newest row the server returned. Split out
+     * of pullTable because the decision to commit cannot be made until the
+     * apply handler has said whether it understood the table -- and that
+     * happens after the rows are in hand. */
+    function commitCursor(table, rows, since) {
+      if (!rows || !rows.length) return;
+      const from = since || cursors[table] || '1970-01-01T00:00:00Z';
+      const newest = rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), from);
+      cursors[table] = newest;
+      store.set(K.cursors, cursors);
+    }
+
     async function pullTable(table, commit) {
       const since = cursors[table] || '1970-01-01T00:00:00Z';
       let offset = 0, all = [];
@@ -1755,11 +1776,7 @@ const ZeroCore = (() => {
 
       // Advance the cursor to the newest row the SERVER actually returned.
       // Using a local timestamp here loses every row written mid-sync.
-      if (all.length && commit !== false) {
-        const newest = all.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), since);
-        cursors[table] = newest;
-        store.set(K.cursors, cursors);
-      }
+      if (all.length && commit !== false) commitCursor(table, all, since);
       emit(EVENTS.SYNC_PULLED, { table, rows: all, cursor: cursors[table] || since });
       return all;
     }
@@ -1779,11 +1796,14 @@ const ZeroCore = (() => {
         }
         applied.push(r);
       }
-      if (apply) apply(table, applied);
+      /* What the handler RETURNS decides whether the cursor may move. A
+       * handler that does not know this table returns nothing, and rows it
+       * threw away must stay on the wrong side of the cursor. */
+      const consumed = apply ? apply(table, applied) : undefined;
       if (applied.length) {
         emit(EVENTS.DATA_CHANGED, { table, ids: applied.map(r => r.id), origin: 'remote' });
       }
-      return { applied, skipped };
+      return { applied, skipped, consumed: consumed !== undefined && consumed !== null };
     }
 
     /* ---------------------------------------------------------------- push */
@@ -1955,14 +1975,23 @@ const ZeroCore = (() => {
         emit(EVENTS.SYNC_START, { trigger: o.trigger || 'manual' });
         try {
           for (const t of cfg.tables) stats.pushed += await pushTable(t);
-          /* Only commit the cursor for tables somebody is actually consuming.
-           * A caller with no apply handler still gets the rows through
-           * SYNC_PULLED, but the cursor stays put so the data is not lost to
-           * whoever wires a handler up later. */
-          const consuming = !!o.apply;
+          /* Only commit the cursor for tables somebody is actually consuming,
+           * and that is decided PER TABLE rather than once for the whole sync.
+           *
+           * It used to be `const consuming = !!o.apply` -- a single boolean.
+           * Both apps pass a handler, but each handler understands only a few
+           * tables: Zero's takes firearms and returns early for everything
+           * else, Bench's takes four and returns null for the rest. So every
+           * sync pulled the other fifteen tables, threw them away, and moved
+           * the cursor past them. The rows stay on the server, but this device
+           * will never be offered them again -- so the day one of those tables
+           * grows an inverse, it starts from the cursor and never sees
+           * anything written before today. Advancing a cursor over data
+           * nobody read is how a sync engine quietly loses history. */
           for (const t of cfg.tables) {
-            const rows = await pullTable(t, consuming);
-            const { applied, skipped } = reconcile(t, rows, o.apply);
+            const rows = await pullTable(t, false);
+            const { applied, skipped, consumed } = reconcile(t, rows, o.apply);
+            if (consumed) commitCursor(t, rows);
             stats.pulled += applied.length;
             stats.conflicts += skipped.length;
           }
@@ -2171,8 +2200,42 @@ const ZeroCore = (() => {
       return upsert('leaderboard_entries', entry);
     }
 
-    /** Retract an entry: tombstone, so it vanishes for every viewer. */
-    const retractEntry = (id) => remove('leaderboard_entries', id);
+    /** Retract an entry. A REAL delete, not a tombstone.
+     *
+     * The board is world-readable by design, and a soft delete left the row
+     * sitting there for any account to read after the app had already told its
+     * owner it was gone. The obvious repair — filtering tombstones in the
+     * SELECT policy — is impossible: Postgres requires an updated row to stay
+     * visible under the table's SELECT policies, so that policy would refuse
+     * the very UPDATE that sets deleted_at.
+     *
+     * Nothing depends on the tombstone. A published entry is not synced: no
+     * device pulls it, and re-publishing upserts the same persisted id. So the
+     * row goes.
+     *
+     * Direct rather than queued, for the same reason a backup is: "it will be
+     * withdrawn later" is not what a user asking to withdraw a score means. If
+     * it fails they are told, and the entry is still there to try again. */
+    async function retractEntry(id) {
+      if (!id) return { ok: false, reason: 'no id' };
+      if (!isSignedIn()) return { ok: false, reason: 'not signed in' };
+      /* Drop any queued write for this entry first: publishing and then
+       * retracting before a sync would otherwise re-create it afterwards. */
+      const before = outbox.length;
+      outbox = outbox.filter(e => !(e.table === 'leaderboard_entries' && e.row.id === id));
+      if (outbox.length !== before) persistOutbox();
+
+      const res = await authed('/rest/v1/leaderboard_entries?id=eq.' + encodeURIComponent(id),
+        { method: 'DELETE', headers: { Prefer: 'return=minimal' } });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.SYNC_ERROR, { phase: 'retract', table: 'leaderboard_entries',
+                                  error: { status: res.status, body: error } });
+        return { ok: false, reason: 'refused', status: res.status };
+      }
+      emit(EVENTS.DATA_CHANGED, { table: 'leaderboard_entries', ids: [id], origin: 'local' });
+      return { ok: true };
+    }
 
     const leaderboard = (extra) =>
       selectView('v_leaderboard', 'select=*&' + (extra || 'order=score.desc'));
@@ -2841,9 +2904,26 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
      * a mock that did not model the key, quietly stack a second string on the
      * target. The id is what makes the second push an update. */
     const shots = s2.shots || [];
-    if (shots.some(sh => sh && !sh.remoteId)) {
-      s2 = { ...s2, shots: shots.map(sh =>
-        sh && sh.remoteId ? sh : { ...sh, remoteId: core.uuid() }) };
+    /* A shot's NUMBER is minted once and kept, exactly like its id.
+     *
+     * It used to be the array index at push time, which is a defect with a
+     * long fuse: delete shot 5 of a 12-shot string and the tombstone keeps
+     * holding (session, 5) -- `deleted_at` does not release a unique key --
+     * while shots 6..12 renumber to 5..11. The upsert of the new shot 5 is a
+     * different row claiming a taken number, the server answers 23505, and
+     * because that is a permanent 4xx the outbox dead-letters it. That
+     * session's string never syncs again, silently.
+     *
+     * Stable numbers leave a gap where the deleted shot was, which is the
+     * honest record: shot 5 was fired and then removed. */
+    const usedNo = new Set(shots.map(sh => sh && sh.shotNo).filter(Number.isFinite));
+    let nextNo = Math.max(0, ...usedNo) + 1;
+    if (shots.some(sh => sh && (!sh.remoteId || !Number.isFinite(sh.shotNo)))) {
+      s2 = { ...s2, shots: shots.map(sh => {
+        if (!sh) return sh;
+        const out = sh.remoteId ? sh : { ...sh, remoteId: core.uuid() };
+        return Number.isFinite(out.shotNo) ? out : { ...out, shotNo: nextNo++ };
+      }) };
       changed = true;
     }
     core.upsert('range_sessions', {
@@ -2855,7 +2935,11 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
        * rifle was never named or has not synced yet — a wrong attribution is
        * worse than a missing one. */
       firearm_id: (s2.rifleId && gunRemote.get(s2.rifleId)) || null,
-      occurred_on: s2.date || null,
+      /* NOT NULL in the schema, and a column default does NOT apply to an
+       * explicitly-sent null -- PostgREST would answer 23502 and the whole
+       * session would dead-letter. A session with no date is a session that
+       * happened whenever it was logged. */
+      occurred_on: s2.date || new Date().toISOString().slice(0, 10),
       location: s2.rangeLocation || null,
       /* Rounds CONSUMED, which is every shot logged — sighters and foulers
        * included. `stats.n` counts record shots only; sending that made a
@@ -2902,13 +2986,13 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
      * because the schema's unique key is (session_id, shot_no) and numbering
      * the two classes separately would collide on every pair. Which class a
      * shot belongs to is a column, not a numbering scheme. */
-    (s2.shots || []).forEach((sh, i) => {
+    (s2.shots || []).forEach((sh) => {
       const p = shotXY(sh, tgt);
       const call = sh.callXY && typeof sh.callXY.x === 'number' ? sh.callXY : null;
       core.upsert('shots', {
         id: sh.remoteId,
         session_id: s2.remoteId,
-        shot_no: i + 1,
+        shot_no: sh.shotNo,
         ring: sh.ring == null ? null : String(sh.ring),
         is_sighter: !!sh.isSighter,
         poi_x_in: round3(p.x),
@@ -3969,10 +4053,16 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
       let pulled = null;
       const r = await core.sync({
         trigger: 'manual',
+        /* The RETURN VALUE is what tells zero-core the cursor may move for
+         * this table. Returning nothing means "I did not understand this
+         * table", and its rows stay on the wrong side of the cursor so that
+         * whoever wires an inverse up later still sees them. Zero understands
+         * firearms and nothing else yet. */
         apply: (table, rows) => {
-          if (table !== 'firearms') return;
+          if (table !== 'firearms') return undefined;
           const res = zeroFirearmsApply(rows, (pulled && pulled.list) || guns.updated || firearms || []);
           if (res.added || res.updated || res.removed) pulled = res;
+          return res;
         },
       });
       if (pulled) await onFirearmsUpdated(pulled.list);

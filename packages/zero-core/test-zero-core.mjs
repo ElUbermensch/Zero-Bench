@@ -231,7 +231,10 @@ section('pull cursor');
   ok(c.cursors.firearms === undefined,
      'a pull with no apply handler does not advance the cursor');
 
-  await c.sync({ trigger: 'test', apply: () => {} });
+  /* The handler must SAY it consumed the table -- returning a value is the
+   * signal. A handler that returns nothing is one that did not recognise the
+   * table, and its rows must stay on the wrong side of the cursor. */
+  await c.sync({ trigger: 'test', apply: () => ({ ok: true }) });
   const cursorAfterFirst = c.cursors.firearms;
   ok(cursorAfterFirst === new Date(2_000_000).toISOString(),
      'the cursor is the greatest updated_at the server returned, not the local clock');
@@ -835,6 +838,40 @@ section('outbox durability');
   await c2.signOut();
   ok(c2.pendingCount() === 1,
      'signing out keeps unsent work: it belongs to the user, not the session');
+}
+
+/* ================================================ the cursor is per table */
+/* `consuming` used to be one boolean for the whole sync: `!!o.apply`. Both apps
+ * pass a handler, but each understands only a few of the seventeen tables --
+ * Zero's takes firearms and returns early for the rest, Bench's takes four. So
+ * every sync pulled the other thirteen, discarded them, and moved the cursor
+ * past them. The rows stay on the server; this device is simply never offered
+ * them again, which means the day one of those tables grows an inverse it
+ * starts from the cursor and never sees anything written before that day. */
+section('the cursor moves per table, not per sync');
+{
+  const c = mkClient();
+  await c.signUp('percursor@example.com', 'pw');
+  const uid = c.getUser().id;
+  mock.state.clock = 5_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'understood', cartridge: '.308' });
+  mock.seed('recipes',  { id: c.uuid(), user_id: uid, name: 'not understood' });
+
+  // A handler that understands firearms and nothing else — both apps' shape.
+  await c.sync({ trigger: 'test', apply: (t) => (t === 'firearms' ? { ok: true } : undefined) });
+
+  ok(c.cursors.firearms === new Date(5_000_000).toISOString(),
+     'the table the handler understood advances');
+  ok(c.cursors.recipes === undefined,
+     'the table it did not understand does NOT — those rows are still owed to this device');
+
+  /* And the proof that it is owed: a later handler that DOES understand
+   * recipes is handed the row that was pulled and discarded before it existed. */
+  let seen = 0;
+  await c.sync({ trigger: 'test', apply: (t, rows) => { if (t === 'recipes') { seen = rows.length; return { ok: true }; } } });
+  ok(seen === 1, `a handler wired up later still receives the row (${seen})`);
+  ok(c.cursors.recipes === new Date(5_000_000).toISOString(),
+     '...and only now does its cursor move');
 }
 
 /* ============================================================ event coverage */

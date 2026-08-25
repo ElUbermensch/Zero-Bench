@@ -302,6 +302,19 @@ export function startMock(opts = {}) {
 
         /* Leaving a relay is the only DELETE the clients issue. Scoped to the
          * caller's own participant row, mirroring relay_part_delete_self. */
+        /* A real DELETE, scoped by RLS. Retracting a leaderboard entry is one:
+         * a soft delete left the row world-readable after the app had said it
+         * was gone, and a SELECT policy that hides tombstones cannot coexist
+         * with the UPDATE that creates them. */
+        if (req.method === 'DELETE' && t !== 'relay_participants') {
+          const idFilter = (u.searchParams.get('id') || '').replace(/^eq\./, '');
+          const row = table(t).get(idFilter);
+          // Another account's row is invisible, not forbidden: PostgREST
+          // answers a filter matching nothing with 204 and no rows removed.
+          if (row && row.user_id === a.userId) table(t).delete(idFilter);
+          return json(res, 204, null);
+        }
+
         if (req.method === 'DELETE' && t === 'relay_participants') {
           const rid = (u.searchParams.get('relay_id') || '').replace(/^eq\./, '');
           const parts = state.relayParts.get(rid);

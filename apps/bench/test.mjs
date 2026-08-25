@@ -1849,6 +1849,51 @@ section('hygiene');
      + (errors.length ? '\n        ' + errors.slice(0, 4).join('\n        ') : ''));
 }
 
+/* ============================================ the strip under the tab bar */
+/* Bench's bar is the last row of a `height:100dvh` column. On iOS in
+ * standalone mode that column can end ABOVE the physical bottom of the screen,
+ * and the home-indicator strip beneath it then paints the PAGE background — a
+ * dark band under the icons that reads as a misaligned bar. Zero does not have
+ * it, because its bar is `position:fixed; bottom:0` and on the same device
+ * that is the physical bottom. Two apps on one home screen, one visibly short.
+ *
+ * Chromium reports no safe-area insets, so `--safe-b` is 0 and this renders
+ * perfectly headless whether it is fixed or not. Overriding the variable and
+ * shortening the column reproduces the device: every rule involved reads the
+ * inset through that variable, so this exercises exactly the code that was
+ * getting it wrong. */
+console.log('\nthe strip under the tab bar');
+{
+  await page.addStyleTag({ content: `:root{--safe-b:34px !important}
+                                     body{height:calc(100dvh - 34px) !important}` });
+  await page.waitForTimeout(200);
+  const strip = await page.evaluate(() => {
+    const h = document.documentElement.clientHeight;
+    const bar = document.querySelector('nav.tabs');
+    const barBottom = bar.getBoundingClientRect().bottom;
+    const gap = Math.round(h - barBottom);
+    const shim = document.querySelector('.tabshim');
+    const r = shim && shim.getBoundingClientRect();
+    const cs = shim && getComputedStyle(shim);
+    return {
+      gap,
+      covers: !!(r && r.top <= barBottom + 1 && r.bottom >= h - 1),
+      bg: cs && cs.backgroundColor,
+      barBg: getComputedStyle(bar).backgroundColor,
+      behind: cs && parseInt(cs.zIndex, 10) < parseInt(getComputedStyle(bar).zIndex, 10),
+      taps: cs && cs.pointerEvents,
+    };
+  });
+  ok(strip.gap > 1, `the shortened column leaves a ${strip.gap}px strip, as a notched phone does`);
+  ok(strip.covers, '...and something paints it rather than letting the page show through');
+  ok(strip.bg === strip.barBg, '...in the tab bar\'s own colour, so it reads as one bar');
+  /* Behind, not over: where the column already reaches the physical bottom the
+   * bar must cover the shim completely rather than the shim covering the
+   * bottom of the buttons. */
+  ok(strip.behind, '...behind the bar, so where there is no inset it costs nothing');
+  ok(strip.taps === 'none', '...and it can never eat a tap meant for a tab');
+}
+
 await browser.close();
 server.close();
 console.log(`\n${pass} passed, ${fail} failed`);

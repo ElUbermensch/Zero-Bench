@@ -126,6 +126,83 @@ console.log('\nboot');
   await page.waitForTimeout(300);
 }
 
+/* ============================================================ vertical rhythm */
+/* "Padding above on zero's more tab... in loads and firearms it has some
+ * weirdness with the spacing that feels inconsistent."
+ *
+ * Neither is visible to a suite that asserts on content: every element was
+ * present and correct, and the screen still looked wrong. These measure the
+ * two things a reader actually registers — where content starts, and whether
+ * the painted panels line up with each other. */
+console.log('\nvertical rhythm');
+{
+  const geometry = async () => page.evaluate(() => {
+    const scope = document.querySelector('.content');
+    const hdr = document.querySelector('.hdr');
+    const vw = document.documentElement.clientWidth;
+    const cards = [];
+    (function walk(node, d) {
+      for (const el of node.children) {
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || r.height <= 0) continue;
+        const card = parseFloat(cs.borderRadius) >= 6 && r.width >= vw * 0.6
+          && (!/rgba\(0, 0, 0, 0\)|transparent/.test(cs.backgroundColor)
+              || parseFloat(cs.borderTopWidth) > 0);
+        if (card) { cards.push({ top: r.top, bottom: r.bottom,
+                                 l: Math.round(r.left), r: Math.round(vw - r.right) }); continue; }
+        if (d < 5) walk(el, d + 1);
+      }
+    })(scope, 0);
+    return { headerBottom: hdr.getBoundingClientRect().bottom, cards };
+  });
+
+  const screens = [['More menu', async () => {
+                     await page.click('.tabbar button:has-text("More")'); }],
+                   ['Firearms & loads', async () => {
+                     await page.click('.tabbar button:has-text("More")');
+                     await page.waitForTimeout(200);
+                     await page.click('button:has-text("Firearms & loads")'); }],
+                   ['Backup & data', async () => {
+                     await page.click('.tabbar button:has-text("More")');
+                     await page.waitForTimeout(200);
+                     await page.click('button:has-text("Backup & data")'); }]];
+
+  for (const [label, go] of screens) {
+    await go(); await page.waitForTimeout(400);
+    const g = await geometry();
+    ok(g.cards.length > 0, `${label}: renders cards`);
+    const top = Math.round(g.cards[0].top - g.headerBottom);
+    /* The reported bug: the first card's top edge sat flush against the
+     * header's bottom border, which reads as a rendering fault rather than a
+     * layout choice. */
+    ok(top >= 6, `${label}: content starts ${top}px below the header, not flush against it`);
+    const insets = new Set(g.cards.map(c => `${c.l}/${c.r}`));
+    ok(insets.size === 1,
+       `${label}: every card shares one edge inset (${[...insets].join(', ')})`);
+    ok([...insets][0].split('/')[0] === [...insets][0].split('/')[1],
+       `${label}: ...and it is the same on both sides`);
+  }
+
+  /* Back belongs in the header, where every other back control in this app
+   * already lives. As a button in the content it cost a row of vertical space
+   * on every submenu and was the one place the two apps disagreed. */
+  await page.click('.tabbar button:has-text("More")');
+  await page.waitForTimeout(200);
+  await page.click('button:has-text("Targets")');
+  await page.waitForTimeout(300);
+  ok(await page.locator('.hdr .bback').count() === 1,
+     'a More submenu puts its back control in the header');
+  ok(await page.locator('.content button:has-text("‹ More")').count() === 0,
+     '...and not floating in the content');
+  ok((await page.textContent('.hdr')).includes('Targets'),
+     '...with the name of where you are, so the header is not still saying "Zero"');
+  await page.click('.hdr .bback');
+  await page.waitForTimeout(300);
+  ok((await page.textContent('body')).includes('Firearms & loads'),
+     'and it goes back to the menu');
+}
+
 /* ============================================ backup export, on both paths */
 /* `<a download>` is not honoured in a home-screen PWA on iOS: the tap does
  * nothing, or opens the JSON in place with no way to keep it. The button

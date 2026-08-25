@@ -1083,7 +1083,12 @@ body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;
 .hsub{font-family:var(--fm);font-size:9px;color:var(--dim);letter-spacing:.12em;margin-top:1px}
 .badd{background:var(--acc);color:#0f1117;border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}
 .bback{background:none;border:none;color:var(--acc);font-family:var(--fh);font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:3px;letter-spacing:.01em}
-.content{flex:1;overflow-y:auto;padding-bottom:74px}
+/* Every screen starts the same distance below the header. It used to be
+   whatever the first element happened to bring with it, which was 12px on
+   DOPE, nothing on the More menu -- where a card's top edge sat flush
+   against the header border and read as a rendering fault -- and
+   something else again everywhere else. One rule, one number. */
+.content{flex:1;overflow-y:auto;padding-top:12px;padding-bottom:74px}
 .tabbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:var(--surf);border-top:1px solid var(--bdr);display:flex;z-index:100}
 .tab{flex:1;padding:8px 4px 10px;display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;cursor:pointer;color:var(--dim);transition:color .15s}
 .tab.on{color:var(--acc)}
@@ -4568,7 +4573,22 @@ export default function App() {
       <style>{S}</style>
       <div className="app">
         <div className="hdr">
-          <div><div className="htitle">Zero</div><div className="hsub">Precision shooting log</div></div>
+          {/* Inside a More submenu the header does what it does on every other
+              screen in this app: a back control on the left and the name of
+              where you are on the right. It used to be a button floating in
+              the content, which cost a row of vertical space on every submenu
+              and was the only back control in either app that did not live in
+              the header. */}
+          {tab === 'more' && more !== null ? (
+            <>
+              <button className="bback" onClick={()=>setMore(null)}>← more</button>
+              <div style={{fontFamily:'var(--fh)',fontSize:15,fontWeight:700}}>
+                {(moreItems.find(([k]) => k === more) || [null, ''])[1]}
+              </div>
+            </>
+          ) : (
+            <div><div className="htitle">Zero</div><div className="hsub">Precision shooting log</div></div>
+          )}
           {tab==='sessions' && (
             <div style={{display:'flex',gap:7}}>
               {core && <button className="badd" style={{background:'none',border:'1px solid var(--bdr)',color: showJoin ? 'var(--acc)' : 'var(--ink)'}} onClick={()=>setShowJoin(v=>!v)}>● join</button>}
@@ -4652,10 +4672,6 @@ export default function App() {
           )}
           {tab==='more' && more !== null && (
             <>
-              <button className="badd" onClick={()=>setMore(null)}
-                style={{margin:'0 13px 10px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}}>
-                ‹ More
-              </button>
               {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
               {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />}
               {more==='bench' && <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />}
@@ -4670,7 +4686,7 @@ export default function App() {
                 <>
                   <CloudBackupCard core={core} data={localData}
                     onMerge={applyRestored} onReplace={applyRestored} />
-                  <div style={{margin:'20px 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
+                  <div style={{margin:'0 13px 7px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                     <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup · file</div>
                     <div style={{display:'flex',gap:8}}>
                       <button className="badd" style={{flex:1}} onClick={exportBackup}>⤓ Export</button>
@@ -9092,7 +9108,7 @@ function useBenchImport({ core, ammo, onSaveAmmo }) {
 function MoreMenu({ items, onPick }) {
   const row = { display:'flex', alignItems:'center', gap:10, width:'100%',
                 background:'var(--surf)', border:'1px solid var(--bdr)',
-                borderRadius:9, padding:'12px 13px', margin:'0 0 8px',
+                borderRadius:9, padding:'12px 13px', margin:'0 0 7px',
                 textAlign:'left', cursor:'pointer', color:'var(--ink)' };
   return (
     <div style={{ margin:'0 13px' }}>
@@ -9235,7 +9251,11 @@ function CloudBackupCard({ core, data, onMerge, onReplace, compact }) {
     setBusy(false);
   }
 
-  const card = { margin: compact ? '0 0 12px' : '20px 13px 8px', background: 'var(--surf)',
+  /* 14px between cards, matching `.tcard` everywhere else in the app, and
+     no top margin on the first one -- the scroll region already supplies
+     the gap under the header, and stacking both put this screen 19px down
+     where the More menu was at 12. */
+  const card = { margin: compact ? '0 0 7px' : '0 13px 7px', background: 'var(--surf)',
                  border: '1px solid var(--bdr)', borderRadius: 9, padding: '11px 13px' };
   const lbl = { fontFamily:'var(--fm)', fontSize:9, color:'var(--dim)',
                 letterSpacing:'.1em', textTransform:'uppercase', marginBottom:8 };
@@ -9362,7 +9382,7 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
 
   return (
     <div>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'18px 13px 5px'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 13px 5px'}}>
         <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.14em',textTransform:'uppercase'}}>Ammunition</div>
         {!form && (
           <div style={{display:'flex',gap:6}}>

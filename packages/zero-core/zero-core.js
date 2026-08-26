@@ -120,6 +120,14 @@ const ZeroCore = (() => {
        * request is bounded by pageSize, and a slow range connection finishing
        * in 15s should finish, not be cut off. 0 disables it. */
       requestTimeoutMs: 20_000,
+      /* A whole-device snapshot is up to eight megabytes and goes up in one
+       * request, which on range cellular is legitimately slower than any sync
+       * call. Cutting it at 20s would report "backup failed" for an upload
+       * that was going to succeed -- and, worse, may already have -- to a user
+       * whose reason for tapping the button was to be sure their season was
+       * safe. Bounded, because an unbounded one is what wedged sync; just
+       * bounded at a length an 8 MB upload can actually finish in. */
+      uploadTimeoutMs: 120_000,
     }, options || {});
 
     if (!cfg.url || !cfg.anonKey) throw new Error('zero-core: url and anonKey are required');
@@ -326,13 +334,18 @@ const ZeroCore = (() => {
      * tight; an aborted push leaves the outbox intact, because pushTable
      * already treats a throw as "not sent". */
     async function raw(path, init) {
-      const ms = cfg.requestTimeoutMs;
+      /* A big upload gets a longer leash than a sync call. `init.slow` is set
+       * by the backup path, which sends up to eight megabytes in one request. */
+      const ms = (init && init.slow) ? cfg.uploadTimeoutMs : cfg.requestTimeoutMs;
+      // `slow` is ours, not fetch's. Stripped so it never reaches the network layer.
+      const { slow, ...rest } = init || {};
+      void slow;
       const AC = typeof AbortController !== 'undefined' ? AbortController : null;
-      if (!ms || !AC || (init && init.signal)) return cfg.fetch(cfg.url + path, init);
+      if (!ms || !AC || rest.signal) return cfg.fetch(cfg.url + path, rest);
       const ac = new AC();
       const t = setTimeout(() => ac.abort(), ms);
       try {
-        return await cfg.fetch(cfg.url + path, Object.assign({}, init, { signal: ac.signal }));
+        return await cfg.fetch(cfg.url + path, Object.assign({}, rest, { signal: ac.signal }));
       } finally {
         clearTimeout(t);
       }
@@ -1255,10 +1268,10 @@ const ZeroCore = (() => {
          * be fine while one that included it would quietly reset it. */
         const { user_id, ...patch } = row;
         res = await authed('/rest/v1/account_backups?id=eq.' + encodeURIComponent(found.id),
-          { method: 'PATCH', body: JSON.stringify(patch) });
+          { method: 'PATCH', slow: true, body: JSON.stringify(patch) });
       } else {
         res = await authed('/rest/v1/account_backups',
-          { method: 'POST', body: JSON.stringify([row]) });
+          { method: 'POST', slow: true, body: JSON.stringify([row]) });
       }
       if (!res.ok) {
         const error = await res.text().catch(() => '');

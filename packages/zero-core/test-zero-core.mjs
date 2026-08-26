@@ -1331,6 +1331,96 @@ section('a request that never answers');
   ]);
   ok(raced === 'still hanging',
      'negative control: with no timeout the same request never settles at all');
+
+  /* The two paths where a timeout would do more harm than the hang. */
+
+  /* 1. A refresh that could not reach the server must NOT sign the user out.
+   * The abort is a throw, and the only correct reading of a throw here is
+   * "try again later" -- a refusal is an HTTP status, and there isn't one. */
+  const c4 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: memStore(), requestTimeoutMs: 150 });
+  await c4.signUp('stillin@example.com', 'pw');
+  ok(c4.isSignedIn(), 'signed in to begin with');
+  // Rebuilt against the hung fetch, carrying the same session off the store.
+  const c5 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: (() => {
+                                 const m = memStore();
+                                 m.set('zerocore.session', c4.getSession());
+                                 return m;
+                               })(), fetch: hang, requestTimeoutMs: 150 });
+  ok(c5.isSignedIn(), '...and the rebuilt client picks the session up');
+  await c5.refresh();
+  ok(c5.isSignedIn(),
+     'a refresh that timed out does NOT sign the user out — no signal is not a dead token');
+
+  /* 2. A push that timed out must not DEAD-LETTER the row. A dead letter is
+   * permanent: the row leaves the outbox and only a diagnostic screen knows it
+   * existed. An abort is "not sent", which is the opposite. */
+  const c6 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: (() => {
+                                 const m = memStore();
+                                 m.set('zerocore.session', c4.getSession());
+                                 return m;
+                               })(), fetch: hang, requestTimeoutMs: 150 });
+  c6.upsert('firearms', { name: 'unsent', cartridge: '.308' });
+  const before6 = c6.pendingCount();
+  await c6.sync({ trigger: 'test', tables: ['firearms'] });
+  ok(c6.pendingCount() === before6 && c6.rejectedList().length === 0,
+     `an aborted push leaves the row queued, not dead-lettered (${c6.pendingCount()} queued, ${c6.rejectedList().length} rejected)`);
+}
+
+/* ============== a held row inside a tie group bigger than one page */
+/* The two mechanisms meeting each other, which is where a walk stops making
+ * progress if either is wrong. The floor sits at (stamp, '') -- the start of a
+ * timestamp, because a handler reports the stamp it could not place and not
+ * which row at that stamp it was -- and a start-of-stamp position is fetched
+ * with `gte.`, which returns the whole group. If the group is larger than a
+ * page, the walk has to get through it on the keyset alone. */
+section('a held row inside a tie group larger than a page');
+{
+  const c = mkClient(undefined, { pageSize: 2 });
+  await c.signUp('tiefloor@example.com', 'pw');
+  const uid = c.getUser().id;
+
+  mock.state.clock = 40_000_000;              // five rows, ONE stamp
+  for (let i = 1; i <= 5; i++) {
+    mock.seed('firearms', { id: c.uuid(), user_id: uid, name: `tf${i}`, cartridge: '.308' });
+  }
+
+  // The handler places four and holds one, every time.
+  const holdOne = (t, rows) => {
+    if (t !== 'firearms') return undefined;
+    const held = rows.filter(r => r.name === 'tf3');
+    return { added: rows.length - held.length, deferred: held.map(r => r.updated_at) };
+  };
+
+  let seen = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { seen = rows.map(r => r.name); return holdOne(t, rows); } });
+  ok(seen.length === 5,
+     `the whole tie group is walked in one sync despite the page size (${seen.length} of 5)`);
+  ok(!!c.floors.firearms && c.floors.firearms.tries === 1,
+     'and the held row puts a floor down');
+
+  /* The property that matters: it is offered AGAIN, and the walk does not
+   * stall short of the rest of the group. */
+  let again = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { again = rows.map(r => r.name); return holdOne(t, rows); } });
+  ok(again.length === 5,
+     `the next sync re-offers the whole group, held row included (${again.length})`);
+
+  /* And it converges rather than re-downloading forever: once the handler can
+   * place it, the cursor moves past and the table goes quiet. */
+  let third = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { third = rows.map(r => r.name); return { added: rows.length }; } });
+  ok(third.length === 5 && !c.floors.firearms, 'placing it clears the floor');
+  let fourth = null;
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { fourth = rows.length; return { added: rows.length }; } });
+  ok(fourth === 0,
+     `...and the table goes quiet — the cursor is past the whole group (${fourth} re-offered)`);
 }
 
 /* ============================================================ event coverage */

@@ -2593,9 +2593,12 @@ VIEWS.sync = () => {
   </div>` : ''}
 
   ${rejected.length ? `<div class="card"><h2>Refused by the server</h2>
-    <p class="small muted">Dropped from the queue so it keeps moving. These will not retry.</p>
+    <p class="small muted">Dropped from the queue so it keeps moving. If the reason has been
+      fixed since &mdash; a batch whose recipe had not synced yet, say &mdash; try them again.
+      Retrying cannot duplicate anything: every write is keyed by an id this device minted.</p>
     ${rejected.slice(0, 8).map(r => `<div class="rowline"><div class="tiny mono">${esc(r.table)}</div>
       <div class="tiny dim">${esc(String(r.error || '').slice(0, 160))}</div></div>`).join('')}
+    <button class="btn sm mt10" data-act="syRetryRej">Try again</button>
     <button class="btn sm mt10" data-act="syClearRej">Clear</button>
   </div>` : ''}
 
@@ -3438,6 +3441,16 @@ const ACTIONS = {
   syUp:  () => doAuth('up'),
   syOut: () => { CORE.signOut(); UI.sync = {}; render(); },
   syClearRej: () => { CORE.clearRejected && CORE.clearRejected(); render(); },
+  /* Back into the queue rather than into the bin. A dead letter used to be a
+     one-way door: the only thing offered was Clear, which discards the record
+     for good. Safe to press because every queued write is an upsert keyed by an
+     id this device minted -- a row that turns out to have landed is re-applied
+     rather than duplicated, and one that is still wrong lands back here. */
+  syRetryRej: () => {
+    const n = CORE.retryRejected ? CORE.retryRejected() : 0;
+    toast(n ? `${n} record${n === 1 ? '' : 's'} back in the queue.` : 'Nothing to retry.');
+    render();
+  },
   sySync: () => doSync(),
 
   cbUp:      () => doCloudBackup(),

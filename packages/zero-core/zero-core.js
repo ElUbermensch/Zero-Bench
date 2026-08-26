@@ -694,6 +694,37 @@ const ZeroCore = (() => {
     const rejectedList = () => rejected.map(r => ({ table: r.table, id: r.row.id,
       status: r.status, error: r.error, rejectedAt: r.rejectedAt }));
     const clearRejected = () => { rejected = []; persistOutbox(); };
+
+    /* Put refused rows back in the queue.
+     *
+     * A dead letter was a one-way door: deadLetter() takes the entry out of the
+     * outbox and into a diagnostic list, and the only thing that could be done
+     * with that list was clear it -- which discards the row for good. So a
+     * record refused for a reason that has since been FIXED (a batch whose
+     * recipe had not synced yet, a row refused while a migration was
+     * mid-deploy, anything answered 4xx by a server that has since been
+     * corrected) could never be sent, and the user's only evidence it had
+     * existed was a count they were invited to dismiss.
+     *
+     * Retrying is safe by construction: every queued write is an upsert keyed
+     * by an id the client minted, so a row that turns out to have landed after
+     * all is re-applied rather than duplicated. A row that is still wrong is
+     * refused again and dead-letters again, which is the same place it started
+     * -- a retry cannot make things worse than not retrying.
+     *
+     * Returns how many went back, so a caller can say so. */
+    const retryRejected = (ids) => {
+      const want = Array.isArray(ids) && ids.length ? new Set(ids) : null;
+      const back = rejected.filter(r => !want || want.has(r.row && r.row.id));
+      if (!back.length) return 0;
+      rejected = rejected.filter(r => back.indexOf(r) === -1);
+      for (const r of back) {
+        outbox.push({ id: uuid(), table: r.table, row: r.row,
+                      op: r.op || 'upsert', queuedAt: nowMs() });
+      }
+      persistOutbox();
+      return back.length;
+    };
     const pendingFor = (table) => outbox.filter(e => e.table === table).length;
 
     /* ---------------------------------------------------------------- pull */
@@ -932,9 +963,15 @@ const ZeroCore = (() => {
       const ids = new Set(entries.map(e => e.row.id));
       outbox = outbox.filter(e => !(e.table === table && ids.has(e.row.id) &&
                                     entries.indexOf(e) !== -1));
+      /* `op` is kept, and it matters more than it looks. A tombstone travels as
+       * a PATCH; putting one back as an upsert of {id, deleted_at} is refused
+       * outright, because Postgres builds the insert tuple before it detects
+       * the conflict and a partial row fails the table's NOT NULL columns.
+       * Without this a retried delete would fail for a completely different
+       * reason than the one it was refused for. */
       rejected = rejected.concat(entries.map(e => ({
-        table, row: e.row, status, error: String(error).slice(0, 400),
-        rejectedAt: nowMs(),
+        table, row: e.row, op: e.op || 'upsert', status,
+        error: String(error).slice(0, 400), rejectedAt: nowMs(),
       }))).slice(-100);                        // bounded: a diagnostic, not a queue
       persistOutbox();
       emit(EVENTS.OUTBOX_REJECTED, { table, ids: [...ids], status, error });
@@ -1735,7 +1772,7 @@ const ZeroCore = (() => {
       on, off, emit,
       signUp, signIn, signInWithOtp, signOut, refresh,
       getSession, getUser, isSignedIn,
-      upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected,
+      upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected, retryRejected,
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,

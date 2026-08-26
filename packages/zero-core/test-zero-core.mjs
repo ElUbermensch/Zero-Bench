@@ -1432,6 +1432,94 @@ section('a held row inside a tie group larger than a page');
      `...and the table goes quiet — the cursor is past the whole group (${fourth} re-offered)`);
 }
 
+/* ======================== a refused row can be sent again once it is fixable */
+/* A dead letter was a one-way door. deadLetter() takes the entry out of the
+ * outbox and into a diagnostic list, and the only thing either app offered to
+ * do with that list was CLEAR it -- which discards the record for good. So a
+ * row refused for a reason that has since been fixed (a batch whose recipe had
+ * not synced yet, anything refused while a migration was mid-deploy) could
+ * never be sent, and the user's only evidence it had existed was a count they
+ * were invited to dismiss. */
+section('a refused row can go back in the queue');
+{
+  const c = mkClient();
+  await c.signUp('retry@example.com', 'pw');
+
+  // Refused for a reason that will be fixed: the recipe it points at is absent.
+  const recipeId = c.uuid(), batchId = c.uuid();
+  c.upsert('batches', { id: batchId, recipe_id: recipeId, serial: 'RETRY',
+                        qty_loaded: 50, qty_remaining: 50 });
+  await c.sync({ trigger: 'test', tables: [] });
+  ok(c.rejectedList().length === 1 && c.pendingCount() === 0,
+     `the orphan is dead-lettered and out of the queue (${c.rejectedList().length} rejected)`);
+
+  // The reason is fixed: the recipe arrives.
+  c.upsert('recipes', { id: recipeId, name: 'the missing recipe', cartridge: '6mm Creedmoor',
+                        charge_gr: 41.5, self_developed: true });
+  await c.sync({ trigger: 'test', tables: [] });
+
+  const back = c.retryRejected();
+  ok(back === 1, `retrying puts it back in the queue (${back})`);
+  ok(c.rejectedList().length === 0, '...and out of the diagnostic list');
+  await c.sync({ trigger: 'test', tables: [] });
+
+  const stored = [...(mock.state.rows.get('batches')?.values() || [])];
+  ok(stored.some(r => r.id === batchId),
+     `and this time it lands (${stored.length} batches on the server)`);
+  ok(c.rejectedList().length === 0 && c.pendingCount() === 0,
+     '...leaving nothing queued and nothing refused');
+
+  /* Safe by construction, and worth pinning: a retry of a row that ALREADY
+   * landed is an upsert keyed by an id the client minted, so it updates rather
+   * than duplicating. */
+  const before = stored.length;
+  c.upsert('batches', { id: batchId, recipe_id: recipeId, serial: 'RETRY',
+                        qty_loaded: 50, qty_remaining: 40 });
+  await c.sync({ trigger: 'test', tables: [] });
+  const after = [...(mock.state.rows.get('batches')?.values() || [])];
+  ok(after.length === before,
+     `re-sending a row that landed updates it rather than duplicating (${after.length} vs ${before})`);
+
+  /* And a TOMBSTONE keeps its op across the round trip. A delete travels as a
+   * PATCH; putting one back as an upsert of {id, deleted_at} is refused
+   * outright, because Postgres builds the insert tuple before it detects the
+   * conflict and a partial row fails the table's NOT NULL columns. It would
+   * then fail for a completely different reason than the one it was refused
+   * for, which is the kind of thing that gets debugged for an afternoon. */
+  let refusePatch = true;
+  const fussy = async (url, init) => {
+    if (refusePatch && init && init.method === 'PATCH') {
+      return new Response(JSON.stringify({ message: 'temporarily refused' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+    return fetch(url, init);
+  };
+  const store = memStore();
+  const c2 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: store, fetch: fussy });
+  await c2.signUp('tomb@example.com', 'pw');
+  const doomed = c2.uuid();
+  c2.upsert('batches', { id: doomed, recipe_id: recipeId, serial: 'DOOMED',
+                         qty_loaded: 10, qty_remaining: 10 });
+  refusePatch = false;
+  await c2.sync({ trigger: 'test', tables: [] });   // the row lands
+  refusePatch = true;
+  c2.remove('batches', doomed);                      // now delete it, and be refused
+  await c2.sync({ trigger: 'test', tables: [] });
+  ok(c2.rejectedList().length === 1, `the tombstone is dead-lettered (${c2.rejectedList().length})`);
+
+  c2.retryRejected();
+  const queuedOp = JSON.parse(JSON.stringify(store.get('zerocore.zero.outbox') || []))
+    .map(e => e.op);
+  ok(queuedOp.length === 1 && queuedOp[0] === 'delete',
+     `a retried tombstone goes back as a DELETE, not an upsert (${queuedOp.join(',') || 'nothing'})`);
+
+  refusePatch = false;
+  await c2.sync({ trigger: 'test', tables: [] });
+  const row = [...(mock.state.rows.get('batches')?.values() || [])].find(r => r.id === doomed);
+  ok(row && row.deleted_at, 'and the delete lands on the retry');
+}
+
 /* ============================================================ event coverage */
 section('event coverage');
 {

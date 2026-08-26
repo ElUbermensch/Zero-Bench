@@ -31,13 +31,32 @@ export async function buildZero(o) {
   const outdir = o.outdir ? at(o.outdir) : at('dist');
   const shared = JSON.stringify({ url: o.url || '', anonKey: o.anonKey || '' });
 
+  /* Minified, and React resolved to its PRODUCTION build.
+   *
+   * Neither was set, and esbuild's rule for platform:'browser' is that
+   * `process.env.NODE_ENV` is substituted with "production" only when minify is
+   * on -- otherwise "development". So this shipped react-dom.development.js:
+   * 273 KB gzipped where 123 KB does, downloaded over range cellular on every
+   * first load and again on every cache-version bump, running React's
+   * development reconciler (prop validation, warning machinery, deliberately
+   * unoptimised paths) on the oldest phone in the club.
+   *
+   * `keepNames` because the suites and the spacing audit match on component and
+   * function names in the built bundle; losing them would trade a real defect
+   * for a wave of false failures, and the bytes it costs are noise next to the
+   * 150 KB this saves. */
   await esbuild.build({
     absWorkingDir: HERE,
     entryPoints: ['entry.jsx'],
     bundle: true,
     loader: { '.jsx': 'jsx' },
     jsx: 'automatic',
-    define: { __SUPABASE_CONFIG__: shared },
+    minify: true,
+    keepNames: true,
+    define: {
+      __SUPABASE_CONFIG__: shared,
+      'process.env.NODE_ENV': '"production"',
+    },
     outfile: path.join(outdir, 'bundle.js'),
   });
 

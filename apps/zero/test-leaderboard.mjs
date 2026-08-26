@@ -94,7 +94,18 @@ await A.page.fill('input[placeholder="leaderboard handle"]', 'Jaxon');
 await A.page.click('button:has-text("claim")'); await A.page.waitForTimeout(200);
 await B.page.fill('input[placeholder="leaderboard handle"]', 'Rival');
 await B.page.click('button:has-text("claim")'); await B.page.waitForTimeout(200);
-ok(true, 'both queued a handle');
+/* `ok(true, …)` stood here, which is a label claiming a fact it never checked.
+ * Breaking claimHandle left it green and failed three assertions two sections
+ * later instead, mislocalising the cause. */
+/* Read from the outbox on disk rather than from a page global: Zero's bundle is
+ * a module, so `CORE` is not reachable from evaluate the way Bench's is. */
+const handlesQueued = (page) => page.evaluate(() =>
+  (JSON.parse(localStorage.getItem('zerocore.zero.outbox') || '[]'))
+    .filter(e => e && e.table === 'leaderboard_profiles')
+    .map(e => e.row && e.row.handle));
+const queued = await Promise.all([handlesQueued(A.page), handlesQueued(B.page)]);
+ok(queued[0].includes('Jaxon') && queued[1].includes('Rival'),
+   `both queued a handle (${queued.map(q => q.join('/') || 'none').join(', ')})`);
 
 section('publish');
 await A.page.click('.tabbar button:has-text("Sessions")'); await A.page.waitForTimeout(300);

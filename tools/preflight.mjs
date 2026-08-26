@@ -96,6 +96,12 @@ ok(unguarded.length === 0,
 
 /* ──────────────────────────────────────────────────────────────── the apps */
 section('apps');
+/* The one background the whole product is painted in. Both apps' palettes were
+ * merged to it; the manifest colours and the theme-color meta were the two
+ * places that kept the old value, and they are precisely the two iOS reads to
+ * paint the splash screen and the status bar. */
+const PRODUCT_BG = '#0f1117';
+
 for (const [app, files] of [
   ['apps/zero', ['src/shell.html', 'src/sw.js', 'src/manifest.webmanifest',
                  'src/icons/icon-192.png', 'src/icons/icon-512.png', 'src/icons/icon-maskable-512.png']],
@@ -111,6 +117,31 @@ for (const [app, files] of [
   ok(/__CACHE_VERSION__/.test(read(`${app}/src/sw.js`)),
      `${app} service worker takes its cache name from the build`,
      'a hand-bumped cache version is a deploy step someone forgets');
+
+  /* The precache sweep must be scoped. CacheStorage is per ORIGIN, and these
+   * two apps share one -- an unscoped `k !== CACHE` deletes the other app's
+   * precache, so whichever activated last is the only one that opens at a
+   * range with no signal. */
+  const sw = read(`${app}/src/sw.js`);
+  ok(/SIBLINGS/.test(sw) && /caches\.delete/.test(sw),
+     `${app} sweeps only its own caches`,
+     'CacheStorage is per origin: an unscoped sweep deletes the other app\'s offline copy');
+
+  /* The maskable icon has to be precached too, or a first install with no
+   * signal falls back to the icon Android crops into a circle. */
+  ok(/icon-maskable-512\.png/.test(sw), `${app} precaches its maskable icon`,
+     'an install performed offline otherwise gets the croppable one');
+
+  /* One product, one launch screen. The manifest colours and the theme-color
+   * meta are what iOS paints the splash and the status bar from, and they were
+   * left behind when the palettes were merged -- so Bench flashed one grey and
+   * settled to another on every cold launch, beside a Zero that did not. */
+  const shell = read(`${app}/src/shell.html`);
+  const themeMeta = (/<meta name="theme-color" content="([^"]+)"/.exec(shell) || [])[1];
+  ok(m.theme_color === PRODUCT_BG && m.background_color === PRODUCT_BG
+     && (themeMeta || '').toLowerCase() === PRODUCT_BG,
+     `${app} paints its launch screen and status bar the app's own colour`,
+     `manifest ${m.theme_color}/${m.background_color}, meta ${themeMeta}, expected ${PRODUCT_BG}`);
 }
 
 /* ──────────────────────────────────────────── the embedded core, and CI */
@@ -257,7 +288,12 @@ if (has('apps/bench/src/shell.html') && has('apps/zero/Zero.jsx')) {
    * is apps/bench/test-sync-ui.mjs, which needs a backend to exist at all. */
   const app = has('apps/bench/src/app.js') ? read('apps/bench/src/app.js') : '';
   const benchHome = /VIEWS\.lookup[\s\S]{0,4000}?syncCard\(/.test(app);
-  const zeroHome = /<SessionsList[\s\S]{0,2000}?<SyncPanel/.test(zero);
+  /* Anchored on the CONDITION rather than on a character distance from
+   * <SessionsList>. The distance version broke the moment an unrelated banner
+   * was added between the two -- a false blocker on a screen that was fine,
+   * which is how a checklist trains people to ignore it. What actually matters
+   * is that the signed-out home screen renders the panel. */
+  const zeroHome = /!core\.isSignedIn\(\)\s*&&\s*\(\s*<SyncPanel/.test(zero);
   ok(benchHome && zeroHome,
      'both apps offer sign-in on their first screen'
      + (benchHome && zeroHome ? '' : ` (bench ${benchHome ? 'does' : 'does NOT'}, zero ${zeroHome ? 'does' : 'does NOT'})`),

@@ -1,9 +1,15 @@
 node_modules/
-dist/
-dist-test/
-dist-test-overlay/
-dist-cross/
+# Every build output, not four named ones. `dist-audit/` and `dist-dbg/` were
+# committed for weeks under the old list -- 24 files of shells, manifests,
+# service workers, fonts and icons -- and `git status` looked clean only because
+# the blanket `bundle.js` rule hid the bundles inside them. That is repo weight
+# today and a credential leak tomorrow: apps/bench/build.mjs writes
+# `const SHARED_SUPABASE = {...}` into its index.html, and tools/config.mjs
+# blanking a secret key at build time does nothing about git history.
+dist*/
 bundle.js
+# Scratch: *.tmp.mjs is the convention for a throwaway probe.
+*.tmp.mjs
 shots/
 qrshots/
 *.log

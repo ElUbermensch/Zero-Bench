@@ -1403,6 +1403,12 @@ const ZeroCore = (() => {
       pageSize: 500,
       refreshSkewMs: 60_000,  // refresh this long before the token actually dies
       autoSyncMs: 0,          // 0 disables the periodic sync
+      /* Bounds every request, so a socket that hangs -- a captive portal, LTE
+       * that associates but does not route -- cannot pin syncInFlight forever
+       * and kill sync for the life of the page. Generous rather than tight: one
+       * request is bounded by pageSize, and a slow range connection finishing
+       * in 15s should finish, not be cut off. 0 disables it. */
+      requestTimeoutMs: 20_000,
     }, options || {});
 
     if (!cfg.url || !cfg.anonKey) throw new Error('zero-core: url and anonKey are required');
@@ -1588,9 +1594,60 @@ const ZeroCore = (() => {
     };
 
     /* ---------------------------------------------------------- transport */
+    /* Every request is bounded. It was not, and one hung socket wedged sync for
+     * the life of the page.
+     *
+     * `sync()` guards with `if (syncInFlight) return syncInFlight` and clears it
+     * in `.finally()` -- correct for a promise that settles, and a promise that
+     * never settles never reaches `.finally()`. So the first hung fetch pinned
+     * `syncInFlight` forever: SYNC_START fired, SYNC_DONE and SYNC_ERROR never
+     * did, and every later "Sync now" returned the same pending promise without
+     * issuing a request. Not "nothing visible" -- literally nothing.
+     *
+     * The state that produces it is the ordinary one at a range: a captive
+     * portal, or LTE that associates but does not route. `isOnline()` already
+     * says in its own comment that it cannot detect that, and navigator.onLine
+     * reads true throughout. The header chip goes busy and stays busy, tapping
+     * sync does nothing, auto-sync is dead, and the only cure is force-quitting
+     * the app -- which a user who just paid for it reads as data loss.
+     *
+     * A single request is bounded by pageSize, so 20s is generous rather than
+     * tight; an aborted push leaves the outbox intact, because pushTable
+     * already treats a throw as "not sent". */
     async function raw(path, init) {
-      const res = await cfg.fetch(cfg.url + path, init);
-      return res;
+      const ms = cfg.requestTimeoutMs;
+      const AC = typeof AbortController !== 'undefined' ? AbortController : null;
+      if (!ms || !AC || (init && init.signal)) return cfg.fetch(cfg.url + path, init);
+      const ac = new AC();
+      const t = setTimeout(() => ac.abort(), ms);
+      try {
+        return await cfg.fetch(cfg.url + path, Object.assign({}, init, { signal: ac.signal }));
+      } finally {
+        clearTimeout(t);
+      }
+    }
+
+    /* An auth call that could not reach the server returns a RESULT, not a
+     * rejection.
+     *
+     * signIn and its siblings read `res.ok` and return `{ ok: false, error }`
+     * for a refusal -- but a transport failure never produced a `res` at all,
+     * so it threw straight out of the promise. Both apps call these from a
+     * click handler and neither wraps them, so no-signal sign-in was an
+     * unhandled rejection and a screen that did nothing, rather than "could not
+     * reach the server". The timeout above turns a hang into exactly that kind
+     * of failure, which makes the distinction matter far more than it did. */
+    async function authRaw(phase, path, init) {
+      try {
+        return { res: await raw(path, init) };
+      } catch (e) {
+        const timedOut = e && e.name === 'AbortError';
+        const error = { message: timedOut
+          ? 'the server did not answer in time — check the connection and try again'
+          : 'could not reach the server', transport: true, timedOut };
+        emit(EVENTS.AUTH_ERROR, { phase, error });
+        return { res: null, failure: { ok: false, error } };
+      }
     }
 
     function authHeaders(extra) {
@@ -1652,11 +1709,13 @@ const ZeroCore = (() => {
     }
 
     async function signUp(email, password) {
-      const res = await raw('/auth/v1/signup', {
+      const t = await authRaw('signUp', '/auth/v1/signup', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
+      if (t.failure) return t.failure;
+      const res = t.res;
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
         emit(EVENTS.AUTH_ERROR, { phase: 'signUp', error: json });
@@ -1668,11 +1727,13 @@ const ZeroCore = (() => {
     }
 
     async function signIn(email, password) {
-      const res = await raw('/auth/v1/token?grant_type=password', {
+      const t = await authRaw('signIn', '/auth/v1/token?grant_type=password', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
+      if (t.failure) return t.failure;
+      const res = t.res;
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
         emit(EVENTS.AUTH_ERROR, { phase: 'signIn', error: json });
@@ -1694,11 +1755,13 @@ const ZeroCore = (() => {
      * Supabase rate-limits it to 30 per hour per IP by default.
      */
     async function signInAnonymously() {
-      const res = await raw('/auth/v1/signup', {
+      const t = await authRaw('signInAnonymously', '/auth/v1/signup', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ data: {}, gotrue_meta_security: {} }),
       });
+      if (t.failure) return t.failure;
+      const res = t.res;
       const json = await res.json().catch(() => ({}));
       if (!res.ok || !json.access_token) {
         emit(EVENTS.AUTH_ERROR, { phase: 'signInAnonymously', error: json });
@@ -1738,11 +1801,13 @@ const ZeroCore = (() => {
 
     /** Magic link / OTP. No password to lose, but needs mail delivery working. */
     async function signInWithOtp(email) {
-      const res = await raw('/auth/v1/otp', {
+      const t = await authRaw('signInWithOtp', '/auth/v1/otp', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, create_user: true }),
       });
+      if (t.failure) return t.failure;
+      const res = t.res;
       if (!res.ok) {
         const error = await res.json().catch(() => ({}));
         emit(EVENTS.AUTH_ERROR, { phase: 'signInWithOtp', error });

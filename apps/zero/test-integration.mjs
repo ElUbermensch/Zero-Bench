@@ -548,8 +548,24 @@ console.log('\nlogbooks written by an earlier build');
   await p2.reload(); await p2.waitForTimeout(700);
   ok((await p2.textContent('body')).includes('prefixed build'),
      'a logbook from a prefixed build is picked up too');
-  ok(await p2.evaluate(() => localStorage.getItem('sessions_v1') !== null),
-     '...and copied forward to the bare key, so the migration happens once');
+  /* The CONTENTS, not merely the key. This asserted `!== null`, which is
+   * satisfied by copying forward an empty array -- and that passes on launch
+   * one, because the value the migration RETURNS to the caller is still the
+   * legacy one. The logbook is destroyed on launch two, when the bare key is
+   * read and found empty while the prefixed copy sits on disk, permanently
+   * shadowed. This is the single path every pre-prefix user's whole history
+   * travels through, exactly once.
+   *
+   * So: what crossed, and does it survive the launch after the migration. */
+  const carried = await p2.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1') || 'null'));
+  ok(Array.isArray(carried) && carried.length === 1 && carried[0].id === 'leg1'
+     && (carried[0].shots || []).length === 1,
+     `...and the copy carries the logbook, not just the key (${
+       Array.isArray(carried) ? carried.length + ' sessions' : String(carried)})`);
+  await p2.reload(); await p2.waitForTimeout(700);
+  ok((await p2.textContent('body')).includes('prefixed build'),
+     '...and it is still there on the launch AFTER the migration, which is when a bad copy shows up');
   await ctx2.close();
 }
 

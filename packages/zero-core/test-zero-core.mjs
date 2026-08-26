@@ -1274,6 +1274,65 @@ section('a write that could not be persisted');
      'and a device with room reports nothing and keeps the write across a relaunch');
 }
 
+/* ============================== a socket that hangs must not kill sync forever */
+/* There was no timeout on any request. `sync()` guards with
+ * `if (syncInFlight) return syncInFlight` and clears it in `.finally()` --
+ * correct for a promise that settles, and a promise that never settles never
+ * reaches `.finally()`. So the FIRST hung fetch pinned syncInFlight for the
+ * life of the page: SYNC_START fired, SYNC_DONE and SYNC_ERROR never did, and
+ * every later "Sync now" returned the same pending promise WITHOUT ISSUING A
+ * REQUEST. Not "nothing visible" -- literally nothing.
+ *
+ * The state that causes it is the ordinary one at a range: a captive portal, or
+ * LTE that associates but does not route. navigator.onLine reads true
+ * throughout, the header chip goes busy and stays busy, auto-sync is dead, and
+ * the only cure is force-quitting the app. */
+section('a request that never answers');
+{
+  let calls = 0;
+  const hang = (url, init) => {
+    calls++;
+    return new Promise((_res, rej) => {
+      // A socket that accepts and then says nothing, until the abort lands.
+      if (init && init.signal) {
+        init.signal.addEventListener('abort', () =>
+          rej(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }
+    });
+  };
+  const c = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                              storage: memStore(), fetch: hang, requestTimeoutMs: 150 });
+  const started = Date.now();
+  const r = await c.signIn('hang@example.com', 'pw');
+  ok(Date.now() - started < 5000, `a hung request gives up rather than hanging (${Date.now() - started}ms)`);
+  ok(!r.ok, '...and reports a failure rather than a success');
+
+  /* The half that mattered: the NEXT attempt is a real attempt. */
+  const before = calls;
+  await c.signIn('hang@example.com', 'pw');
+  ok(calls > before,
+     `a second attempt issues a second request (${calls - before}), rather than returning the first pending promise`);
+
+  /* And a sync, which is where the pin actually bit. */
+  const c2 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: memStore(), fetch: hang, requestTimeoutMs: 150 });
+  const s1 = await c2.sync({ trigger: 'test', tables: ['firearms'] });
+  const s2 = await c2.sync({ trigger: 'test', tables: ['firearms'] });
+  ok(s1 && s2 && s1.ok === false && s2.ok === false,
+     'both syncs settle — the in-flight guard is released by the abort, not held by it');
+
+  /* Negative control: with the timeout off, the same fetch never settles. A
+   * 400ms race is enough, because the bug is "never", not "slow". */
+  const c3 = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'zero',
+                               storage: memStore(), fetch: hang, requestTimeoutMs: 0 });
+  const raced = await Promise.race([
+    c3.signIn('hang@example.com', 'pw').then(() => 'settled'),
+    new Promise(r2 => setTimeout(() => r2('still hanging'), 400)),
+  ]);
+  ok(raced === 'still hanging',
+     'negative control: with no timeout the same request never settles at all');
+}
+
 /* ============================================================ event coverage */
 section('event coverage');
 {

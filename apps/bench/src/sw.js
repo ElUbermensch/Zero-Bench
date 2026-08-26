@@ -31,13 +31,22 @@ self.addEventListener('install', (e) => {
  * window, with all its data still sitting on the device.
  *
  * The scope guard in the fetch handler below does not help here: it is about
- * which requests this worker ANSWERS. Nothing scopes what it can delete. */
+ * which requests this worker ANSWERS. Nothing scopes what it can delete.
+ *
+ * Expressed as "not the OTHER app's", not as "starts with mine". This app once
+ * shipped a cache called `reloading-v1`, and a mine-only sweep could never
+ * reclaim it -- while `caches.match()` below is the CacheStorage-level API and
+ * scans in CREATION order, so that orphan would not merely leak, it would WIN:
+ * the old shell shadowing the current one, permanently, on a cache-first
+ * index.html nothing can dislodge. */
+const SIBLINGS = ['zero-', 'bench-'];
 const MINE = CACHE.split('-')[0] + '-';
+const theirs = (k) => SIBLINGS.some(s => s !== MINE && k.startsWith(s));
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(keys
-        .filter(k => k.startsWith(MINE) && k !== CACHE)
+        .filter(k => k !== CACHE && !theirs(k))
         .map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );

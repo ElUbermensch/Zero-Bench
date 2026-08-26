@@ -553,6 +553,60 @@ console.log('\nlogbooks written by an earlier build');
   await ctx2.close();
 }
 
+/* ============ a shot fired into a string that has no numbers yet goes on the END */
+/* A shot's number is minted once and kept. The trap is a string that has none
+ * at all -- logged before numbers existed, imported from a file, restored from
+ * a backup written then -- which is the ordinary case for anyone upgrading.
+ *
+ * Minting for the NEW shot alone reads as correct and is worse than what it
+ * replaced: `max(shotNo) + 1` over five unnumbered shots is 1, so the newcomer
+ * takes 1 and the push-time back-fill numbers the five that came BEFORE it from
+ * 2 up. The string goes up as 2,3,4,5,6,1 and Bench -- which sorts on that
+ * number under the heading "in the order they were fired" -- draws the newest
+ * shot first. The coach's live numbers invert the same way.
+ *
+ * Locally it is invisible: the chips renumber by position. Which is the exact
+ * silence the stable-number work exists to remove, reintroduced one layer down.
+ * So the whole string is numbered, not just the newcomer. */
+console.log('\na shot fired into an unnumbered string');
+{
+  await page.evaluate(() => {
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'legacy', name: 'logged before numbers existed', date: '2026-08-13',
+      type: 'Score', targetId: 'any', rangeYards: 100, rifleId: '', ammoId: '',
+      ts: 1, matchId: null,
+      shots: [1, 2, 3, 4, 5].map(i => ({
+        id: 'old' + i, ring: '10', clockH: 12, clockM: 0,
+        xy: { x: 0.1 * i, y: 0 }, elev: 0, wind: 0,
+      })),
+    }]));
+  });
+  await page.reload();
+  await page.waitForTimeout(800);
+
+  const numbersBefore = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots.map(s => s.shotNo));
+  ok(numbersBefore.every(n => n === undefined),
+     'the seeded string carries no numbers at all, as an upgraded logbook does');
+
+  await page.getByText('logged before numbers existed').first().click();
+  await page.waitForTimeout(500);
+  await page.click('button:has-text("+ shot")');
+  await page.waitForTimeout(400);
+  await page.click('button:has-text("Log & done")');
+  await page.waitForTimeout(700);
+
+  const after = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots.map(s => ({ id: s.id, n: s.shotNo })));
+  ok(after.length === 6, `the shot is logged (${after.length} shots)`);
+  ok(after.map(s => s.n).join(',') === '1,2,3,4,5,6',
+     `the whole string is numbered in firing order (${after.map(s => s.n).join(',')})`);
+  ok(after[5].n === 6,
+     '...and the new shot is LAST, not first — it was fired last');
+  await page.click('button.bback');
+  await page.waitForTimeout(300);
+}
+
 /* ================================== the date defaults to the shooter's day, not UTC's */
 /* `new Date().toISOString().slice(0,10)` is the day in Greenwich. Every place
  * Zero needed "today" used it, and everywhere west of UTC that is wrong for the

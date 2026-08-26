@@ -374,7 +374,13 @@ export function startMock(opts = {}) {
           if (typeof state.onPull === 'function') {
             try { state.onPull(t, u); } catch (e) { /* a hook's problem */ }
           }
-          const gt = (u.searchParams.get('updated_at') || '').replace(/^gt\./, '');
+          /* `gt.` and `gte.` both, because the keyset walk uses `gte.` for a
+           * start-of-timestamp position. A mock that stripped only `gt.` would
+           * compare every row against the literal string "gte.1970-…" and
+           * answer every such request with nothing -- a silent empty pull. */
+          const uaRaw = u.searchParams.get('updated_at') || '';
+          const gte = uaRaw.startsWith('gte.') ? uaRaw.slice(4) : '';
+          const gt = uaRaw.startsWith('gt.') ? uaRaw.slice(3) : '';
           const limit = parseInt(u.searchParams.get('limit') || '1000', 10);
           const offset = parseInt(u.searchParams.get('offset') || '0', 10);
 
@@ -389,6 +395,20 @@ export function startMock(opts = {}) {
           const orRaw = u.searchParams.get('or') || '';
           const ks = /^\(updated_at\.gt\.([^,]+),and\(updated_at\.eq\.([^,]+),id\.gt\.([^)]*)\)\)$/
             .exec(orRaw);
+          /* `id` is a uuid column on every synced table, and Postgres refuses
+           * to cast an empty string to uuid AT PARSE TIME -- the unreachable
+           * branch of the OR does not save it, the whole request is a 400.
+           *
+           * This mock used to match the empty id with `[^)]*` and answer 200,
+           * which let a client ship that issued exactly that URL on every first
+           * sync, every legacy cursor and every reset: pull dead permanently,
+           * push still working, so data went up and nothing came down. Every
+           * test was green. A mock that is more permissive than the server is
+           * not a convenience, it is a blind spot with a suite attached. */
+          if (ks && !/^[0-9a-fA-F-]{36}$/.test(ks[3])) {
+            return json(res, 400, { code: '22P02', message:
+              `invalid input syntax for type uuid: "${ks[3]}"` });
+          }
           const keyset = ks ? { at: ks[1], id: ks[3] } : null;
           const afterKeyset = (r) => !keyset ||
             r.updated_at > keyset.at ||
@@ -448,6 +468,7 @@ export function startMock(opts = {}) {
           let rows = [...table(t).values()]
             .filter(r => isPublic || r.user_id === a.userId)   // RLS stand-in
             .filter(r => !gt || r.updated_at > gt)
+            .filter(r => !gte || r.updated_at >= gte)
             .filter(afterKeyset)
             .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
             .sort(orderBy.length

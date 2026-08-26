@@ -35,13 +35,22 @@ self.addEventListener('install', (e) => {
  * standalone window -- with the data still on the device and no way to tell.
  * The exact failure both apps exist to prevent.
  *
- * Prefixing is enough because both names have always been `<app>-<hash>`. */
+ * Expressed as "not the OTHER app's", not as "starts with mine". The
+ * difference matters: Bench once shipped a cache called `reloading-v1`, and a
+ * mine-only sweep can never reclaim a name like that -- while `caches.match()`,
+ * which both fetch handlers use, is the CacheStorage-level API and scans caches
+ * in CREATION order. So the orphan is not merely leaked, it WINS: an old shell
+ * shadows the current one forever, and since index.html is cache-first and the
+ * registration's ?v= is read out of it, nothing can dislodge it. Sweeping
+ * everything except the known sibling keeps old names reclaimable. */
+const SIBLINGS = ['zero-', 'bench-'];
 const MINE = CACHE.split('-')[0] + '-';
+const theirs = (k) => SIBLINGS.some(s => s !== MINE && k.startsWith(s));
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(keys
-        .filter(k => k.startsWith(MINE) && k !== CACHE)
+        .filter(k => k !== CACHE && !theirs(k))
         .map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );

@@ -190,15 +190,31 @@ const ZeroCore = (() => {
     };
     const LEGACY = { outbox: 'zerocore.outbox', rejected: 'zerocore.rejected' };
     const CLAIM = 'zerocore.legacy-claimed';
+    /* A claim that was made before the sentinel existed still counts.
+     *
+     * Namespacing shipped four days before this sentinel did, so there are
+     * devices where one app adopted the legacy queue under the old code and
+     * left no record of it. Checking only the sentinel, the second app opens,
+     * finds it absent, and adopts the same stale rows a second time -- the
+     * exact double-push this is here to stop. So an outbox already sitting in
+     * ANY app's namespace, holding the legacy value, is read as a claim. */
     if (store.get(CLAIM) == null) {
-      let claimed = false;
-      for (const k of Object.keys(LEGACY)) {
-        if (store.get(K[k]) == null) {
-          const old = store.get(LEGACY[k]);
-          if (old != null) { store.set(K[k], old); claimed = true; }
+      const legacyOutbox = JSON.stringify(store.get(LEGACY.outbox));
+      const alreadyTaken = ['zero', 'bench', cfg.appId || 'unknown']
+        .some(app => JSON.stringify(store.get('zerocore.' + app + '.outbox')) === legacyOutbox
+                     && legacyOutbox !== 'null' && legacyOutbox !== undefined);
+      if (alreadyTaken) {
+        store.set(CLAIM, 'pre-sentinel');
+      } else {
+        let claimed = false;
+        for (const k of Object.keys(LEGACY)) {
+          if (store.get(K[k]) == null) {
+            const old = store.get(LEGACY[k]);
+            if (old != null) { store.set(K[k], old); claimed = true; }
+          }
         }
+        if (claimed) store.set(CLAIM, cfg.appId || 'unknown');
       }
-      if (claimed) store.set(CLAIM, cfg.appId || 'unknown');
     }
 
     /* -------------------------------------------------------- event bus */
@@ -709,9 +725,36 @@ const ZeroCore = (() => {
        * is spelled as the equivalent disjunction. */
       let walk = since, all = [];
       for (;;) {
-        const at = encodeURIComponent(walk.at), id = encodeURIComponent(walk.id);
-        const q = `/rest/v1/${table}` +
-          `?select=*&or=(updated_at.gt.${at},and(updated_at.eq.${at},id.gt.${id}))` +
+        const at = encodeURIComponent(walk.at);
+        /* An EMPTY id half means "the start of this timestamp", not "after some
+         * row". It has to be spelled differently, and getting that wrong took
+         * every pull down against a real server while every test passed.
+         *
+         * `id` is a uuid column on every synced table. `id.gt.` with nothing
+         * after it makes Postgres try to cast '' to uuid, which it refuses at
+         * PARSE time -- so the unreachable branch of the OR does not save it
+         * and the whole request is a 400:
+         *
+         *   invalid input syntax for type uuid: ""
+         *
+         * That is the first sync on a new phone, every already-installed device
+         * whose cursor is still a bare timestamp, and every device after a
+         * reset, a sign-out, or Bench's "erase all data". pullTable throws,
+         * which aborts the table loop, and the cursor can only become a
+         * position via a pull that succeeds -- so pull was dead permanently
+         * while push kept working. Data goes up, nothing comes down, silently.
+         *
+         * The mock matched the empty id with `[^)]*` and answered 200, so the
+         * suite could not see it. It rejects the empty cast now, like Postgres.
+         *
+         * `gte.` on the timestamp is exactly right for a start-of-stamp
+         * position: at the epoch it means everything, and at a deferred floor
+         * it re-offers the whole tie group, which is what the floor is for. The
+         * walk moves to a real (stamp, id) after the first page, so the
+         * compound form takes over and there is no risk of re-serving a page. */
+        const q = `/rest/v1/${table}` + (walk.id
+          ? `?select=*&or=(updated_at.gt.${at},and(updated_at.eq.${at},id.gt.${encodeURIComponent(walk.id)}))`
+          : `?select=*&updated_at=gte.${at}`) +
           `&order=updated_at.asc,id.asc&limit=${cfg.pageSize}`;
         const res = await authed(q, { method: 'GET' });
         if (!res.ok) {

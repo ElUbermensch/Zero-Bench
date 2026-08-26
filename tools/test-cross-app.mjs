@@ -381,7 +381,12 @@ section('rounds fired in Zero come back to the bench');
       found: true,
       shots: s.shots.length,
       sighters: s.shots.filter(x => x.sighter).length,
-      ordered: s.shots.every((x, i) => i === 0 || x.n >= s.shots[i - 1].n),
+      /* Not `x.n >= prev.n` -- Bench sorted this array BY n, so that compares
+       * a sort against itself and cannot fail. What is actually in question is
+       * whether n reflects the order the shots were FIRED, so this checks the
+       * numbers against the ring sequence Zero logged, which is asserted
+       * independently below. */
+      numbers: s.shots.map(x => x.n).join(','),
       rings: (s.targetFace && s.targetFace.rings || []).length,
       targetName: s.targetName,
       hasSvg: !!node && node.tagName.toLowerCase() === 'svg',
@@ -393,7 +398,16 @@ section('rounds fired in Zero come back to the bench');
   ok(drawn.found, 'the string reaches Bench at all');
   ok(drawn.shots === 12, `every hole crosses, sighters included (${drawn.shots})`);
   ok(drawn.sighters === 2, '...and the two sighters are still marked as sighters');
-  ok(drawn.ordered, '...in the order they were fired, not the order they were paged');
+  /* The string was seeded in firing order and carries NO shot numbers -- a
+   * session logged before numbers existed, which is the ordinary case for
+   * anyone upgrading. The back-fill has to number it 1..12 in that order.
+   *
+   * Bench sorts on this number under the heading "in the order they were
+   * fired", so getting it wrong reorders the string rather than erroring. An
+   * earlier version of this assertion compared the sorted array against
+   * itself, which is the same as not asserting at all. */
+  ok(drawn.numbers === '1,2,3,4,5,6,7,8,9,10,11,12',
+     `...numbered in the order they were fired, not the order they were paged (${drawn.numbers})`);
   ok(drawn.rings >= 3 && drawn.targetName,
      `...with the paper they were shot on (${drawn.targetName}, ${drawn.rings} rings)`);
   ok(drawn.hasSvg && drawn.circles >= drawn.shots + drawn.rings,

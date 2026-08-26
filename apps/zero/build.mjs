@@ -79,8 +79,13 @@ export async function buildZero(o) {
    * a minute-resolution timestamp, so including it would change the cache name
    * on every build and re-download the whole shell for every installed user on
    * every deploy, source change or not. */
-  const hash = crypto.createHash('sha256')
-    .update(bundle).update(shellBody).digest('hex').slice(0, 12);
+  /* The font BYTES are in the hash too, not just their names. They are copied
+   * to ./fonts/<name>.woff2 with no content hash in the filename, so a face
+   * that is re-cut under the same name changes neither the bundle nor the
+   * shell -- and the precached copy is then served forever. */
+  const h = crypto.createHash('sha256').update(bundle).update(shellBody);
+  for (const f of FONT_FILES) h.update(fs.readFileSync(at('../../packages/fonts', f)));
+  const hash = h.digest('hex').slice(0, 12);
 
   fs.writeFileSync(path.join(outdir, 'sw.js'),
     fs.readFileSync(at('src/sw.js'), 'utf8')

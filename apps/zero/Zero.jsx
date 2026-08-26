@@ -1479,15 +1479,31 @@ const ZeroCore = (() => {
     };
     const LEGACY = { outbox: 'zerocore.outbox', rejected: 'zerocore.rejected' };
     const CLAIM = 'zerocore.legacy-claimed';
+    /* A claim that was made before the sentinel existed still counts.
+     *
+     * Namespacing shipped four days before this sentinel did, so there are
+     * devices where one app adopted the legacy queue under the old code and
+     * left no record of it. Checking only the sentinel, the second app opens,
+     * finds it absent, and adopts the same stale rows a second time -- the
+     * exact double-push this is here to stop. So an outbox already sitting in
+     * ANY app's namespace, holding the legacy value, is read as a claim. */
     if (store.get(CLAIM) == null) {
-      let claimed = false;
-      for (const k of Object.keys(LEGACY)) {
-        if (store.get(K[k]) == null) {
-          const old = store.get(LEGACY[k]);
-          if (old != null) { store.set(K[k], old); claimed = true; }
+      const legacyOutbox = JSON.stringify(store.get(LEGACY.outbox));
+      const alreadyTaken = ['zero', 'bench', cfg.appId || 'unknown']
+        .some(app => JSON.stringify(store.get('zerocore.' + app + '.outbox')) === legacyOutbox
+                     && legacyOutbox !== 'null' && legacyOutbox !== undefined);
+      if (alreadyTaken) {
+        store.set(CLAIM, 'pre-sentinel');
+      } else {
+        let claimed = false;
+        for (const k of Object.keys(LEGACY)) {
+          if (store.get(K[k]) == null) {
+            const old = store.get(LEGACY[k]);
+            if (old != null) { store.set(K[k], old); claimed = true; }
+          }
         }
+        if (claimed) store.set(CLAIM, cfg.appId || 'unknown');
       }
-      if (claimed) store.set(CLAIM, cfg.appId || 'unknown');
     }
 
     /* -------------------------------------------------------- event bus */
@@ -1998,9 +2014,36 @@ const ZeroCore = (() => {
        * is spelled as the equivalent disjunction. */
       let walk = since, all = [];
       for (;;) {
-        const at = encodeURIComponent(walk.at), id = encodeURIComponent(walk.id);
-        const q = `/rest/v1/${table}` +
-          `?select=*&or=(updated_at.gt.${at},and(updated_at.eq.${at},id.gt.${id}))` +
+        const at = encodeURIComponent(walk.at);
+        /* An EMPTY id half means "the start of this timestamp", not "after some
+         * row". It has to be spelled differently, and getting that wrong took
+         * every pull down against a real server while every test passed.
+         *
+         * `id` is a uuid column on every synced table. `id.gt.` with nothing
+         * after it makes Postgres try to cast '' to uuid, which it refuses at
+         * PARSE time -- so the unreachable branch of the OR does not save it
+         * and the whole request is a 400:
+         *
+         *   invalid input syntax for type uuid: ""
+         *
+         * That is the first sync on a new phone, every already-installed device
+         * whose cursor is still a bare timestamp, and every device after a
+         * reset, a sign-out, or Bench's "erase all data". pullTable throws,
+         * which aborts the table loop, and the cursor can only become a
+         * position via a pull that succeeds -- so pull was dead permanently
+         * while push kept working. Data goes up, nothing comes down, silently.
+         *
+         * The mock matched the empty id with `[^)]*` and answered 200, so the
+         * suite could not see it. It rejects the empty cast now, like Postgres.
+         *
+         * `gte.` on the timestamp is exactly right for a start-of-stamp
+         * position: at the epoch it means everything, and at a deferred floor
+         * it re-offers the whole tie group, which is what the floor is for. The
+         * walk moves to a real (stamp, id) after the first page, so the
+         * compound form takes over and there is no risk of re-serving a page. */
+        const q = `/rest/v1/${table}` + (walk.id
+          ? `?select=*&or=(updated_at.gt.${at},and(updated_at.eq.${at},id.gt.${encodeURIComponent(walk.id)}))`
+          : `?select=*&updated_at=gte.${at}`) +
           `&order=updated_at.asc,id.asc&limit=${cfg.pageSize}`;
         const res = await authed(q, { method: 'GET' });
         if (!res.ok) {
@@ -4775,6 +4818,17 @@ function App() {
       saveSessions(sessions.map(s => (s.id === sess.id ? { ...s, shots: prior } : s)));
     }
     prior.forEach(sh => core.relayPushShot(relayShotFor(prior, sh, tgt)));
+    /* And re-send every retraction, because the first attempt was
+     * fire-and-forget on a range signal that may not have been there.
+     *
+     * A DELETE that failed leaves a hole on the coach's target that no later
+     * push can clear -- the shooter deleted it, so nothing will ever be pushed
+     * under that number again. Replaying the list on each bind is what makes
+     * "fire and forget" honest: the forgetting is bounded by the next rejoin
+     * rather than permanent. Deleting a row that is already gone is a no-op, so
+     * replaying costs nothing. */
+    (sess.retractedShots || []).forEach(r =>
+      core.relayRetractShot(r.n, !!r.sighter));
   };
 
   const goLive = async (sess, tgt, name) => {
@@ -5000,9 +5054,23 @@ function App() {
          Both the sync push and the relay mirror read it, so the two can never
          disagree about which shot is which. */
       onAddShot={sh=>{
-        const sh2 = Number.isFinite(sh.shotNo) ? sh : { ...sh, shotNo: nextShotNo(sess.shots || []) };
-        const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...(s.shots||[]),sh2]}:s);
-        saveSessions(u); mirrorShot(sess, tgt, sh2);
+        /* The WHOLE string is numbered, not just the new shot.
+         *
+         * Minting only for the newcomer looked right and was worse than what it
+         * replaced. On a string whose shots carry no number at all -- logged by
+         * an earlier build, imported from a file, restored from a backup
+         * written then -- `nextShotNo` sees a maximum of 0 and hands the new
+         * shot 1. The push-time back-fill then numbers the five that came
+         * BEFORE it from 2 upward, so the string goes up as 2,3,4,5,6,1 and
+         * Bench, which sorts on that number under the heading "in the order
+         * they were fired", draws the newest shot first. The coach's live
+         * numbers invert the same way. Locally it is invisible, because the
+         * chips renumber by position -- the same silence this whole fix exists
+         * to remove. */
+        const prior = numberShots(sess.shots || []);
+        const sh2 = Number.isFinite(sh.shotNo) ? sh : { ...sh, shotNo: nextShotNo(prior) };
+        const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...prior,sh2]}:s);
+        saveSessions(u); mirrorShot({ ...sess, shots: prior }, tgt, sh2);
       }}
       /* A deleted shot has to be REMEMBERED, not merely dropped. Once the
          string is on the server, dropping it locally leaves the row there;
@@ -5016,7 +5084,16 @@ function App() {
           const tomb = gone && gone.remoteId
             ? [...(s.deletedShots || []), gone.remoteId]
             : (s.deletedShots || []);
-          return { ...s, shots:(s.shots||[]).filter(sh=>sh.id!==sid), deletedShots: tomb };
+          /* The relay's tombstone, which is a different list to the sync's.
+             The sync retracts by REMOTE ID; the relay has no id to work with --
+             a relay shot is addressed by its ordinal -- so the number and the
+             sighter flag are what have to be remembered. Kept so a rejoin can
+             re-send a DELETE that a range signal swallowed. */
+          const rt = gone && Number.isFinite(gone.shotNo)
+            ? [...(s.retractedShots || []), { n: gone.shotNo, sighter: !!gone.isSighter }]
+            : (s.retractedShots || []);
+          return { ...s, shots:(s.shots||[]).filter(sh=>sh.id!==sid),
+                   deletedShots: tomb, retractedShots: rt };
         });
         saveSessions(u);
         /* And take it off the relay, which stable numbers alone do not do.

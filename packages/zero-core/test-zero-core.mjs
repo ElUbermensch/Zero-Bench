@@ -504,12 +504,38 @@ section('upgrading an install that has the old shared keys');
   const second = mkClient(shared, { appId: 'zero' });
   ok(second.pendingCount() === 0,
      'a second app opened afterwards does NOT adopt the same queue a second time');
+  ok(shared.get('zerocore.legacy-claimed') === 'bench',
+     '...and the claim records which app took it');
 
   /* Negative control on the control: an app that finds the claim already taken
    * must still be a working client, not a crippled one. */
   second.upsert('firearms', { id: '99999999-4444-5555-6666-777777777777',
                               name: 'its own work', cartridge: '.223' });
   ok(second.pendingCount() === 1, '...but its own writes queue normally');
+}
+
+/* ---- and a claim made BEFORE the sentinel existed still counts ---- */
+/* Namespacing shipped four days before the sentinel did, so there are devices
+ * where one app adopted the legacy queue under the old code and left no record.
+ * Checking only the sentinel, the second app finds it absent and adopts the
+ * same stale rows a second time -- the exact double-push the sentinel exists to
+ * stop, on precisely the installs that lived through the window. */
+{
+  const shared = memStore();
+  const row = { id: '44444444-4444-5555-6666-777777777777',
+                name: 'Queued before the upgrade', cartridge: '6.5 CM' };
+  const legacy = [{ table: 'firearms', row, op: 'upsert', queuedAt: 1 }];
+  shared.set('zerocore.outbox', legacy);
+  // Bench adopted under the OLD code: namespaced key written, no sentinel.
+  shared.set('zerocore.bench.outbox', legacy);
+
+  ok(shared.get('zerocore.legacy-claimed') == null,
+     'the device carries an adoption with no sentinel to show for it');
+  const zero = mkClient(shared, { appId: 'zero' });
+  ok(zero.pendingCount() === 0,
+     'an outbox already holding the legacy rows is read as a claim, sentinel or not');
+  ok(shared.get('zerocore.legacy-claimed') === 'pre-sentinel',
+     '...and is recorded as one, so the question is only asked once');
 }
 
 /* ---- the same thing end to end: the correction, and the replay over it ---- */
@@ -1107,6 +1133,57 @@ section('paging a table that changes underneath the walk');
                                        later = rows.map(r => r.name); return { added: rows.length }; } });
   ok(later.length === 0,
      `and the walk finished — nothing is still owed after it (${later.join(', ') || 'nothing'})`);
+}
+
+/* --- the URL the walk actually sends, because the mock was more forgiving --- */
+/* `id` is a uuid column on every synced table, and `id.gt.` with nothing after
+ * it makes Postgres try to cast '' to uuid -- which it refuses at PARSE time,
+ * so the unreachable branch of the OR does not save it and the whole request is
+ * a 400. That is the shape a start-of-timestamp position produced: the first
+ * sync on a new phone, every already-installed device whose cursor is still a
+ * bare timestamp, and every device after a reset, a sign-out, or Bench's "erase
+ * all data". pullTable throws, the table loop aborts, and the cursor can only
+ * become a position via a pull that succeeds -- so pull was dead permanently
+ * while push kept working. Data went up, nothing came down, and every test in
+ * this file was green, because the mock matched the empty id and answered 200.
+ *
+ * So this asserts the WIRE FORMAT, not the outcome. An outcome assertion is
+ * exactly what missed it. */
+section('the shape of the keyset request');
+{
+  const seen = [];
+  const spy = async (url, init) => { seen.push(String(url)); return fetch(url, init); };
+  const c = ZeroCore.create({ url: mock.url, anonKey: 'anon-key-public', appId: 'bench',
+                              storage: memStore(), pageSize: 2, fetch: spy });
+  await c.signUp('wire@example.com', 'pw');
+  const uid = c.getUser().id;
+  mock.state.clock = 30_000_000;
+  for (let i = 0; i < 3; i++) {
+    mock.seed('firearms', { id: c.uuid(), user_id: uid, name: `w${i}`, cartridge: '.308' });
+  }
+
+  seen.length = 0;
+  const r = await c.sync({ trigger: 'test', tables: ['firearms'],
+                           apply: (t, rows) => (t === 'firearms' ? { added: rows.length } : undefined) });
+  ok(r.ok, `a first sync from an empty cursor succeeds (${r.ok ? 'ok' : r.reason})`);
+
+  const pulls = seen.filter(u => u.includes('/rest/v1/firearms?select='));
+  ok(pulls.length > 0, `and it issued a pull (${pulls.length})`);
+  ok(!pulls.some(u => /id\.gt\.(&|$|\))/.test(u)),
+     'no request asks for id.gt. with nothing after it — Postgres refuses that cast outright');
+  ok(pulls.some(u => /updated_at=gte\./.test(u)),
+     '...a start-of-timestamp position is spelled updated_at=gte. instead');
+  ok(pulls.slice(1).every(u => /id\.gt\.[0-9a-fA-F-]{36}/.test(u) || /updated_at=gte\./.test(u)),
+     '...and every later page carries a real uuid to resume from');
+
+  /* And the mock is no longer the more forgiving of the two: the malformed URL
+   * is refused here the way the server refuses it, so this cannot regress into
+   * a green suite again. */
+  const bad = await fetch(mock.url +
+    '/rest/v1/firearms?select=*&or=(updated_at.gt.1970-01-01T00:00:00Z,and(updated_at.eq.1970-01-01T00:00:00Z,id.gt.))',
+    { headers: { apikey: 'anon-key-public', Authorization: 'Bearer ' + c.getSession().access_token } });
+  ok(bad.status === 400,
+     `the mock refuses an empty uuid the way Postgres does (${bad.status})`);
 }
 
 /* --- the tie group, which is not an edge case but the normal case --- */

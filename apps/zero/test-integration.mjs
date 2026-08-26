@@ -880,6 +880,124 @@ console.log('\nhygiene');
 ok(errs.length === 0, 'no JS errors across the whole run'
    + (errs.length ? ' — ' + errs.slice(0, 3).join(' | ') : ''));
 
+/* ============================================ matches, which nothing tested */
+/* A course of fire is several sessions grouped as one match — four stages of an
+ * NMC, or a two-day Across-the-Course. It has ~67 references in the app and had
+ * ZERO assertions in any suite; every fixture set matchId: null. Everything
+ * downstream of "a match and its sessions stopped agreeing with each other" was
+ * broken, and one shape of it bricked the app on every launch.
+ *
+ * Its own context: these seed deliberately damaged collections. */
+console.log('\nmatches');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+
+  const seed = (state) => p.evaluate((s) => {
+    localStorage.clear();
+    for (const [k, v] of Object.entries(s)) localStorage.setItem(k, JSON.stringify(v));
+  }, state);
+  const stage = (id, matchId, date, ts, name) => ({
+    id, name, date, type: 'Score', targetId: 'any', rangeYards: 200,
+    rifleId: '', ammoId: '', ts, matchId,
+    shots: [{ id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 },
+            { id: id + 'b', ring: '9', clockH: 3, clockM: 0, xy: { x: 0.4, y: 0 }, elev: 0, wind: 0 }],
+  });
+
+  await p.goto(BASE);
+
+  /* ---- a null in matches_v1 used to be a permanent brick.
+   * `matches.map(m => m.id)` throws during render, there is one boundary for
+   * the whole tree, and the row is on disk — so it crashed on EVERY launch,
+   * after a restore that had already replaced the local data and reported
+   * success. */
+  await seed({
+    matches_v1: [null, { id: 'M1', name: 'Camp Perry', type: 'NMC', date: '2026-08-01', ts: 1 }],
+    sessions_v1: [stage('s1', 'M1', '2026-08-01', 10, 'Stage 1')],
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  ok(!/hit a bug and stopped/.test(await p.textContent('body')),
+     'a null row in the match list does not take the app down');
+  ok(/Camp Perry/.test(await p.textContent('body')),
+     '...and the real match beside it still renders');
+  await p.reload(); await p.waitForTimeout(800);
+  ok(!/hit a bug and stopped/.test(await p.textContent('body')),
+     '...on the launch after, too — the bad row is dropped, not merely survived');
+
+  /* ---- a stage whose match is gone used to vanish from the log entirely.
+   * Not deleted — Analytics still counted it — just in neither bucket: not a
+   * stage of any listed match, and not standalone either. Reachable without
+   * touching a file: "remove match" does two separate writes, and if the second
+   * fails the sessions keep a matchId whose match is gone. */
+  await seed({
+    matches_v1: [],
+    sessions_v1: [stage('orphan', 'GHOST', '2026-08-02', 20, 'the 600 yard line')],
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  ok(/the 600 yard line/.test(await p.textContent('body')),
+     'a stage whose match is gone still appears, as an ordinary session');
+
+  /* ---- an empty match used to be invisible AND unremovable.
+   * It was dropped from the list, and its "remove match" button lives inside
+   * the card that was not rendered. The cloud merge manufactures this state:
+   * deletes do not cross a merge, so a match removed here comes back while its
+   * stages stay detached — and it then rides every backup from then on. */
+  await seed({
+    matches_v1: [{ id: 'M2', name: 'came back from the cloud', type: 'NMC', date: '2026-08-03', ts: 2 }],
+    sessions_v1: [stage('solo', null, '2026-08-04', 30, 'unrelated')],
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  const emptyBody = await p.textContent('body');
+  ok(/came back from the cloud/.test(emptyBody),
+     'a match with no stages is listed rather than hidden on disk forever');
+  await p.getByText('came back from the cloud').first().click();
+  await p.waitForTimeout(400);
+  ok(await p.locator('text=/remove match/i').count() > 0,
+     '...so the button that removes it can actually be reached');
+
+  /* ---- the date on the card is the match's, not the form's.
+   * refDate was computed and thrown away; the header rendered match.date, the
+   * value typed into the creation form, which never moves again. And subs were
+   * sorted by ts — the order stages were ENTERED — so a two-day match whose 600
+   * was logged first listed day two above day one. */
+  await seed({
+    matches_v1: [{ id: 'M3', name: 'Two-day Regional', type: 'NMC', date: '2026-09-09', ts: 3 }],
+    sessions_v1: [
+      stage('day2', 'M3', '2026-08-02', 100, 'the 600, fired on day two'),
+      stage('day1', 'M3', '2026-08-01', 200, 'the 200, fired on day one'),
+    ],
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  const dated = await p.textContent('body');
+  ok(/2026-08-01/.test(dated) && !/2026-09-09/.test(dated),
+     'the card is dated by its earliest stage, not by whatever the form said');
+  await p.getByText('Two-day Regional').first().click();
+  await p.waitForTimeout(400);
+  const order = await p.textContent('body');
+  ok(order.indexOf('day one') < order.indexOf('day two'),
+     '...and the stages are in firing order, not entry order');
+
+  /* ---- a match everyone missed still shows a score. Gating on points made a
+   * zero look exactly like a match not yet shot. */
+  await seed({
+    matches_v1: [{ id: 'M4', name: 'Bad day', type: 'NMC', date: '2026-08-05', ts: 4 }],
+    sessions_v1: [{ id: 'miss', name: 'Stage 1', date: '2026-08-05', type: 'Score',
+      targetId: 'any', rangeYards: 200, rifleId: '', ammoId: '', ts: 40, matchId: 'M4',
+      shots: [{ id: 'm1', ring: 'M', clockH: 12, clockM: 0, xy: { x: 20, y: 0 }, elev: 0, wind: 0 },
+              { id: 'm2', ring: 'M', clockH: 6, clockM: 0, xy: { x: -20, y: 0 }, elev: 0, wind: 0 }] }],
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  ok(/0–0X/.test(await p.textContent('body')),
+     'a match where every shot missed shows a zero, not a blank');
+  ok(/of 50 for a class/.test(await p.textContent('body')),
+     '...and does not hand out a classification off two shots');
+
+  ok(boom.length === 0, `no JavaScript errors through any of it${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
 /* ================================================================ crash floor */
 /* A single-file React app with no route boundaries: ANY throw during render
  * unmounts the whole tree. White screen, on a phone, at a range, and the only
@@ -960,11 +1078,23 @@ console.log('\ncrash floor');
        '...with its group still measured, against the target it fell back to');
   }
 
-  /* Then the floor itself, with a corruption nothing guards: an ammo list
-   * holding a null. The boundary is what stands between that and a white
-   * screen with a season behind it. */
+  /* Then the floor itself.
+   *
+   * This used to use an ammo list holding a null, and that is guarded now --
+   * along with matches, firearms and targets, after a null in `matches_v1`
+   * turned out to brick the app on every launch. So the fixture moved DOWN a
+   * level, to a null inside a session's shot string: the session-level filter
+   * checks the session object, not the shots inside it.
+   *
+   * The point of this section is not any particular corruption. It is that
+   * there is always another one, and the boundary is what stands between the
+   * next one and a white screen with a season behind it. */
   await page.evaluate(() => {
-    localStorage.setItem('ammo_v1', '[null]');
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'nullshot', name: 'a hole in the string', date: '2026-08-13', type: 'Score',
+      targetId: 'any', rangeYards: 100, rifleId: '', ammoId: '', ts: 1, matchId: null,
+      shots: [null, { id: 'g1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 }],
+    }]));
   });
   await page.reload();
   await page.waitForTimeout(900);

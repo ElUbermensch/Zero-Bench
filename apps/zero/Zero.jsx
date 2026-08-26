@@ -776,6 +776,20 @@ function parseBackupText(text) {
       .filter(s => s && typeof s === 'object')
       .map(s => ({ ...s, id: s.id || uid(), shots: Array.isArray(s.shots) ? s.shots : [] }));
   }
+  /* Sessions were sanitized here and nothing else was, so every OTHER
+   * collection reached the app raw. A null in `matches` is the worst of them:
+   * the sessions list does `matches.map(m => ... m.id ...)`, which throws
+   * during render, and there is one error boundary for the whole tree. The
+   * restore reports success, the crash arrives on the next launch, and it
+   * arrives on every launch after that, because the bad row is now on disk and
+   * the local data it replaced is gone.
+   *
+   * A record with no id cannot be referred to by anything, so dropping it
+   * loses nothing that was ever reachable. */
+  for (const k of ['matches', 'firearms', 'ammo', 'customTargets']) {
+    if (data[k]) data[k] = data[k].filter(r => r && typeof r === 'object' && r.id);
+  }
+  // Counted AFTER the filter, or the dialog reports rows it is about to drop.
   const counts = `${(data.sessions||[]).length} sessions · ${(data.firearms||[]).length} firearms · ${(data.matches||[]).length} matches · ${(data.customTargets||[]).length} custom targets`;
   return { ok:true, data, found, counts };
 }
@@ -4759,11 +4773,19 @@ function App() {
             : []);
         }
       } catch { bootFailed.current.sessions = true; }
-      try { const r = await window.storage.get('matches_v1'); if (r) setMatches(JSON.parse(r.value)); } catch { bootFailed.current.matches = true; }
+      /* Every collection that is INDEXED during render gets the same treatment
+       * sessions get. `matches.map(m => m.id)` throws on a null row, and one
+       * throw takes the whole tree to the boundary -- on every launch, because
+       * the row is on disk. A cloud restore, a file import, or a half-written
+       * save can all put one there. `Array.isArray` matters as much as the
+       * per-row filter: a stored `"null"` or `"{}"` fails at `.map` itself. */
+      const cleanRows = (v) => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []);
+      try { const r = await window.storage.get('matches_v1'); if (r) setMatches(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.matches = true; }
       try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(usableTargets(JSON.parse(r.value))); } catch { bootFailed.current.customTargets = true; }
-      try { const r = await window.storage.get('deleted_builtins_v1'); if (r) setDeletedBuiltins(JSON.parse(r.value)); } catch { bootFailed.current.deletedBuiltins = true; }
-      try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(JSON.parse(r.value)); } catch { bootFailed.current.firearms = true; }
-      try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(JSON.parse(r.value)); } catch { bootFailed.current.ammo = true; }
+      try { const r = await window.storage.get('deleted_builtins_v1'); const v = r ? JSON.parse(r.value) : null;
+             if (r) setDeletedBuiltins(Array.isArray(v) ? v.filter(x => typeof x === 'string') : []); } catch { bootFailed.current.deletedBuiltins = true; }
+      try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.firearms = true; }
+      try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.ammo = true; }
       try { const r = await window.storage.get('backup_meta_v1'); if (r) setBackupMeta(JSON.parse(r.value)); } catch {}
       try { const r = await window.storage.get(SYNC_CFG_KEY); if (r) setSyncCfg(JSON.parse(r.value)); } catch {}
       try { const r = await window.storage.get('relay_name_v1'); if (r) setRelayName(JSON.parse(r.value)); } catch {}
@@ -5541,16 +5563,43 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch 
     return <div className="empty"><div className="et">No sessions yet</div><div className="es">Tap + session to start logging.</div></div>;
   }
 
-  // Build ordered list of items: matches (with their sessions) and standalone sessions
-  // Ordered by most recent date (match date = earliest sub-session date or match.date)
-  // A match is shown only if at least one of its sub-sessions passes the filter.
+  /* Matches with their stages, then everything else.
+   *
+   * Two rules here were each losing records, in opposite directions.
+   *
+   * A match with no surviving stages used to be dropped from the list -- which
+   * made its own "No stages yet" line and its "remove match" button
+   * unreachable, because both live inside the card that is not rendered. So an
+   * empty match sat on disk forever, invisible and unremovable, and the cloud
+   * merge MANUFACTURES that state: deletes do not cross a merge, so a match
+   * removed here comes back while its stages stay detached. It then rides every
+   * backup from then on. Empty matches are listed now, except while a filter is
+   * actually narrowing the list -- where hiding one is the point.
+   *
+   * And a session whose matchId names a match that is NOT here fell through
+   * both buckets: not a stage of any listed match, and not standalone either.
+   * It rendered nowhere, could not be opened, and could not be deleted -- while
+   * Analytics went on counting it, so it plainly had not been deleted. Reachable
+   * without touching a file: "remove match" does two separate writes, and if the
+   * second one fails the sessions keep a matchId whose match is gone. An orphan
+   * shows as an ordinary session now, which is exactly what removing its match
+   * was supposed to produce. */
+  const known = new Set(matches.map(m => m && m.id).filter(Boolean));
+  const filtering = filteredSessions.length !== sessions.length;
   const matchItems = matches.map(m => {
-    const subs = filteredSessions.filter(s=>s.matchId===m.id).sort((a,b)=>a.ts-b.ts);
+    /* Sorted by DATE first, then ts. `subs[0]` is meant to be the earliest
+     * stage; sorting on ts alone made it the earliest-ENTERED stage, so a
+     * two-day match whose 600 was logged before its 200 listed day two above
+     * day one and took its reference date from the later day. The ts tiebreak
+     * still holds firing order within a single date, which is what the
+     * template's now+i stagger relies on. */
+    const subs = filteredSessions.filter(s => s.matchId === m.id)
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) || (a.ts - b.ts));
     const refDate = subs.length ? subs[0].date : m.date;
     return { type:'match', match:m, subs, date:refDate, ts: subs.length ? subs[0].ts : 0 };
-  }).filter(mi => mi.subs.length > 0);
+  }).filter(mi => mi.subs.length > 0 || !filtering);
   const standaloneItems = filteredSessions
-    .filter(s=>!s.matchId)
+    .filter(s => !s.matchId || !known.has(s.matchId))
     .map(s=>({ type:'session', session:s, date:s.date, ts:s.ts }));
 
   const items = [...matchItems, ...standaloneItems].sort((a,b)=>b.ts-a.ts);
@@ -5678,6 +5727,13 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch 
 
         // Match group
         const { match, subs } = item;
+        /* `item.date` -- the earliest stage's date -- not `match.date`, which is
+         * whatever was typed into the creation form and never moves again. The
+         * comment above has claimed "match date = earliest sub-session date"
+         * since this was written; the value was computed and then thrown away,
+         * and the header rendered the frozen one. A two-day regional showed the
+         * day the form was filled in rather than the day it started. */
+        const matchDate = item.date || match.date;
         const isCollapsed = collapsed[match.id] !== false; // default collapsed
         const totalScore = subs.reduce((acc,s)=>{
           const tgt=getTarget(s.targetId);
@@ -5704,15 +5760,29 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch 
                   <div className="mtitle">{match.name||match.type}</div>
                   <span style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--acc)',background:'var(--surf2)',border:'1px solid var(--bdr)',borderRadius:3,padding:'1px 5px'}}>{match.type}</span>
                 </div>
-                <div className="mmeta">{match.date} · {subs.length} stage{subs.length!==1?'s':''} · {totalShots} shots</div>
+                <div className="mmeta">{matchDate} · {subs.length} stage{subs.length!==1?'s':''} · {totalShots} shots</div>
               </div>
               <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
-                {totalScore > 0 && (
+                {/* Gated on shots FIRED, not on points scored. `totalScore > 0`
+                    made a match where every shot missed look identical to one
+                    that has not been shot yet -- which is the one day a shooter
+                    is most likely to go back and look at it. */}
+                {recordShots > 0 && (
                   <div style={{textAlign:'right'}}>
                     <div style={{fontFamily:'var(--fm)',fontSize:14,color:'var(--acc)',fontWeight:700}}>{totalScore}–{totalXs}X</div>
                     {matchPct != null && (
                       <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)'}}>
-                        {matchPct.toFixed(1)}% · {classifyPct(matchPct).name}
+                        {matchPct.toFixed(1)}%
+                        {/* The classification BAND needs a full course behind
+                            it. ClassificationCard has had a 50-shot floor and a
+                            caveat since it was written; this header had
+                            neither, so one 20-shot stage into a 50-shot NMC a
+                            shooter was told "100.0% · High Master". A
+                            percentage of what has been shot so far is honest;
+                            a class earned from a third of a match is not. */}
+                        {recordShots >= CLASSIFICATION_MIN_SHOTS
+                          ? ` · ${classifyPct(matchPct).name}`
+                          : ` · ${recordShots} of ${CLASSIFICATION_MIN_SHOTS} for a class`}
                       </div>
                     )}
                   </div>

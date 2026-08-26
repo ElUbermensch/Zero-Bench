@@ -13,7 +13,10 @@ for m in /tmp/sbrun/migrations/*.sql; do
 done
 su postgres -c "psql -q -d shooting -c 'create schema test; grant usage on schema test to authenticated, anon;'"
 rc=0
-for t in /tmp/sbrun/test/rls_test.sql /tmp/sbrun/test/rls_test2.sql /tmp/sbrun/test/rls_test3.sql /tmp/sbrun/test/rls_test4.sql /tmp/sbrun/test/rls_test5.sql /tmp/sbrun/test/rls_test6.sql /tmp/sbrun/test/rls_test7.sql /tmp/sbrun/test/rls_test8.sql; do
+# A glob, so a new suite is run the day it is written rather than the day
+# someone remembers to add it to two lists. `sort -V` keeps rls_test9 before
+# rls_test10, which plain glob order would not.
+for t in $(ls /tmp/sbrun/test/rls_test*.sql | sort -V); do
   out=$(su postgres -c "psql -d shooting -v ON_ERROR_STOP=1 -f $t" 2>&1) || rc=1
   echo "$out" | grep -E "PASS|FAIL|ERROR|ASSERTIONS" | sed 's/^NOTICE:  //'
   # A psql ERROR aborts the script without ever printing FAIL, so grepping for

@@ -38,10 +38,14 @@ jobs:
             grant usage on schema test to authenticated, anon;'
       - name: Run every RLS suite
         run: |
+          # A GLOB, not a list. The list said rls_test..rls_test6 while
+          # run_tests.sh ran eight, so the two newest suites -- account backups
+          # and the shot string, which is to say the two most likely to have a
+          # mistake in them -- were the two nobody re-checked on a pull request.
+          # A migration that gutted the keyset indexes merged green.
           rc=0
-          for t in supabase/test/rls_test.sql supabase/test/rls_test2.sql \
-                   supabase/test/rls_test3.sql supabase/test/rls_test4.sql \
-                   supabase/test/rls_test5.sql supabase/test/rls_test6.sql; do
+          shopt -s nullglob
+          for t in supabase/test/rls_test*.sql; do
             echo "== $t"
             psql -d shooting -v ON_ERROR_STOP=1 -f "$t" 2>&1 | tee out.txt || rc=1
             # A psql ERROR aborts the script without ever printing FAIL, so
@@ -61,6 +65,15 @@ jobs:
         with: { node-version: '22' }
       - run: npm install
       - run: npx playwright install --with-deps chromium
-      - run: node tools/preflight.mjs || true    # config is not filled in a fork
+      # NOT `|| true`. That threw away the exit code of the only place preflight
+      # runs, so all of its assertions -- maskable icons, relative start_url,
+      # safe-area insets, the embed-core check being wired into npm test -- were
+      # advisory. A deploy bug it exists to catch shipped green.
+      #
+      # The backend config is genuinely absent in a fork, so that half is told
+      # to skip rather than the whole thing being ignored.
+      - run: node tools/preflight.mjs
+        env:
+          PREFLIGHT_SKIP_CONFIG: '1'
       - run: npm run build
       - run: npm test

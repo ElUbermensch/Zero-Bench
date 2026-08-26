@@ -1,4 +1,27 @@
 -- ============================================================================
+-- LOCAL TEST FIXTURE. NOT A MIGRATION.
+--
+-- The deploy procedure is "open the file on GitHub, click Raw, copy, paste into
+-- the Supabase SQL Editor" -- and this directory sits next to the one that
+-- procedure is about. The SQL Editor runs as `postgres`, which bypasses RLS
+-- entirely, so a mis-paste here is not a failed query: `delete from
+-- public.account_backups;` removes every customer's device backup, and
+-- harness.sql replaces auth.uid() with a stub that breaks every policy at once.
+--
+-- So the files say so themselves, rather than relying on a warning in a
+-- markdown file nobody has open at the time. run_tests.sh and CI both build a
+-- database called `shooting`; anything else is assumed to be real.
+-- ============================================================================
+do $$
+begin
+  if current_database() <> 'shooting' then
+    raise exception
+      'REFUSED: % is a LOCAL TEST fixture and must never run against a real project (database is %, expected "shooting")',
+      current_setting('application_name', true), current_database();
+  end if;
+end $$;
+
+-- ============================================================================
 -- The relay face, and the comparison that decides whether to draw it (0009).
 --
 -- Three claims:

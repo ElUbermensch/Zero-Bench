@@ -35,9 +35,17 @@ console.log('\nPreflight');
 /* ─────────────────────────────────────────────────────────────── backend */
 section('backend configuration');
 const cfg = loadConfig();
-ok(cfg.ok, `${rel(CONFIG_PATH)} is filled in`,
-   `${cfg.reason}. Both apps read this one file; without it they ask each user to type a server address.`);
-if (cfg.url) console.log(`      ${cfg.url}`);
+/* A fork has no backend and never will, so THIS assertion is skippable -- and
+ * it is the only reason CI used to run the whole of preflight as
+ * `|| true`, throwing away every structural check with it. One env var buys
+ * back the other twenty-odd. */
+if (process.env.PREFLIGHT_SKIP_CONFIG === '1') {
+  console.log(`      (backend config not checked — PREFLIGHT_SKIP_CONFIG=1)`);
+} else {
+  ok(cfg.ok, `${rel(CONFIG_PATH)} is filled in`,
+     `${cfg.reason}. Both apps read this one file; without it they ask each user to type a server address.`);
+  if (cfg.url) console.log(`      ${cfg.url}`);
+}
 
 /* The one thing that must never be committed. */
 section('secrets');
@@ -72,6 +80,20 @@ console.log('      ' + migs.join('\n      '));
 ok(!migs.some(m => /harness/.test(m)), 'the test harness is not among them',
    'harness.sql stubs the auth schema and must never be run against a real project');
 
+/* And the fixtures say it themselves, because the documented deploy procedure
+ * is "open the file on GitHub, click Raw, copy, paste into the SQL Editor" --
+ * and supabase/test/ sits right next to supabase/migrations/ in that listing.
+ * The SQL Editor runs as `postgres`, which bypasses RLS entirely, so a
+ * mis-paste is not a failed query: one of these files contains an unqualified
+ * `delete from public.account_backups;` and harness.sql replaces auth.uid()
+ * with a stub that breaks every policy at once. A warning in a markdown file
+ * nobody has open does not survive one paste. */
+const fixtures = fs.readdirSync(path.join(ROOT, 'supabase/test')).filter(f => f.endsWith('.sql'));
+const unguarded = fixtures.filter(f => !read(`supabase/test/${f}`).includes('REFUSED:'));
+ok(unguarded.length === 0,
+   `all ${fixtures.length} SQL fixtures refuse to run against anything but the scratch database`,
+   `unguarded: ${unguarded.join(', ')}`);
+
 /* ──────────────────────────────────────────────────────────────── the apps */
 section('apps');
 for (const [app, files] of [
@@ -97,11 +119,28 @@ const embedded = read('apps/zero/Zero.jsx');
 ok(embedded.includes('//#region zero-core'), 'Zero embeds zero-core in a generated region');
 ok(/__SUPABASE_CONFIG__/.test(embedded), 'Zero takes its backend from the build, not a hand-edited constant');
 
+/* Read from the FILESYSTEM, not from a list written here.
+ *
+ * This used to hard-code rls_test..rls_test6 and print six ticks -- against a
+ * workflow that hard-coded the same six, and a run_tests.sh that ran eight. So
+ * the check meant to catch "a suite CI does not run" shared the blind spot
+ * exactly, and the two newest suites (account backups, the shot string) went
+ * unrun on every pull request for as long as they had existed. */
 const wf = read('.github/workflows/test.yml');
-for (const t of ['rls_test.sql', 'rls_test2.sql', 'rls_test3.sql', 'rls_test4.sql',
-                 'rls_test5.sql', 'rls_test6.sql']) {
-  ok(wf.includes(t), `CI runs supabase/test/${t}`, 'a suite that CI does not run is a suite that rots');
-}
+const suites = fs.readdirSync(path.join(ROOT, 'supabase/test'))
+  .filter(f => /^rls_test\d*\.sql$/.test(f)).sort();
+const runner = read('supabase/run_tests.sh');
+ok(suites.length > 0, `${suites.length} RLS suites on disk`);
+/* A glob in the workflow covers every current and future suite, which is why
+ * it is accepted in place of naming them. */
+const wfGlobs = /rls_test\*\.sql/.test(wf);
+ok(wfGlobs || suites.every(t => wf.includes(t)),
+   'CI runs every RLS suite on disk',
+   `missing from the workflow: ${suites.filter(t => !wf.includes(t)).join(', ')}. `
+   + 'A suite that CI does not run is a suite that rots.');
+ok(/rls_test\*\.sql/.test(runner) || suites.every(t => runner.includes(t)),
+   'and so does run_tests.sh',
+   `missing from the runner: ${suites.filter(t => !runner.includes(t)).join(', ')}`);
 const deploy = read('.github/workflows/deploy.yml');
 const site = read('tools/build-site.mjs');
 ok(deploy.includes('build:site'),

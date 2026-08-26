@@ -25,7 +25,43 @@ import { loadConfig } from './config.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SITE = path.join(ROOT, 'site');
 
+/* The staleness gate runs HERE, on the path a deploy actually takes.
+ *
+ * It existed, and it was wired into `npm test` and `npm run build:zero` -- but
+ * vercel.json's buildCommand is `npm run build:site`, and this script called
+ * apps/zero/build.mjs directly. So Vercel and the Pages workflow both skipped
+ * it. Worse than skipping: Bench reads packages/zero-core/zero-core.js at build
+ * time while Zero ships the copy inlined in Zero.jsx, so a stale embed does not
+ * ship an old engine to both apps -- it ships the NEW engine to Bench and the
+ * OLD one to Zero. A sync fix lands in one app and silently does not land in
+ * the other, which is the exact class of bug the shared package exists to end,
+ * and the build log says nothing. */
+try {
+  execFileSync(process.execPath, [path.join(ROOT, 'tools/embed-core.mjs'), '--check'],
+               { stdio: 'inherit' });
+} catch (e) {
+  // The check has already said what is wrong; a stack trace on top of it just
+  // buries the one line a deploy log reader needs.
+  console.error('build:site: refusing to ship a stale embed — '
+    + 'run `node tools/embed-core.mjs`, commit, and redeploy.');
+  process.exit(1);
+}
+
+/* And a deploy does not ship an app that cannot reach its backend.
+ *
+ * loadConfig returns { ok: false } and every caller printed a warning and
+ * carried on, so the failure was a log line. A Preview deploy, or Production
+ * variables set after the first build, produced an app that shows the
+ * manual server-address fields again to a user who had already signed in --
+ * and quietly stops syncing while their outbox grows. */
 const cfg = loadConfig();
+if (!cfg.ok && process.env.ALLOW_UNCONFIGURED_BUILD !== '1') {
+  console.error(`build:site: refusing to ship without a backend — ${cfg.reason}\n`
+    + '  Set SUPABASE_URL and SUPABASE_ANON_KEY, or fill supabase.config.json.\n'
+    + '  ALLOW_UNCONFIGURED_BUILD=1 to build a deliberately local-only site.');
+  process.exit(1);
+}
+
 execFileSync(process.execPath, [path.join(ROOT, 'apps/bench/build.mjs')], { stdio: 'inherit' });
 execFileSync(process.execPath, [path.join(ROOT, 'apps/zero/build.mjs')], { stdio: 'inherit' });
 

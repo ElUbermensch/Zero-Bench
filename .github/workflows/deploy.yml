@@ -1,5 +1,5 @@
 # Publishes both PWAs to GitHub Pages:
-#   /            -> Bench
+#   /            -> Zero
 #   /bench/      -> Bench
 name: deploy
 
@@ -27,7 +27,16 @@ jobs:
       - run: npm install
       # Same assembly step Vercel runs. Two procedures that must agree is the
       # same shape of mistake as a hand-copied source file; there is one.
+      #
+      # The backend comes from repository VARIABLES (not secrets): the
+      # publishable key is public by design and ships in the bundle either way.
+      # build:site refuses to assemble without one rather than shipping an app
+      # that shows a signed-in user the manual server-address fields again and
+      # quietly stops syncing.
       - run: npm run build:site
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }

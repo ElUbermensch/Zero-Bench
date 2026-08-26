@@ -272,10 +272,30 @@ const ZeroCore = (() => {
     let syncInFlight = null;
     let autoTimer = null;
 
+    /* `store.set` RETURNS false when it could not write -- defaultStorage says
+     * so explicitly, for the quota case -- and every caller discarded it.
+     *
+     * So a device with a full card queued a write, reported it as pending from
+     * memory, and lost it on the next launch. Nothing reached the disk, nothing
+     * reached the server, no event fired, and the rejected list both apps DO
+     * surface stayed empty. The user saw a clean sync over a write that never
+     * existed. The one-byte probe in defaultStorage succeeds on a card that is
+     * 99.99% full, so the memory fallback never engaged either.
+     *
+     * Reported as a SYNC_ERROR with phase 'persist': it is not a rejected row
+     * (the server never saw it) and it is not a network failure. Both apps
+     * already listen for sync errors. */
     const persistOutbox = () => {
-      store.set(K.outbox, outbox);
-      store.set(K.rejected, rejected);
-      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length });
+      const okOutbox = store.set(K.outbox, outbox) !== false;
+      const okRejected = store.set(K.rejected, rejected) !== false;
+      if (!okOutbox || !okRejected) {
+        emit(EVENTS.SYNC_ERROR, { phase: 'persist', error: {
+          message: 'the outbox could not be written to this device — '
+                 + 'queued work is in memory only and will not survive a relaunch',
+          pending: outbox.length } });
+      }
+      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length,
+                                    durable: okOutbox && okRejected });
     };
 
     /* ---------------------------------------------------------- transport */

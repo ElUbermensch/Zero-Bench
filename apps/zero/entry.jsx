@@ -29,9 +29,33 @@ window.storage = {
     }
     return v === null ? null : { key, value: v };
   },
+  /* A write that did not happen must not report that it did.
+   *
+   * `setItem` throws when the card is full, and every caller in Zero.jsx wraps
+   * the call in a bare `catch {}` -- so React state kept the shot, the screen
+   * kept the shot, and the disk did not. Relaunch and it is gone, with nothing
+   * ever having been shown. The read side of this app is careful about the
+   * difference between "empty" and "unreadable"; the write side had no notion
+   * of "unwritten" at all.
+   *
+   * Reported rather than thrown, because a throw here would take the render
+   * down and the data on screen with it. The event is what the app listens for
+   * to tell the user; Bench has said "in memory only, not saved to this device"
+   * for a while and Zero said nothing. */
   async set(key, value) {
-    localStorage.setItem(key, value);
-    return { key, value };
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      const quota = e && (e.name === 'QuotaExceededError'
+        || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22);
+      try {
+        window.dispatchEvent(new CustomEvent('storage-failed', {
+          detail: { key, quota, error: String(e && e.message || e) },
+        }));
+      } catch (e2) { /* nothing left to do about it */ }
+      return { key, value, saved: false, quota };
+    }
+    return { key, value, saved: true };
   },
   async delete(key) {
     localStorage.removeItem(key);

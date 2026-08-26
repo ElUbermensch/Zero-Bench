@@ -553,6 +553,74 @@ console.log('\nlogbooks written by an earlier build');
   await ctx2.close();
 }
 
+/* ==================== a shot that could not be written to the card says so */
+/* `localStorage.setItem` throws when the card is full, and every save in
+ * Zero.jsx is wrapped in a bare `catch {}`. So React state kept the shot, the
+ * screen kept the shot, and the disk did not: the shooter logged a 10, saw it
+ * in the string, closed the app, and it was gone. Nothing was ever said.
+ *
+ * The read side of this app is careful about the difference between "empty" and
+ * "unreadable" -- bootFailed exists for exactly that. The write side had no
+ * notion of "unwritten" at all. Bench has said "in memory only, not saved to
+ * this device" for a while; Zero said nothing.
+ *
+ * Its own context, because it deliberately breaks storage. */
+console.log('\na card with no room left on it');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  await p.goto(BASE);
+  await p.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'full', name: 'card is full', date: '2026-08-13', type: 'Score',
+      targetId: 'any', rangeYards: 100, rifleId: '', ammoId: '', ts: 1, matchId: null,
+      shots: [{ id: 'f1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 }],
+    }]));
+  });
+  await p.reload();
+  await p.waitForTimeout(800);
+
+  // The card fills up. Only the logbook write fails, as a real quota does:
+  // the key that is about to grow is the one that cannot fit.
+  await p.evaluate(() => {
+    const real = Storage.prototype.setItem;
+    window.__refused = 0;
+    Storage.prototype.setItem = function (k, v) {
+      if (k === 'sessions_v1') {
+        window.__refused++;
+        const e = new Error('exceeded the quota'); e.name = 'QuotaExceededError';
+        throw e;
+      }
+      return real.call(this, k, v);
+    };
+  });
+
+  await p.getByText('card is full').first().click();
+  await p.waitForTimeout(400);
+  await p.click('button:has-text("+ shot")');
+  await p.waitForTimeout(400);
+  await p.click('button:has-text("Log & done")');
+  await p.waitForTimeout(700);
+
+  ok(await p.evaluate(() => window.__refused) > 0,
+     'the logbook write was refused, as a full card refuses it');
+  await p.click('button.bback');
+  await p.waitForTimeout(500);
+  const body = await p.textContent('body');
+  ok(/out of storage|could not be saved/i.test(body),
+     'the app says the change was NOT saved, rather than showing it as logged');
+  ok(/in memory only/i.test(body),
+     '...and says what that means for what is on screen right now');
+
+  /* The consequence, so this is not merely a banner test. */
+  const onDisk = await p.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots.length);
+  ok(onDisk === 1,
+     `the shot really is not on the device (${onDisk} on disk) — which is why saying so matters`);
+  await c.close();
+}
+
 /* ============ a shot fired into a string that has no numbers yet goes on the END */
 /* A shot's number is minted once and kept. The trap is a string that has none
  * at all -- logged before numbers existed, imported from a file, restored from

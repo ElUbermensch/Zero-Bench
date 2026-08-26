@@ -1223,6 +1223,57 @@ section('the shape of the keyset request');
      `...and does not repeat forever, which is what gte. would do (${later.length} again)`);
 }
 
+/* ================================ a device whose card is full says so */
+/* `store.set` returns false when it could not write -- defaultStorage documents
+ * exactly that for the quota case -- and every caller discarded it. So a phone
+ * with a full card queued a write, reported it as pending FROM MEMORY, and lost
+ * it on the next launch. Nothing on disk, nothing on the server, no event, and
+ * the rejected list both apps surface stayed empty: a clean sync over a write
+ * that never existed.
+ *
+ * The one-byte probe in defaultStorage succeeds on a card that is 99.99% full,
+ * so the memory fallback does not catch this either. */
+section('a write that could not be persisted');
+{
+  const disk = new Map();
+  let full = false;
+  const store = {
+    get: k => (disk.has(k) ? JSON.parse(disk.get(k)) : null),
+    set: (k, v) => { if (full) return false; disk.set(k, JSON.stringify(v)); return true; },
+  };
+  const c = mkClient(store);
+  await c.signUp('full@example.com', 'pw');
+
+  const errors = [], changes = [];
+  c.on(c.EVENTS.SYNC_ERROR, p => errors.push(p));
+  c.on(c.EVENTS.OUTBOX_CHANGED, p => changes.push(p));
+
+  full = true;
+  c.upsert('firearms', { name: 'Tikka T3x', cartridge: '6.5 CM' });
+
+  ok(errors.some(e => e.phase === 'persist'),
+     'a write that could not reach the disk is reported, not counted as queued');
+  ok(changes.length && changes[changes.length - 1].durable === false,
+     '...and the outbox event says plainly that it is not durable');
+
+  /* The proof of the consequence, so this is not just an event test: the
+   * device relaunches and the queue is empty. */
+  const reopened = mkClient(store);
+  ok(reopened.pendingCount() === 0,
+     'the queue really was memory-only — a relaunch finds nothing');
+
+  /* Negative control on the control: with room on the card, no error, durable
+   * true, and the write survives the relaunch. */
+  full = false;
+  const c2 = mkClient(store);
+  await c2.signUp('room@example.com', 'pw');
+  const errors2 = [];
+  c2.on(c2.EVENTS.SYNC_ERROR, p => errors2.push(p));
+  c2.upsert('firearms', { name: 'Bergara', cartridge: '.308' });
+  ok(!errors2.some(e => e.phase === 'persist') && mkClient(store).pendingCount() > 0,
+     'and a device with room reports nothing and keeps the write across a relaunch');
+}
+
 /* ============================================================ event coverage */
 section('event coverage');
 {

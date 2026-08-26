@@ -1561,10 +1561,30 @@ const ZeroCore = (() => {
     let syncInFlight = null;
     let autoTimer = null;
 
+    /* `store.set` RETURNS false when it could not write -- defaultStorage says
+     * so explicitly, for the quota case -- and every caller discarded it.
+     *
+     * So a device with a full card queued a write, reported it as pending from
+     * memory, and lost it on the next launch. Nothing reached the disk, nothing
+     * reached the server, no event fired, and the rejected list both apps DO
+     * surface stayed empty. The user saw a clean sync over a write that never
+     * existed. The one-byte probe in defaultStorage succeeds on a card that is
+     * 99.99% full, so the memory fallback never engaged either.
+     *
+     * Reported as a SYNC_ERROR with phase 'persist': it is not a rejected row
+     * (the server never saw it) and it is not a network failure. Both apps
+     * already listen for sync errors. */
     const persistOutbox = () => {
-      store.set(K.outbox, outbox);
-      store.set(K.rejected, rejected);
-      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length });
+      const okOutbox = store.set(K.outbox, outbox) !== false;
+      const okRejected = store.set(K.rejected, rejected) !== false;
+      if (!okOutbox || !okRejected) {
+        emit(EVENTS.SYNC_ERROR, { phase: 'persist', error: {
+          message: 'the outbox could not be written to this device — '
+                 + 'queued work is in memory only and will not survive a relaunch',
+          pending: outbox.length } });
+      }
+      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length,
+                                    durable: okOutbox && okRejected });
     };
 
     /* ---------------------------------------------------------- transport */
@@ -4961,6 +4981,26 @@ function App() {
      it is now shown in two places: on Sessions, where it is the only thing
      left that is not a session and has to earn that by being urgent, and on
      the backup screen itself where it explains the buttons. */
+  /* A write that did not reach the disk.
+   *
+   * Every save in this file is `try { await window.storage.set(...) } catch {}`,
+   * and setItem throws when the card is full -- so React state kept the shot,
+   * the screen kept the shot, and the disk did not. The user saw a logged shot,
+   * relaunched, and it was gone, with nothing ever having been said. The read
+   * side already distinguishes "empty" from "unreadable" (see bootFailed); the
+   * write side had no notion of "unwritten" at all.
+   *
+   * It is deliberately STICKY. A quota failure is not a transient blip to flash
+   * and clear -- everything written after it is failing too, and the user needs
+   * to get their data out before they lose more of it. Cleared only by a
+   * successful write, which is what freeing space produces. */
+  const [storageFailed, setStorageFailed] = useState(null);
+  useEffect(() => {
+    const onFail = (e) => setStorageFailed((e && e.detail) || { quota: true });
+    window.addEventListener('storage-failed', onFail);
+    return () => window.removeEventListener('storage-failed', onFail);
+  }, []);
+
   const backupNudge = (() => {
     if (!sessions.length) return null;
     const newSince = sessions.length - (backupMeta?.sessionsAtExport ?? 0);
@@ -5203,6 +5243,22 @@ function App() {
                   A stale backup is urgent — data one storage eviction from
                   gone — so it is a line, not a card, and it is a shortcut to
                   the screen that fixes it. */}
+              {/* Louder than the nudge, and above it, because it is not a
+                  warning about the future: something the user already did was
+                  not saved. */}
+              {storageFailed && (
+                <div style={{margin:'0 13px 8px',padding:'8px 10px',
+                             border:'1px solid var(--red)',borderRadius:7,
+                             fontFamily:'var(--fm)',fontSize:9,color:'var(--red)',
+                             lineHeight:1.6,cursor:'pointer'}}
+                     onClick={()=>{ setTab('more'); setMore('backup'); }}>
+                  ⚠ {storageFailed.quota
+                       ? 'This device is out of storage, so the last change was NOT saved.'
+                       : 'The last change could not be saved to this device.'}
+                  {' '}What is on screen is in memory only — back up or export now,
+                  then free some space. Tap to back up.
+                </div>
+              )}
               {backupNudge && (
                 <div style={{margin:'0 13px 8px',fontFamily:'var(--fm)',fontSize:9,
                              color:'var(--acc)',lineHeight:1.5,cursor:'pointer'}}

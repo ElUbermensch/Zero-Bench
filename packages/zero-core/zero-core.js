@@ -47,6 +47,12 @@ const ZeroCore = (() => {
     RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants, face }
     RELAY_ENDED:         'relay:ended',         // { relayId }
     RELAY_ERROR:         'relay:error',         // { phase, error }
+    /* Whether THIS DEVICE's own writes are reaching the relay -- { ok, phase }.
+     * Distinct from RELAY_STATE, which says the relay is answering a poll: a
+     * device can be reading the relay perfectly while every shot it writes is
+     * refused, and that is exactly the failure that used to be invisible. A
+     * successful read is not evidence of a successful write. */
+    RELAY_MIRROR:        'relay:mirror',        // { ok, phase, error }
   });
 
   /** Declared parent-before-child. Push and pull both walk this order, so a
@@ -1609,8 +1615,10 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.RELAY_ERROR, { phase: 'push-shot', error });
+        emit(EVENTS.RELAY_MIRROR, { ok: false, phase: 'push-shot', error });
         return { ok: false, error };
       }
+      emit(EVENTS.RELAY_MIRROR, { ok: true, phase: 'push-shot' });
       pokeRelay();
       return { ok: true };
     }
@@ -1641,8 +1649,10 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.RELAY_ERROR, { phase: 'retract-shot', error });
+        emit(EVENTS.RELAY_MIRROR, { ok: false, phase: 'retract-shot', error });
         return { ok: false, error };
       }
+      emit(EVENTS.RELAY_MIRROR, { ok: true, phase: 'retract-shot' });
       pokeRelay();
       return { ok: true };
     }

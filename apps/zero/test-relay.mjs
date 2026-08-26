@@ -453,6 +453,47 @@ section('a shot deleted mid-string, and the one fired after it');
      `...and every call the shooter made is still attached (${withCall} of ${localWithCall})`);
 }
 
+/* ════════════════════ a mirror that is being refused must not read as live */
+/* relayPushShot is fire-and-forget by design -- the local session is the system
+ * of record and a dead network must never block logging -- and nothing
+ * subscribed to RELAY_ERROR. So a shooter whose shots were being refused kept
+ * seeing `● live` while the partner and the coach watched the string stop
+ * mid-match. The only people who could tell were the ones who could not do
+ * anything about it.
+ *
+ * Driven by refusing the push at the network layer, which is what a 42501 from
+ * relay_shots_insert_own looks like from the client's side. */
+section('a mirror that is not getting through');
+{
+  await A.page.route(/\/rest\/v1\/relay_shots/, r =>
+    r.fulfill({ status: 403, contentType: 'application/json',
+                body: JSON.stringify({ code: '42501',
+                  message: 'new row violates row-level security policy for table "relay_shots"' }) }));
+  await logShot(A.page);
+  await A.page.waitForTimeout(900);
+
+  const body = await A.page.textContent('body');
+  ok(/not mirroring/i.test(body),
+     'the panel stops claiming to be live when the shots are being refused');
+  ok(/not reaching the relay/i.test(body),
+     '...and says so in words, rather than only changing a colour');
+  ok(/still recording/i.test(body),
+     '...while making clear the local session is unaffected — this is the mirror, not the log');
+
+  /* And it clears on the next shot that DOES get through -- not on the next
+   * successful poll. A device can be reading the relay perfectly while every
+   * shot it writes is refused, so clearing on state made the warning flash and
+   * vanish 2.5 seconds later, which is worse than not showing it at all. */
+  await A.page.unroute(/\/rest\/v1\/relay_shots/);
+  await A.page.waitForTimeout(3500);
+  ok(/not mirroring/i.test(await A.page.textContent('body')),
+     '...and a poll getting through does NOT clear it — a read is not a write');
+  await logShot(A.page);
+  await A.page.waitForTimeout(900);
+  ok(!/not mirroring/i.test(await A.page.textContent('body')),
+     'a shot that lands clears it');
+}
+
 section('leaving versus ending');
 await B.page.click('button:text-is("leave")');
 await B.page.waitForTimeout(3500);

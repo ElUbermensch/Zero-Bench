@@ -166,8 +166,16 @@ begin
   perform test.check(n = 3, 'the coach now sees the full shot string');
 
   -- lowercase and padding must still work: this gets read aloud on a firing line
-  perform public.join_relay(lower('  ' || code || '  '), 'Coach Dave', 'coach');
-  perform test.check(true, 'the code is accepted lowercase and padded');
+  res := public.join_relay(lower('  ' || code || '  '), 'Coach Dave', 'coach');
+  perform test.check((res ->> 'ok') = 'true', 'the code is accepted lowercase and padded');
+
+  /* ---- a rejoin in the SAME role is the dropped-signal case, and must work.
+   * The refusal added in 0014 must not catch it: a coach whose phone lost
+   * signal for ten seconds and came back has to get their screen back. */
+  res := public.join_relay(code, 'Coach Dave', 'coach');
+  perform test.check((res ->> 'ok') = 'true',
+    'rejoining in the same role still works — that is a dropped signal, not a collision');
+
 
   -- one round trip returns everything the viewer needs
   st := public.relay_state(rid);

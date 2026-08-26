@@ -232,6 +232,36 @@ begin
   select _pair.code, _pair.id into code, rid from _pair;
   res := public.join_relay(code, 'Third', 'shooter');
   perform test.check((res ->> 'slot')::int = 3, 'a third shooter takes firing point 3');
+
+  /* ---- the second device that used to kill a live string, silently.
+   *
+   * relay_participants is unique on (relay_id, user_id) and join_relay
+   * overwrote role and slot unconditionally, so a shooter who props a tablet on
+   * the bench and joins it as a coach flipped their own PHONE to coach
+   * server-side. relay_shots_insert_own then refused every shot the phone fired
+   * with 42501 — while the phone still showed `● live`, kept logging into its
+   * own session, and said nothing, because relayPushShot is fire-and-forget.
+   * The partner and the coach watched the string stop mid-match.
+   *
+   * Refused now, and named. This is 'Third' asking to become a coach while
+   * they are the live shooter on firing point 3. */
+  res := public.join_relay(code, 'Third (tablet)', 'coach');
+  perform test.check((res ->> 'ok') = 'false' and (res ->> 'error') = 'already_shooting',
+    'an account that is already shooting cannot be flipped to coach out from under itself');
+  perform test.check((res ->> 'message') like '%already shooting%',
+    '...and is told why, rather than being granted it silently');
+end $$;
+
+-- The row it tried to rewrite is exactly as it was: still a shooter, still on
+-- firing point 3. A refusal that half-applied would be worse than none.
+do $$
+declare rid uuid; v_role text; v_slot smallint;
+begin
+  select id into rid from _pair;
+  select role, slot into v_role, v_slot from public.relay_participants
+   where relay_id = rid and user_id = auth.uid();
+  perform test.check(v_role = 'shooter' and v_slot = 3,
+    'the live participant row is untouched — still shooting, still on the same firing point');
 end $$;
 
 select test.as_user('55555555-5555-5555-5555-555555555555');
@@ -251,6 +281,12 @@ begin
   res := public.join_relay(code, 'Coach Ruth', 'shooter');   -- coach picks up a rifle
   perform test.check((res ->> 'slot')::int = 2,
     'the vacated firing point is reused rather than numbering climbing forever');
+  /* And the direction 0014 deliberately leaves open. A coach picking up a rifle
+   * is one device changing its own mind, and it is a real thing on a firing
+   * line; the first version of that refusal blocked it, and this assertion is
+   * what caught that before it reached anyone. */
+  perform test.check((res ->> 'ok') = 'true',
+    '...and a coach may still pick up a rifle — the refusal is one-directional on purpose');
 end $$;
 
 -- ======================================================== ending it, per role

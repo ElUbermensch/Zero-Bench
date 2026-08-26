@@ -1336,6 +1336,12 @@ const ZeroCore = (() => {
     RELAY_STATE:         'relay:state',         // { relay, shots, messages, participants, face }
     RELAY_ENDED:         'relay:ended',         // { relayId }
     RELAY_ERROR:         'relay:error',         // { phase, error }
+    /* Whether THIS DEVICE's own writes are reaching the relay -- { ok, phase }.
+     * Distinct from RELAY_STATE, which says the relay is answering a poll: a
+     * device can be reading the relay perfectly while every shot it writes is
+     * refused, and that is exactly the failure that used to be invisible. A
+     * successful read is not evidence of a successful write. */
+    RELAY_MIRROR:        'relay:mirror',        // { ok, phase, error }
   });
 
   /** Declared parent-before-child. Push and pull both walk this order, so a
@@ -2898,8 +2904,10 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.RELAY_ERROR, { phase: 'push-shot', error });
+        emit(EVENTS.RELAY_MIRROR, { ok: false, phase: 'push-shot', error });
         return { ok: false, error };
       }
+      emit(EVENTS.RELAY_MIRROR, { ok: true, phase: 'push-shot' });
       pokeRelay();
       return { ok: true };
     }
@@ -2930,8 +2938,10 @@ const ZeroCore = (() => {
       if (!res.ok) {
         const error = await res.text().catch(() => '');
         emit(EVENTS.RELAY_ERROR, { phase: 'retract-shot', error });
+        emit(EVENTS.RELAY_MIRROR, { ok: false, phase: 'retract-shot', error });
         return { ok: false, error };
       }
+      emit(EVENTS.RELAY_MIRROR, { ok: true, phase: 'retract-shot' });
       pokeRelay();
       return { ok: true };
     }
@@ -4348,7 +4358,30 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
     if (!core) return undefined;
     return core.on(core.EVENTS.RELAY_STATE, p => setState(p));
   }, [core]);
-  useEffect(() => { if (!live) { setState(null); setJoining(false); } }, [live]);
+
+  /* A mirror that is being REFUSED must not read as "● live".
+   *
+   * relayPushShot is fire-and-forget by design -- the local session is the
+   * system of record and a dead network must never block logging -- and
+   * nothing anywhere subscribed to RELAY_ERROR. So a shooter whose role had
+   * been changed out from under them (a second device on the same account
+   * joining as a coach) had every shot refused 42501 while this panel kept
+   * saying live, and the only people who could tell were the partner and the
+   * coach, watching the string stop mid-match.
+   *
+   * Cleared by the next successful push, so a single dropped packet at a range
+   * shows for one shot and goes away, while a genuine refusal stays up. */
+  const [pushErr, setPushErr] = useState(null);
+  useEffect(() => {
+    if (!core) return undefined;
+    /* RELAY_MIRROR, not RELAY_STATE. A successful POLL is not evidence of a
+     * successful WRITE -- a device can be reading the relay perfectly while
+     * every shot it sends is refused, which is precisely the failure this is
+     * for. Clearing on state made the warning flash for a fraction of a second
+     * and vanish on the next 2.5s poll, which is worse than not showing it. */
+    return core.on(core.EVENTS.RELAY_MIRROR, p => setPushErr(p && p.ok ? null : p));
+  }, [core]);
+  useEffect(() => { if (!live) { setState(null); setJoining(false); setPushErr(null); } }, [live]);
 
   if (!core) return null;
 
@@ -4405,9 +4438,12 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
     <div style={{ ...wrap, borderColor: slotColor(info?.slot) }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
         <div>
-          <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--green)',
+          <div style={{ fontFamily: 'var(--fm)', fontSize: 9,
+            color: pushErr ? 'var(--red)' : 'var(--green)',
             letterSpacing: '.1em', textTransform: 'uppercase' }}>
-            ● live{info?.isHost ? ' · read this out' : ''}
+            {pushErr
+              ? '● not mirroring'
+              : `● live${info?.isHost ? ' · read this out' : ''}`}
           </div>
           <div style={{ fontFamily: 'var(--fm)', fontSize: 30, fontWeight: 700,
             letterSpacing: '.22em', color: slotColor(info?.slot), marginTop: 2 }}>{info?.code}</div>
@@ -4416,6 +4452,14 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
           style={{ background: 'none', border: '1px solid var(--bdr)', color: 'var(--ink)' }}>
           {info?.isHost ? 'end' : 'leave'}</button>
       </div>
+
+      {pushErr && (
+        <div style={{ ...note, color: 'var(--red)', marginTop: 6 }}>
+          Your shots are not reaching the relay. Your own session is still
+          recording them — this is the mirror, not the log. If another device is
+          signed in to this account and joined this relay, close it there.
+        </div>
+      )}
 
       <div style={{ marginTop: 7 }}>
         <RelayRoster participants={state?.participants} serverTime={state?.serverTime} compact/>

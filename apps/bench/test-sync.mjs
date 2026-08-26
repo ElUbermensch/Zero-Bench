@@ -451,6 +451,40 @@ section('a session that came down the sync, restored from another device');
      '...while a row this device has never seen still comes down');
 }
 
+/* ========================== erasing the bench erases what says it was delivered */
+/* "Erase all data" removed Bench's own record store and nothing else, which
+ * made it the exact wrong move for the user most likely to press it. The pull
+ * cursor survived, still claiming every row on the server had already been
+ * delivered here -- so the next sync brought back nothing and the app sat empty
+ * against a full account, with the nuclear option already spent.
+ *
+ * Erasing the local copy is a statement that nothing here is delivered any
+ * more. The cursor has to agree. */
+section('erase all data, then sync');
+{
+  const before = await page.evaluate(() => Object.keys(CORE.cursors).length);
+  ok(before > 0, `there is a cursor to lose (${before} tables)`);
+
+  page.once('dialog', d => d.accept());
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(200);
+  await page.click('[data-act="nav"][data-arg="data"]');
+  await page.waitForTimeout(400);
+  await page.click('button[data-act="wipe"]');
+  await page.waitForTimeout(500);
+
+  ok(await page.evaluate(() => DB.batches.length + DB.brassLots.length) === 0,
+     'the bench is erased');
+  ok(await page.evaluate(() => Object.keys(CORE.cursors).length) === 0,
+     '...and so is the cursor, so the account can be pulled down again');
+  ok(await page.evaluate(() => CORE.isSignedIn()),
+     '...while the sign-in stands — erasing the bench is not signing out');
+
+  await syncNow();
+  ok(await page.evaluate(() => DB.firearms.length) > 0,
+     'and the next sync brings the account back rather than finding nothing to do');
+}
+
 section('hygiene');
 ok(errors.length === 0, 'no JS errors' + (errors.length ? ' — ' + errors.slice(0, 3).join(' | ') : ''));
 

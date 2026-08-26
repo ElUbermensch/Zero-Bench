@@ -479,9 +479,65 @@ section('upgrading an install that has the old shared keys');
 
   const c = mkClient(shared, { appId: 'bench' });
   ok(c.pendingCount() === 1, 'unsent work from before the upgrade is adopted, not stranded');
-  ok(c.cursors.firearms === '2026-01-01T00:00:00.000Z', 'so is the cursor');
   ok(shared.get('zerocore.outbox') != null,
-     'the legacy copy is left in place for the other app, which has not started yet');
+     'the legacy copy is left in place — it is the CLAIM that is exclusive, not the data');
+
+  /* The half this section used to assert as desired, and should not have.
+   *
+   * A cursor is a claim that rows were already DELIVERED, and the legacy value
+   * cannot say delivered to which app: pre-namespacing both apps shared one
+   * cursor, so it is the maximum of what *some* app pulled. Adopting it copies
+   * that corruption into both namespaces and silently exempts every row that
+   * existed at upgrade time -- on precisely the installs that lived through the
+   * bug. The shooter sees Bench's rifle picker come up empty beside a Zero
+   * showing three rifles, on one account, and re-syncing does nothing. */
+  ok(c.cursors.firearms === undefined,
+     'the cursor is NOT adopted — it cannot say which app the rows were delivered to');
+
+  /* And the queue is claimed ONCE. Both apps adopting it was called safe on the
+   * grounds that every write is an id-keyed upsert, but idempotence is not
+   * safety: the entry is a whole-row upsert of stale content, the server stamps
+   * the replay as now, and nothing expires it. Zero pushes the adopted row, the
+   * shooter corrects the name, and Bench -- opened later for something else --
+   * replays its copy over the correction. No conflict is raised: SYNC_CONFLICT
+   * only fires for pulled rows. */
+  const second = mkClient(shared, { appId: 'zero' });
+  ok(second.pendingCount() === 0,
+     'a second app opened afterwards does NOT adopt the same queue a second time');
+
+  /* Negative control on the control: an app that finds the claim already taken
+   * must still be a working client, not a crippled one. */
+  second.upsert('firearms', { id: '99999999-4444-5555-6666-777777777777',
+                              name: 'its own work', cartridge: '.223' });
+  ok(second.pendingCount() === 1, '...but its own writes queue normally');
+}
+
+/* ---- the same thing end to end: the correction, and the replay over it ---- */
+{
+  const shared = memStore();
+  const c0 = mkClient(shared, { appId: 'zero' });
+  await c0.signUp('legacy@example.com', 'pw');
+  const gun = c0.uuid();
+
+  // A row queued weeks ago, under the old un-namespaced key.
+  shared.set('zerocore.outbox', [{ table: 'firearms', op: 'upsert', queuedAt: 1,
+    row: { id: gun, name: 'STALE, queued weeks ago', cartridge: '6.5 CM' } }]);
+
+  const zero = mkClient(shared, { appId: 'zero' });
+  await zero.sync({ trigger: 'test', tables: [] });          // pushes the adopted row
+
+  // The shooter notices the name is wrong and fixes it, today, in Zero.
+  zero.upsert('firearms', { id: gun, name: 'CORRECT, typed today', cartridge: '6.5 CM' });
+  await zero.sync({ trigger: 'test', tables: [] });
+
+  // Bench is opened later for something else and syncs on its own.
+  const bench = mkClient(shared, { appId: 'bench' });
+  await bench.sync({ trigger: 'test', tables: [] });
+
+  const rows = [...(mock.state.rows.get('firearms')?.values() || [])];
+  const row = rows.find(r => r.id === gun);
+  ok(row && row.name === 'CORRECT, typed today',
+     `the correction stands — Bench had no second copy to replay over it (${row ? row.name : 'row missing'})`);
 }
 
 /* ======================== rows of different shapes in the same table's queue */

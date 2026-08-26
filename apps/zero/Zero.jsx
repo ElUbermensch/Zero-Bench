@@ -1407,9 +1407,42 @@ const ZeroCore = (() => {
      * Existing installs are adopted rather than reset: if the namespaced key
      * has nothing and the old shared one does, the old value is taken over.
      * The legacy copy is deliberately NOT deleted -- the other app has not
-     * started yet and would find its own queue gone. Both apps adopting the
-     * same pending rows is safe, because every write is an upsert keyed by an
-     * id the client minted. */
+     * started yet and would find its own queue gone.
+     *
+     * That last sentence used to be followed by "both apps adopting the same
+     * pending rows is safe, because every write is an upsert keyed by an id the
+     * client minted", and it is wrong. Idempotence by id is not the same as
+     * safety: a queued entry is a whole-row upsert of STALE content with no
+     * timestamp guard -- pushTable strips updated_at and the server stamps the
+     * write as now -- so replaying it is only a no-op if nothing changed in
+     * between. Nothing bounds "in between": queuedAt is written and never read
+     * for expiry, so an entry lives until it pushes or dead-letters. Reproduced:
+     * Zero pushes the adopted row, the shooter notices the rifle's name is
+     * wrong and fixes it, and then Bench -- opened later for an unrelated powder
+     * lot -- replays ITS copy of the same weeks-old row and the correction is
+     * gone from the server and every device. No conflict is reported, because
+     * SYNC_CONFLICT only fires for PULLED rows; a stale push has nothing to
+     * compare against. The edit simply un-does itself, and the app the shooter
+     * blames is the one they made it in.
+     *
+     * So the queue is claimed ONCE, by whichever app loads first, with a
+     * sentinel in a separate key. The legacy values themselves stay on disk, so
+     * "left in place for the other app" is still true -- it is the claim that is
+     * exclusive, not the data. Splitting the queue by app is not possible
+     * (entries carry a table, not an app) and not necessary: what matters is
+     * that a client-minted upsert is pushed once, not by whom.
+     *
+     * And the CURSOR is not adopted at all. A cursor is a claim that rows were
+     * already delivered, and the legacy value cannot say delivered TO WHICH APP
+     * -- it is the maximum of what *some* app pulled, which is exactly the
+     * corruption namespacing exists to end. Copying it into both namespaces
+     * silently exempted every row that existed at upgrade time, on precisely
+     * the installs that lived through the bug. Reproduced: Bench's rifle picker
+     * comes up empty next to a Zero that shows three rifles, on one account,
+     * and re-syncing does nothing -- only the rifles that happen to be re-edited
+     * in Zero ever appear, which makes the pattern look arbitrary rather than
+     * diagnosable. Dropping the adoption costs one full re-pull per app.
+     * Bandwidth, against correctness. */
     const ns = 'zerocore.' + (cfg.appId || 'unknown');
     const K = {
       session: 'zerocore.session',     // shared across both apps, deliberately
@@ -1421,13 +1454,17 @@ const ZeroCore = (() => {
        * hold a cursor back for rows this handler has no trouble with. */
       floors:  ns + '.floors',
     };
-    const LEGACY = { cursors: 'zerocore.cursors', outbox: 'zerocore.outbox',
-                     rejected: 'zerocore.rejected' };
-    for (const k of Object.keys(LEGACY)) {
-      if (store.get(K[k]) == null) {
-        const old = store.get(LEGACY[k]);
-        if (old != null) store.set(K[k], old);
+    const LEGACY = { outbox: 'zerocore.outbox', rejected: 'zerocore.rejected' };
+    const CLAIM = 'zerocore.legacy-claimed';
+    if (store.get(CLAIM) == null) {
+      let claimed = false;
+      for (const k of Object.keys(LEGACY)) {
+        if (store.get(K[k]) == null) {
+          const old = store.get(LEGACY[k]);
+          if (old != null) { store.set(K[k], old); claimed = true; }
+        }
       }
+      if (claimed) store.set(CLAIM, cfg.appId || 'unknown');
     }
 
     /* -------------------------------------------------------- event bus */

@@ -98,6 +98,22 @@ const Store = (() => {
     wipe() {
       mem = null;
       if (persistent) { try { localStorage.removeItem(KEY); } catch (e) {} }
+      /* The pull cursor goes with the data.
+       *
+       * This used to remove only Bench's own KEY, which made "Erase all data"
+       * the exact wrong move for the user most likely to press it: the bench is
+       * gone, but the cursor still says every row on the server was already
+       * delivered, so the next sync brings back nothing and the app sits empty
+       * against a full account. Erasing the local copy is a statement that
+       * nothing here is delivered any more, and the cursor has to agree.
+       *
+       * The SESSION is not touched -- erasing the bench is not signing out --
+       * and neither is the outbox, which is unsent work that belongs to the
+       * user rather than to the copy being erased. */
+      /* CORE is declared below this IIFE, so the reference lives inside the
+       * try: wipe() is only ever reached from a tap, long after evaluation,
+       * but a local-only build has no CORE at all and must not throw here. */
+      try { if (CORE && CORE.resetCursors) CORE.resetCursors(); } catch (e) {}
     },
   };
 })();

@@ -264,6 +264,58 @@ section('the pull cursor');
      `a second sync pulls only what Bench applies (${touched.join(', ') || 'nothing'})`);
 }
 
+const syncNow = async () => {
+  await page.click('[data-act="tab"][data-arg="lookup"]');
+  await page.waitForTimeout(150);
+  await page.click('button[data-act="sySync"]');
+  await page.waitForTimeout(1200);
+};
+
+/* ================= the ammo count is current, not one range trip behind */
+/* `batches.qty_remaining` is DERIVED from the sessions on the batch, and the
+ * push runs before the pull. So every sync sent a figure computed from the
+ * sessions this device knew about a moment before it learned about more, and
+ * only corrected it on the NEXT sync.
+ *
+ * Zero reads that column through v_ballistic_profiles and prints it on the load
+ * card, so the number a shooter saw was one range trip behind every time they
+ * looked at it: fire 40 rounds in Zero, open Bench, tap sync — and the count
+ * goes back UP to what it was before the trip. It only reads true after a
+ * second sync with no shooting in between, which is not how anyone uses it. */
+section('a range trip pulled in is reflected in the count that goes back up');
+{
+  const userId = rows('firearms')[0].user_id;
+  const batchRemote = await page.evaluate(() => DB.batches[0].remote);
+  const before = rows('batches').find(b => b.id === batchRemote);
+  ok(!!before, 'the batch is on the server to begin with');
+  const loaded = before.qty_loaded;
+
+  // Zero logs a range trip against that batch, on another device.
+  mock.advance(60_000);
+  mock.seed('range_sessions', { id: 'ffffffff-6666-4666-8666-ffffffffffff', user_id: userId,
+    batch_id: batchRemote, occurred_on: '2026-08-05', rounds_fired: 12, source_app: 'zero' });
+
+  await syncNow();
+
+  const after = rows('batches').find(b => b.id === batchRemote);
+  const localLeft = await page.evaluate(() => roundsLeft(DB.batches[0]));
+  ok(localLeft < loaded,
+     `Bench itself knows the rounds are gone (${localLeft} of ${loaded})`);
+  ok(after.qty_remaining === localLeft,
+     `and the server carries the SAME number in the same sync (${after.qty_remaining} vs ${localLeft})`);
+
+  /* The shape of the old bug, stated as its own assertion: the figure on the
+   * server must not still be the pre-trip one. */
+  ok(after.qty_remaining !== before.qty_remaining,
+     `...rather than the count from before the trip (${before.qty_remaining})`);
+
+  // And an ordinary sync that pulls nothing does not pay for a second round trip.
+  const pushesBefore = mock.state.hits.push.batches || 0;
+  await syncNow();
+  ok((mock.state.hits.push.batches || 0) - pushesBefore <= 1,
+     'a sync that pulls nothing new still costs one push, not two');
+}
+
 /* ============================ a session Bench cannot file must not be skipped past */
 /* The half the fix above hid. Bench's readers return a stat object whether or
  * not they kept anything, and they routinely keep nothing: a range session
@@ -277,12 +329,6 @@ section('the pull cursor');
  * Both directions are asserted, because the hold is only interesting if the
  * ordinary case still runs at full speed. */
 section('a pulled session Bench cannot place holds the cursor');
-const syncNow = async () => {
-  await page.click('[data-act="tab"][data-arg="lookup"]');
-  await page.waitForTimeout(150);
-  await page.click('button[data-act="sySync"]');
-  await page.waitForTimeout(1200);
-};
 {
   const userId = rows('firearms')[0].user_id;
   const knownBatch = await page.evaluate(() => DB.batches[0].remote);

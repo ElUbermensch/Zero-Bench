@@ -3087,11 +3087,32 @@ async function doSync() {
        * rows "pulled" that changed nothing. */
       apply: (table, rows) => {
         const s = BenchSync.applyPulled(DB, table, rows, { ensureCartridge, uid });
-        if (s) { pulled.added += s.added; pulled.updated += s.updated; pulled.removed += s.removed; }
+        if (s) {
+          pulled.added += s.added; pulled.updated += s.updated; pulled.removed += s.removed;
+          pulled.batchesTouched = (pulled.batchesTouched || 0) + (s.batchesTouched || 0);
+        }
         return s;
       },
     });
     if (pulled.added || pulled.updated || pulled.removed) save();
+
+    /* A SECOND push, but only when the pull actually moved a derived number.
+     *
+     * `batches.qty_remaining` is computed from the sessions on the batch, and
+     * push runs before pull -- so a sync that learns about a range trip sends
+     * the pre-trip count and only corrects it on the NEXT sync. Zero's load
+     * card reads that column, so the ammo count a shooter saw was one trip
+     * behind every time they looked: fire 40 rounds, sync, and the count goes
+     * back up to where it was before the trip.
+     *
+     * Gated on the pull having touched a batch, so an ordinary sync is still
+     * one round trip. The rows are rebuilt from the now-current state rather
+     * than patched, because the derivation is the thing that changed. */
+    if (pulled.batchesTouched && r && r.ok) {
+      BenchSync.push(CORE, DB, lotLeft, roundsLeft);
+      save();
+      await CORE.sync({ trigger: 'derived-refresh', tables: [] });
+    }
 
     const fromOther = [
       pulled.added ? `${pulled.added} new` : '',

@@ -447,7 +447,14 @@ const BenchSync = (() => {
       const local = DB.sessions.find(x => x.remote === row.id) || null;
 
       if (row.deleted_at) {
-        if (local) { DB.sessions = DB.sessions.filter(x => x !== local); stat.removed++; }
+        if (local) {
+          /* A session deleted on the other device gives its rounds BACK to the
+           * batch, so the derived count moves here too and has to be re-pushed
+           * for the same reason a new session does. */
+          const b0 = (DB.batches || []).find(x => x.id === local.batch);
+          if (b0) { b0.mtime = Date.now(); stat.batchesTouched = (stat.batchesTouched || 0) + 1; }
+          DB.sessions = DB.sessions.filter(x => x !== local); stat.removed++;
+        }
         continue;
       }
 
@@ -488,13 +495,33 @@ const BenchSync = (() => {
         mtime: 0, syncedAt: Date.now(),
       };
 
+      /* A pulled session changes what is LEFT in the batch it was fired from,
+       * and that number is a column this app pushes.
+       *
+       * `batches.qty_remaining` is derived from the sessions on the batch, and
+       * the push runs BEFORE the pull -- so every sync sent a figure computed
+       * from the sessions this device knew about a moment before it learned
+       * about more. The load card in Zero, which reads that column through
+       * v_ballistic_profiles, was one range trip behind every single time the
+       * shooter looked at it: fire 40 in Zero, sync in Bench, and the count
+       * goes back UP to what it was before the trip.
+       *
+       * Marking the batch modified is what makes the correction deliberate
+       * rather than accidental: the next push carries the recomputed figure
+       * because this device now knows something it did not, which is exactly
+       * what an mtime is for. */
+      const touch = () => {
+        if (batch) { batch.mtime = Date.now(); stat.batchesTouched = (stat.batchesTouched || 0) + 1; }
+      };
       if (local) {
         const before = JSON.stringify([local.rounds, local.date, local.batch, local.notes]);
         Object.assign(local, patch);
-        if (before !== JSON.stringify([local.rounds, local.date, local.batch, local.notes])) stat.updated++;
+        if (before !== JSON.stringify([local.rounds, local.date, local.batch, local.notes])) {
+          stat.updated++; touch();
+        }
       } else {
         DB.sessions.push(Object.assign({ id: helpers.uid('se'), remote: row.id }, patch));
-        stat.added++;
+        stat.added++; touch();
       }
     }
     return stat;

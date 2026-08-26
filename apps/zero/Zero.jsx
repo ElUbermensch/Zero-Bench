@@ -59,6 +59,24 @@ const BUILTIN_TARGETS = [
 ];
 
 function uid() { return Math.random().toString(36).slice(2,10); }
+
+/* The calendar day where the shooter is standing.
+ *
+ * This was `new Date().toISOString()` sliced to ten characters in five places,
+ * which is the day in UTC. Everywhere west of Greenwich that is wrong for part of every
+ * day, and the part it is wrong for is the evening -- which on a range is most
+ * of a summer session. A string shot at 6pm in California was filed under
+ * tomorrow: it sorted above shots fired after it, the DOPE entry landed on a
+ * day the shooter was not at the range, and the date input in the next form
+ * opened on tomorrow's date. Nothing errored, so nothing complained.
+ *
+ * Built from the local getters rather than by subtracting getTimezoneOffset()
+ * and re-serialising: the offset arithmetic is one sign error away from making
+ * the bug worse in half the world, and this has no arithmetic in it at all. */
+const pad2 = (n) => String(n).padStart(2, '0');
+function todayLocal(d = new Date()) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
 function inchesToMoa(in_, yd) { return in_ / (yd * MOA_PER_100YD / 100); }
 // Sight turret: elev/wind are stored as integer CLICKS (lossless, matches a
 // detented turret). MOA is the derived display. 1 click = 1/4 MOA on a standard
@@ -1033,7 +1051,7 @@ async function idbReadSnapshot() {
  */
 function dopeCardText(byFirearm) {
   const lines = [];
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   lines.push(`ZERO — DOPE CARD · ${today}`);
   lines.push(`E/W in MOA · up/right + · ${MOA_PER_CLICK} MOA/click`);
   for (const [fname, locs] of Object.entries(byFirearm)) {
@@ -3035,7 +3053,7 @@ function zeroSyncOutbound(core, sessions, ammo, getTarget, firearms) {
        * explicitly-sent null -- PostgREST would answer 23502 and the whole
        * session would dead-letter. A session with no date is a session that
        * happened whenever it was logged. */
-      occurred_on: s2.date || new Date().toISOString().slice(0, 10),
+      occurred_on: s2.date || todayLocal(),
       location: s2.rangeLocation || null,
       /* Rounds CONSUMED, which is every shot logged — sighters and foulers
        * included. `stats.n` counts record shots only; sending that made a
@@ -3239,7 +3257,7 @@ function leaderboardEntryFor(session, target, existingId) {
   if (!a || a.n < 2) return null;
   return {
     id: existingId || null,
-    occurred_on: session.date || new Date().toISOString().slice(0, 10),
+    occurred_on: session.date || todayLocal(),
     position: POSITIONS.includes(session.position) ? session.position : 'Unspecified',
     target_name: target?.name || 'Unknown',
     distance_yd: yards,
@@ -4583,7 +4601,7 @@ function App() {
       },
     };
     const text = JSON.stringify(payload, null, 2);
-    const name = `zero-backup-${new Date().toISOString().slice(0,10)}.json`;
+    const name = `zero-backup-${todayLocal()}.json`;
     // Local bookkeeping, not user data: only stamped once something actually
     // left the app, so the staleness nudge cannot be reset by a failed export.
     const markExported = () => {
@@ -5265,7 +5283,7 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch 
 }
 
 function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave }) {
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   // Distinct prior locations, most-recent first, for the datalist autocomplete
   const priorLocations = (() => {
     if (!sessions) return [];
@@ -7991,7 +8009,7 @@ function MatchTemplateForm({ firearms, sessions, ammo, onBack, onCreate }) {
   const recent = [...(sessions||[])].sort((a,b)=>(b.ts||0)-(a.ts||0))[0];
   const [tplId, setTplId] = useState(MATCH_TEMPLATES[0].id);
   const [name, setName] = useState('');
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0,10));
+  const [date, setDate] = useState(() => todayLocal());
   const [rifleId, setRifleId] = useState(recent?.rifleId || firearms[0]?.id || '');
   const [rangeLocation, setRangeLocation] = useState(recent?.rangeLocation || '');
   // Two ammo slots per the standard XTC pattern: one load for the short line
@@ -10200,7 +10218,7 @@ class Boundary extends Component {
       }
       const text = JSON.stringify({ schema: 'zero-backup', version: 1,
         exportedAt: new Date().toISOString(), data }, null, 2);
-      const name = `zero-rescue-${new Date().toISOString().slice(0, 10)}.json`;
+      const name = `zero-rescue-${todayLocal()}.json`;
       const file = new File([text], name, { type: 'application/json' });
       if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
         navigator.share({ files: [file], title: 'Zero data' }).catch(() => {});

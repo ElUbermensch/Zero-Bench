@@ -553,6 +553,61 @@ console.log('\nlogbooks written by an earlier build');
   await ctx2.close();
 }
 
+/* ================================== the date defaults to the shooter's day, not UTC's */
+/* `new Date().toISOString().slice(0,10)` is the day in Greenwich. Every place
+ * Zero needed "today" used it, and everywhere west of UTC that is wrong for the
+ * whole evening -- which on a range is most of a summer session. A string shot
+ * at 8pm in California was filed under tomorrow: it sorted above shots fired
+ * after it, and the DOPE entry landed on a day the shooter was not at the range.
+ *
+ * Frozen at an instant where the two answers differ, so this cannot pass by
+ * accident on a machine that happens to run in UTC or at noon. */
+console.log('\nthe date a shooter is standing in');
+{
+  // 2026-08-02T03:30:00Z is 2026-08-01, 20:30 in Los Angeles. UTC says August 2.
+  const FROZEN = Date.UTC(2026, 7, 2, 3, 30, 0);
+  const mkTzPage = async (tz) => {
+    const c = await browser.newContext({ timezoneId: tz, viewport: { width: 430, height: 900 } });
+    await c.addInitScript((t) => {
+      const Real = Date;
+      const Frozen = new Proxy(Real, {
+        construct: (T, a) => (a.length ? new T(...a) : new T(t)),
+        apply: () => new Real(t).toString(),
+      });
+      Frozen.now = () => t;
+      window.Date = Frozen;
+    }, FROZEN);
+    const p = await c.newPage();
+    await p.goto(BASE);
+    await p.waitForTimeout(600);
+    return [c, p];
+  };
+  const defaultDate = async (p) => {
+    await p.click('button:has-text("+ session")');
+    await p.waitForTimeout(400);
+    return p.inputValue('input[type="date"]');
+  };
+
+  const [cW, pW] = await mkTzPage('America/Los_Angeles');
+  const west = await defaultDate(pW);
+  ok(west === '2026-08-01',
+     `an evening session west of UTC is dated today, not tomorrow (${west})`);
+  /* Non-vacuity: prove the two answers actually differ at this instant, so the
+   * assertion above is not passing because the harness happens to run in UTC. */
+  ok(await pW.evaluate(() => new Date().toISOString().slice(0, 10)) === '2026-08-02',
+     '...and the UTC day at that same instant is the 2nd — the answer the old code gave');
+  await cW.close();
+
+  /* And the other side of the line, because a fix that just subtracts a day is
+   * a different bug: Tokyo is UTC+9, so that same instant is already the 2nd
+   * there and the local answer is the LATER date. */
+  const [cE, pE] = await mkTzPage('Asia/Tokyo');
+  const east = await defaultDate(pE);
+  ok(east === '2026-08-02',
+     `and east of UTC the local day is the later one, not a blanket day back (${east})`);
+  await cE.close();
+}
+
 /* ============================ Zero owns the root, so its worker is the broad one */
 console.log('\nservice worker scope');
 {

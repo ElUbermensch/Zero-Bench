@@ -1826,6 +1826,57 @@ section('the build says which build it is');
      `and the query does not move the scope, which comes from the path (${scope})`);
 }
 
+/* ============================ the date defaults to the loader's day, not UTC's */
+/* `today()` was the UTC day, and it defaults the date on every batch, session
+ * and brass event. West of UTC that is wrong for the entire evening. The
+ * batch serial is the consequence with teeth: it ENCODES the date, so a box
+ * loaded at 8pm in Colorado was stamped with tomorrow's letter and the label
+ * on the ammo can disagreed with the bench notes. `fmtDate` already pinned the
+ * read side to noon local for exactly this reason; the write side never got it.
+ *
+ * Run in a context frozen at an instant where UTC and local disagree, so this
+ * cannot pass by accident on a machine that happens to run in UTC. */
+section('the day the loader is standing in');
+{
+  const FROZEN = Date.UTC(2026, 7, 2, 3, 30, 0);   // 2026-08-01 20:30 in Denver
+  const dayIn = async (tz) => {
+    const c = await browser.newContext({ viewport: { width: 390, height: 844 }, timezoneId: tz });
+    await c.addInitScript((t) => {
+      const Real = Date;
+      const Frozen = new Proxy(Real, {
+        construct: (T, a) => (a.length ? new T(...a) : new T(t)),
+        apply: () => new Real(t).toString(),
+      });
+      Frozen.now = () => t;
+      window.Date = Frozen;
+    }, FROZEN);
+    const p = await c.newPage();
+    await p.goto(BASE);
+    await p.waitForTimeout(500);
+    const out = await p.evaluate(() => ({
+      local: today(),
+      utc: new Date().toISOString().slice(0, 10),
+      serial: Serial.batchSerial(today(), new Set()),
+    }));
+    await c.close();
+    return out;
+  };
+
+  const west = await dayIn('America/Denver');
+  ok(west.local === '2026-08-01',
+     `an evening at the bench west of UTC is dated today, not tomorrow (${west.local})`);
+  ok(west.utc === '2026-08-02',
+     '...and the UTC day at that same instant is the 2nd — the answer the old code gave');
+  ok(/^B26H01/.test(west.serial),
+     `so the serial stamped on the box carries the right day (${west.serial})`);
+
+  /* The other side of the line, because a fix that just subtracts a day is a
+   * different bug: that instant is already the 2nd in Tokyo. */
+  const east = await dayIn('Asia/Tokyo');
+  ok(east.local === '2026-08-02',
+     `and east of UTC the local day is the later one, not a blanket day back (${east.local})`);
+}
+
 /* ================================================================== hygiene */
 section('hygiene');
 {

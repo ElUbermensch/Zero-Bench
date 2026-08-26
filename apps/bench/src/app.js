@@ -193,7 +193,20 @@ const emptyDb = () => ({
  * finished evaluating. The one thing never exercised was the actual path: a
  * page LOAD with an old database already on disk. */
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
-const today = () => new Date().toISOString().slice(0, 10);
+/* The calendar day where the user is standing, not the one in Greenwich.
+ *
+ * This was `new Date().toISOString().slice(0, 10)`, which is the UTC day, and
+ * it defaults the date on every load, every session and every brass event.
+ * Anywhere west of UTC that is wrong for the whole evening: a batch loaded at
+ * 8pm in Colorado was dated tomorrow, sorted above batches loaded after it, and
+ * aged the brass by a day that had not happened. `fmtDate` below already pins
+ * the READ side to noon local for exactly this reason; the write side never
+ * got the same treatment.
+ *
+ * Local getters rather than offset arithmetic: there is no sign to get wrong. */
+const pad2 = (n) => String(n).padStart(2, '0');
+const today = (d = new Date()) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
 /** Forgiving load: fills in anything a older/partial save is missing rather
  *  than discarding records because one key moved. */

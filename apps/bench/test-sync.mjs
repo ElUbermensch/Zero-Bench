@@ -264,6 +264,63 @@ section('the pull cursor');
      `a second sync pulls only what Bench applies (${touched.join(', ') || 'nothing'})`);
 }
 
+/* ============================ a session Bench cannot file must not be skipped past */
+/* The half the fix above hid. Bench's readers return a stat object whether or
+ * not they kept anything, and they routinely keep nothing: a range session
+ * whose batch this device has never had hits `if (!batch) continue`, because
+ * Bench files every session under the batch it was fired with and there is
+ * nowhere else to put one. The cursor advanced over those rows PERMANENTLY.
+ * Load that batch onto this phone tomorrow — restore a backup, sync from the
+ * other device — and the sessions fired with it are already behind the cursor.
+ * They are on the server. This device is simply never offered them again.
+ *
+ * Both directions are asserted, because the hold is only interesting if the
+ * ordinary case still runs at full speed. */
+section('a pulled session Bench cannot place holds the cursor');
+const syncNow = async () => {
+  await page.click('[data-act="tab"][data-arg="lookup"]');
+  await page.waitForTimeout(150);
+  await page.click('button[data-act="sySync"]');
+  await page.waitForTimeout(1200);
+};
+{
+  const userId = rows('firearms')[0].user_id;
+  const knownBatch = await page.evaluate(() => DB.batches[0].remote);
+
+  // --- the ordinary case: a session for a batch this device HAS ---
+  mock.advance(60_000);
+  const okStamp = new Date(mock.state.clock).toISOString();
+  mock.seed('range_sessions', { id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', user_id: userId,
+    batch_id: knownBatch, occurred_on: '2026-08-01', rounds_fired: 20, source_app: 'zero' });
+  await syncNow();
+  ok(await page.evaluate(() => CORE.cursors.range_sessions) === okStamp,
+     'a session whose batch is here is filed and the cursor moves to it');
+  ok(!await page.evaluate(() => CORE.floors.range_sessions),
+     '...with nothing held back — the ordinary case still runs at full speed');
+
+  // --- the case that was silently dropped: a batch this device has never had ---
+  mock.advance(60_000);
+  const heldStamp = new Date(mock.state.clock).toISOString();
+  mock.seed('range_sessions', { id: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb', user_id: userId,
+    batch_id: 'cccccccc-3333-4333-8333-cccccccccccc', occurred_on: '2026-08-02',
+    rounds_fired: 40, source_app: 'zero' });
+  await syncNow();
+
+  const floor = await page.evaluate(() => CORE.floors.range_sessions);
+  ok(floor && floor.at === heldStamp,
+     `the unplaceable session is held rather than dropped (${floor ? floor.at : 'not held'})`);
+  ok(await page.evaluate(() => CORE.cursors.range_sessions) < heldStamp,
+     '...and the cursor stops below it, so it is still owed to this device');
+
+  /* The proof that "still owed" means something: it comes back down the wire
+   * on the next sync rather than living only on the server. */
+  const beforePull = mock.state.hits.pull.range_sessions || 0;
+  await syncNow();
+  ok((mock.state.hits.pull.range_sessions || 0) > beforePull
+     && await page.evaluate(() => CORE.cursors.range_sessions) < heldStamp,
+     'it is offered again on the sync after that, and again held');
+}
+
 section('cloud backup');
 const openData = async () => {
   await page.click('[data-act="tab"][data-arg="more"]');

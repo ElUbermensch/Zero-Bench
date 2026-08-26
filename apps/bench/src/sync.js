@@ -352,6 +352,14 @@ const BenchSync = (() => {
    * cartridges live in app.js, and a function in this file that silently
    * depends on load order is how the whole app once failed to boot.
    * ======================================================================*/
+  /* A row this device pulled and could NOT place. Reporting it holds the pull
+   * cursor short of it, so it is offered again next sync -- see commitCursor in
+   * zero-core. Reporting nothing means "I took every row", which is what these
+   * readers used to claim while quietly dropping rows on the floor. */
+  const defer = (stat, row) => {
+    if (row && row.updated_at) (stat.deferred = stat.deferred || []).push(row.updated_at);
+  };
+
   function applyFirearms(DB, rows, helpers) {
     const stat = { added: 0, updated: 0, removed: 0 };
     if (!Array.isArray(rows) || !rows.length) return stat;
@@ -371,6 +379,12 @@ const BenchSync = (() => {
           if (!used) {
             DB.firearms = DB.firearms.filter(f => f !== local);
             stat.removed++;
+          } else {
+            /* Held, not dropped: the sessions pinning it here may themselves be
+             * deleted tomorrow, and a tombstone that has already been stepped
+             * over leaves a rifle that was deleted on the other device standing
+             * in this one forever, with no way to remove it. */
+            defer(stat, row);
           }
         }
         continue;
@@ -438,7 +452,14 @@ const BenchSync = (() => {
       }
 
       const batch = (DB.batches || []).find(b => b.remote === row.batch_id);
-      if (!batch) continue;                    // not a batch this device knows
+      /* Not a batch this device knows -- YET. Bench files every session under
+       * the batch it was shot with; there is no other place to put one, and
+       * inventing a batch from a session row would create a load record the
+       * user never entered. So the row is held rather than discarded: the
+       * batch may arrive from the other device on the next sync, and the
+       * sessions that belong to it must still be on the near side of the
+       * cursor when it does. */
+      if (!batch) { defer(stat, row); continue; }
       const firearm = (DB.firearms || []).find(f => f.remote === row.firearm_id);
 
       const patch = {
@@ -487,7 +508,7 @@ const BenchSync = (() => {
     for (const row of rows) {
       if (!row || !row.session_id || row.deleted_at) continue;
       const s = (DB.sessions || []).find(x => x.remote === row.session_id);
-      if (!s) continue;
+      if (!s) { defer(stat, row); continue; }   // its session was held above
       const dist = nn(row.distance_yd), grp = nn(row.group_es_in);
       const before = [s.distance, s.group].join('|');
       if (dist != null) s.distance = dist;
@@ -517,7 +538,10 @@ const BenchSync = (() => {
     for (const row of rows) {
       if (!row || !row.id || !row.session_id) continue;
       const s = (DB.sessions || []).find(x => x.remote === row.session_id);
-      if (!s) continue;                        // a session this device has not pulled
+      /* A session this device has not placed. The holes are held with it --
+       * a string that arrives after its session has been stepped over is a
+       * session that can never be plotted here. */
+      if (!s) { defer(stat, row); continue; }
       s.shots = s.shots || [];
       const at = s.shots.findIndex(x => x.remote === row.id);
 

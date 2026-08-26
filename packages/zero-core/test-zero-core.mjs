@@ -874,6 +874,125 @@ section('the cursor moves per table, not per sync');
      '...and only now does its cursor move');
 }
 
+/* ============================ a row the handler could not place holds the cursor */
+/* The per-table cursor above fixed half of this and, by fixing it, hid the other
+ * half. "The handler returned something" was read as "the handler kept every
+ * row", and Bench's readers do not keep every row: a range session whose batch
+ * this device has never had hits `if (!batch) continue`, a shot whose session
+ * was therefore never stored hits `if (!s) continue`, and the stat object comes
+ * back {added:0,updated:0,removed:0} all the same. The cursor stepped over them
+ * PERMANENTLY. Load the batch on this phone tomorrow and the forty sessions
+ * fired with it are already behind the cursor: they are on the server, they are
+ * paid for, and this device will never be offered them again.
+ *
+ * So a handler may now say which rows it could not place, and the cursor stops
+ * short of the oldest of them. */
+section('a row the handler could not place holds the cursor short of it');
+{
+  const c = mkClient();
+  await c.signUp('deferred@example.com', 'pw');
+  const uid = c.getUser().id;
+
+  const at = {};
+  for (const [name, t] of [['early', 1_000_000], ['stuck', 2_000_000], ['late', 3_000_000]]) {
+    mock.state.clock = t;
+    mock.seed('firearms', { id: c.uuid(), user_id: uid, name, cartridge: '.308' });
+    at[name] = new Date(t).toISOString();
+  }
+
+  // The handler places everything except 'stuck' -- Bench's `if (!batch) continue`.
+  const holdStuck = (t, rows) => {
+    if (t !== 'firearms') return undefined;
+    const stat = { added: 0, updated: 0, removed: 0, deferred: [] };
+    for (const r of rows) {
+      if (r.name === 'stuck') stat.deferred.push(r.updated_at);
+      else stat.added++;
+    }
+    return stat;
+  };
+
+  await c.sync({ trigger: 'test', tables: ['firearms'], apply: holdStuck });
+  ok(c.cursors.firearms === at.early,
+     `the cursor stops below the row that could not be placed (${c.cursors.firearms})`);
+  ok(c.floors.firearms && c.floors.firearms.at === at.stuck && c.floors.firearms.tries === 1,
+     '...and records what it is waiting on, so the wait is visible');
+
+  /* The whole point: it is offered AGAIN. Note 'late' comes back too -- it is
+   * above the held row, and re-applying a row that is already local is a
+   * no-op upsert, which is the price of not losing the one below it. */
+  let offered = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       offered = rows.map(r => r.name); return { added: rows.length }; } });
+  ok(offered.includes('stuck'),
+     `the held row is offered again on the next sync (${offered.join(', ') || 'nothing'})`);
+  ok(c.cursors.firearms === at.late && !c.floors.firearms,
+     '...and once it is placed the cursor catches up and the floor clears');
+}
+
+/* --- negative control: the same run with the old "a stat means I took them all" --- */
+{
+  const c = mkClient();
+  await c.signUp('nocontrol@example.com', 'pw');
+  const uid = c.getUser().id;
+  mock.state.clock = 1_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'early', cartridge: '.308' });
+  mock.state.clock = 2_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'stuck', cartridge: '.308' });
+
+  // Reports nothing about what it dropped -- exactly what Bench's readers did.
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t) => (t === 'firearms' ? { added: 0, updated: 0, removed: 0 } : undefined) });
+  ok(c.cursors.firearms === new Date(2_000_000).toISOString(),
+     'negative control: a handler that reports no deferrals still advances to the newest row');
+
+  let offered = null;
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       offered = rows.length; return { added: rows.length }; } });
+  ok(offered === 0,
+     'negative control: and the row it silently dropped is never offered again — the bug, reproduced');
+}
+
+/* --- the escape hatch, which matters as much as the rule --- */
+/* Some rows are not late, they are never coming: a session for a batch that
+ * lived only on a phone the user has since wiped. Held strictly, one of those
+ * pins the cursor at 1970 and every sync re-downloads the whole table forever,
+ * on cellular, at a range. A floor that has not moved in DEFER_MAX_TRIES syncs
+ * is abandoned -- loudly. */
+{
+  const c = mkClient();
+  await c.signUp('forever@example.com', 'pw');
+  const uid = c.getUser().id;
+  mock.state.clock = 1_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'orphan', cartridge: '.308' });
+  mock.state.clock = 2_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'fine', cartridge: '.308' });
+
+  const events = [];
+  c.on(c.EVENTS.SYNC_DEFERRED, p => events.push(p));
+  const holdForever = (t, rows) => {
+    if (t !== 'firearms') return undefined;
+    return { added: 0, deferred: rows.filter(r => r.name === 'orphan').map(r => r.updated_at) };
+  };
+
+  for (let i = 0; i < 3; i++) await c.sync({ trigger: 'test', tables: ['firearms'], apply: holdForever });
+  /* 'orphan' is the oldest row there is, so there is nothing below it to
+   * commit to and the cursor is pinned at the epoch -- which is exactly the
+   * cost the escape hatch below exists to bound. */
+  ok(c.cursors.firearms < new Date(1_000_000).toISOString()
+     && c.floors.firearms && c.floors.firearms.tries === 3,
+     `three syncs in it is still holding, and the cursor has not passed the row (${c.cursors.firearms})`);
+  ok(events.length === 3 && events.every(e => !e.abandoned),
+     `each attempt is reported and none has given up yet (${events.length})`);
+
+  await c.sync({ trigger: 'test', tables: ['firearms'], apply: holdForever });
+  ok(events.length === 4 && events[3].abandoned === true,
+     'the fourth gives up rather than re-downloading the table forever');
+  ok(c.cursors.firearms === new Date(2_000_000).toISOString() && !c.floors.firearms,
+     '...and the cursor is released, so a permanently unplaceable row is bounded, not fatal');
+}
+
 /* ============================================================ event coverage */
 section('event coverage');
 {

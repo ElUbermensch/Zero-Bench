@@ -40,6 +40,7 @@ const ZeroCore = (() => {
     SYNC_CONFLICT:       'sync:conflict',       // { table, id, resolution }
     SYNC_DONE:           'sync:done',           // { pulled, pushed, conflicts, ms }
     SYNC_ERROR:          'sync:error',          // { phase, table, error }
+    SYNC_DEFERRED:       'sync:deferred',       // { table, at, tries, abandoned }
     OUTBOX_CHANGED:      'outbox:changed',      // { pending, rejected }
     OUTBOX_REJECTED:     'outbox:rejected',     // { table, ids, status, error }
     DATA_CHANGED:        'data:changed',        // { table, ids, origin }
@@ -149,6 +150,10 @@ const ZeroCore = (() => {
       cursors: ns + '.cursors',
       outbox:  ns + '.outbox',
       rejected:ns + '.rejected',
+      /* Deliberately absent from LEGACY below: a floor is a statement about
+       * rows THIS app could not place, and adopting another app's floors would
+       * hold a cursor back for rows this handler has no trouble with. */
+      floors:  ns + '.floors',
     };
     const LEGACY = { cursors: 'zerocore.cursors', outbox: 'zerocore.outbox',
                      rejected: 'zerocore.rejected' };
@@ -184,6 +189,10 @@ const ZeroCore = (() => {
     let cursors = store.get(K.cursors) || {};     // { table: iso-timestamp }
     let outbox  = store.get(K.outbox)  || [];     // [{ id, table, row, op, queuedAt }]
     let rejected = store.get(K.rejected) || [];   // dead-lettered writes, see pushTable
+    /* { table: { at: iso, tries: n } } -- the oldest row this app's apply
+     * handler pulled and could NOT place, and how many syncs in a row it has
+     * been stuck there. See commitCursor. */
+    let floors  = store.get(K.floors)   || {};
     /* Connectivity.
      *
      * This used to be read from navigator.onLine once, at construction, and
@@ -445,6 +454,8 @@ const ZeroCore = (() => {
       setSession(null, 'user');
       cursors = {};
       store.set(K.cursors, cursors);
+      floors = {};
+      store.set(K.floors, floors);
       if (headers) {
         try { await raw('/auth/v1/logout', { method: 'POST', headers }); }
         catch (e) { /* best effort: the local session is already gone */ }
@@ -543,12 +554,63 @@ const ZeroCore = (() => {
      * of pullTable because the decision to commit cannot be made until the
      * apply handler has said whether it understood the table -- and that
      * happens after the rows are in hand. */
-    function commitCursor(table, rows, since) {
+    /* `deferred` is the list of updated_at values for rows the handler pulled
+     * and could NOT place -- a session whose batch this device has never had,
+     * a shot whose session was therefore never stored. Returning a stat object
+     * says "I understood this table"; it does not say "I kept every row in it",
+     * and the two were conflated. Bench's readers skip rows they cannot place
+     * (`if (!batch) continue`), reported {added:0,updated:0,removed:0} anyway,
+     * and the cursor stepped over them PERMANENTLY: the batch arrives from the
+     * other device tomorrow and the sessions that belong to it are already on
+     * the wrong side of the cursor, so they are never offered again.
+     *
+     * So the cursor stops SHORT of the oldest row that could not be placed --
+     * "commit up to the first row I could not consume" -- and everything from
+     * there on is offered again next sync, by which time the batch may exist.
+     *
+     * The escape hatch matters as much as the rule. Some rows are not late,
+     * they are never coming: a session for a batch that lives only on a device
+     * the user has since wiped. Held strictly, one such row pins the cursor at
+     * 1970 and every sync re-downloads the entire table forever -- on cellular,
+     * at a range. So a floor that has not moved for DEFER_MAX_TRIES consecutive
+     * syncs is abandoned and the cursor advances past it, with an event so the
+     * skip is observable rather than silent. Three tries is a compromise, not a
+     * derivation: long enough that a batch arriving on the next sync is caught,
+     * short enough that the re-download is bounded. */
+    const DEFER_MAX_TRIES = 3;
+    const persistFloors = () => store.set(K.floors, floors);
+
+    function commitCursor(table, rows, since, deferred) {
       if (!rows || !rows.length) return;
       const from = since || cursors[table] || '1970-01-01T00:00:00Z';
       const newest = rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), from);
-      cursors[table] = newest;
-      store.set(K.cursors, cursors);
+      const advance = (to) => { cursors[table] = to; store.set(K.cursors, cursors); };
+
+      const oldest = (deferred || []).reduce(
+        (m, t) => (t && (m === null || t < m) ? t : m), null);
+
+      if (oldest === null) {                     // everything placed: full speed
+        if (floors[table]) { delete floors[table]; persistFloors(); }
+        return advance(newest);
+      }
+
+      const prev = floors[table];
+      const tries = (prev && prev.at === oldest) ? prev.tries + 1 : 1;
+      const abandoned = tries > DEFER_MAX_TRIES;
+      emit(EVENTS.SYNC_DEFERRED, { table, at: oldest, tries, abandoned });
+
+      if (abandoned) {
+        delete floors[table]; persistFloors();
+        return advance(newest);
+      }
+      floors[table] = { at: oldest, tries };
+      persistFloors();
+
+      /* Strictly BELOW the deferred row: the pull filter is `gt.`, so a cursor
+       * equal to it would exclude the very row being held for. Never below the
+       * cursor we came in with, so this can only ever stall -- never rewind. */
+      advance(rows.reduce(
+        (m, r) => (r.updated_at < oldest && r.updated_at > m ? r.updated_at : m), from));
     }
 
     async function pullTable(table, commit) {
@@ -583,10 +645,16 @@ const ZeroCore = (() => {
      */
     function reconcile(table, rows, apply) {
       const pending = new Set(outbox.filter(e => e.table === table).map(e => e.row.id));
-      const applied = [], skipped = [];
+      const applied = [], skipped = [], deferred = [];
       for (const r of rows) {
         if (pending.has(r.id)) {
           skipped.push(r.id);
+          /* Held rather than dropped. The local write wins for now and will be
+           * pushed, but if it dead-letters, the server's version is the only
+           * copy left -- and a cursor that stepped past it means this device
+           * never sees it again. The pending set empties on push (success or
+           * dead-letter alike), so this defers by at most a sync or two. */
+          if (r.updated_at) deferred.push(r.updated_at);
           emit(EVENTS.SYNC_CONFLICT, { table, id: r.id, resolution: 'kept-local-pending' });
           continue;
         }
@@ -594,12 +662,21 @@ const ZeroCore = (() => {
       }
       /* What the handler RETURNS decides whether the cursor may move. A
        * handler that does not know this table returns nothing, and rows it
-       * threw away must stay on the wrong side of the cursor. */
-      const consumed = apply ? apply(table, applied) : undefined;
+       * threw away must stay on the wrong side of the cursor.
+       *
+       * A handler that DOES know the table may still be unable to place some
+       * of its rows; it says so with a `deferred` array of their updated_at
+       * values. Omitting it keeps the old meaning -- "I took all of them" --
+       * so a handler that never defers needs no changes. */
+      const res = apply ? apply(table, applied) : undefined;
+      const consumed = res !== undefined && res !== null;
+      if (consumed && Array.isArray(res.deferred)) {
+        for (const t of res.deferred) if (t) deferred.push(t);
+      }
       if (applied.length) {
         emit(EVENTS.DATA_CHANGED, { table, ids: applied.map(r => r.id), origin: 'remote' });
       }
-      return { applied, skipped, consumed: consumed !== undefined && consumed !== null };
+      return { applied, skipped, deferred, consumed };
     }
 
     /* ---------------------------------------------------------------- push */
@@ -795,8 +872,8 @@ const ZeroCore = (() => {
             : cfg.tables;
           for (const t of wanted) {
             const rows = await pullTable(t, false);
-            const { applied, skipped, consumed } = reconcile(t, rows, o.apply);
-            if (consumed) commitCursor(t, rows);
+            const { applied, skipped, deferred, consumed } = reconcile(t, rows, o.apply);
+            if (consumed) commitCursor(t, rows, undefined, deferred);
             stats.pulled += applied.length;
             stats.conflicts += skipped.length;
           }
@@ -1363,7 +1440,13 @@ const ZeroCore = (() => {
           face: relay.face || null }
       : null);
 
-    function resetCursors() { cursors = {}; store.set(K.cursors, cursors); }
+    function resetCursors() {
+      cursors = {}; store.set(K.cursors, cursors);
+      /* Floors go with them: a floor is a position in a cursor's history, and
+       * keeping one against a cursor that has been rewound to 1970 would stall
+       * the re-pull it exists to allow. */
+      floors = {}; persistFloors();
+    }
 
     const instance = {
       EVENTS, TABLES,
@@ -1383,6 +1466,10 @@ const ZeroCore = (() => {
       uuid,
       get isOnline() { return isOnline(); },
       get cursors() { return Object.assign({}, cursors); },
+      /* Which tables are holding their cursor back, and for how long. A
+       * diagnostic: "Bench has 40 sessions it cannot file" is otherwise
+       * invisible until the user notices they are missing. */
+      get floors() { return JSON.parse(JSON.stringify(floors)); },
       get outbox() { return outbox.map(e => ({ table: e.table, id: e.row.id, op: e.op })); },
       _config: cfg,
     };

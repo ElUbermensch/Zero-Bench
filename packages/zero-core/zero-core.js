@@ -1474,6 +1474,38 @@ const ZeroCore = (() => {
       return { ok: true };
     }
 
+    /** Take one of your own shots back off the relay.
+     *
+     *  Stable shot numbers stop a deleted shot's ordinal being handed to the
+     *  next one, but they do not remove the row: the hole stays on the coach's
+     *  target and keeps being scored. On a 5-shot string that is the difference
+     *  between the coach reading 45 and the 48 the shooter actually shot, with
+     *  a deleted 6 plotted three inches out.
+     *
+     *  Fire and forget like the push, and for the same reason: the local
+     *  session is the system of record and a dead network must not block a
+     *  delete. The cost is that a failed retraction leaves a ghost -- which is
+     *  why the caller re-sends it on the next relay bind rather than firing
+     *  once and hoping. */
+    async function relayRetractShot(shotNo, isSighter) {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.role !== 'shooter') return { ok: false, reason: 'not-shooter' };
+      const uid = session && session.user && session.user.id;
+      if (!uid || !Number.isFinite(shotNo)) return { ok: false, reason: 'no-shot' };
+      const q = `/rest/v1/relay_shots?relay_id=eq.${encodeURIComponent(relay.id)}` +
+        `&user_id=eq.${encodeURIComponent(uid)}` +
+        `&shot_no=eq.${encodeURIComponent(String(shotNo))}` +
+        `&is_sighter=is.${isSighter ? 'true' : 'false'}`;
+      const res = await authed(q, { method: 'DELETE' });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.RELAY_ERROR, { phase: 'retract-shot', error });
+        return { ok: false, error };
+      }
+      pokeRelay();
+      return { ok: true };
+    }
+
     async function relaySend(body, kind) {
       if (!relay) return { ok: false, reason: 'no-relay' };
       const text = String(body || '').trim();
@@ -1561,7 +1593,7 @@ const ZeroCore = (() => {
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
-      relayPushShot, relaySend, relayInfo,
+      relayPushShot, relayRetractShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return isOnline(); },
       /* The TIMESTAMP each table is up to, which is what a cursor has always

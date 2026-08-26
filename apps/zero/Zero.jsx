@@ -60,6 +60,29 @@ const BUILTIN_TARGETS = [
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
+/* The next ordinal for a string. A shot's number is minted ONCE and kept, like
+ * its id: it is a fact about the shot, not about where the shot currently sits
+ * in an array. Deleting a shot leaves a gap, which is the honest record -- that
+ * shot was fired and then removed -- and, more to the point, stops the next
+ * shot inheriting a number that already belongs to a row on the server. */
+function nextShotNo(shots) {
+  let max = 0;
+  for (const sh of shots || []) {
+    if (sh && Number.isFinite(sh.shotNo) && sh.shotNo > max) max = sh.shotNo;
+  }
+  return max + 1;
+}
+
+/* Give every shot in a string a stable number, minting only for the ones that
+ * have none. Sessions logged before numbers existed are back-filled in firing
+ * order the first time anything needs them. */
+function numberShots(shots) {
+  const list = shots || [];
+  if (list.every(sh => !sh || Number.isFinite(sh.shotNo))) return list;
+  let next = nextShotNo(list);
+  return list.map(sh => (!sh || Number.isFinite(sh.shotNo) ? sh : { ...sh, shotNo: next++ }));
+}
+
 /* The calendar day where the shooter is standing.
  *
  * This was `new Date().toISOString()` sliced to ten characters in five places,
@@ -2740,6 +2763,38 @@ const ZeroCore = (() => {
       return { ok: true };
     }
 
+    /** Take one of your own shots back off the relay.
+     *
+     *  Stable shot numbers stop a deleted shot's ordinal being handed to the
+     *  next one, but they do not remove the row: the hole stays on the coach's
+     *  target and keeps being scored. On a 5-shot string that is the difference
+     *  between the coach reading 45 and the 48 the shooter actually shot, with
+     *  a deleted 6 plotted three inches out.
+     *
+     *  Fire and forget like the push, and for the same reason: the local
+     *  session is the system of record and a dead network must not block a
+     *  delete. The cost is that a failed retraction leaves a ghost -- which is
+     *  why the caller re-sends it on the next relay bind rather than firing
+     *  once and hoping. */
+    async function relayRetractShot(shotNo, isSighter) {
+      if (!relay) return { ok: false, reason: 'no-relay' };
+      if (relay.role !== 'shooter') return { ok: false, reason: 'not-shooter' };
+      const uid = session && session.user && session.user.id;
+      if (!uid || !Number.isFinite(shotNo)) return { ok: false, reason: 'no-shot' };
+      const q = `/rest/v1/relay_shots?relay_id=eq.${encodeURIComponent(relay.id)}` +
+        `&user_id=eq.${encodeURIComponent(uid)}` +
+        `&shot_no=eq.${encodeURIComponent(String(shotNo))}` +
+        `&is_sighter=is.${isSighter ? 'true' : 'false'}`;
+      const res = await authed(q, { method: 'DELETE' });
+      if (!res.ok) {
+        const error = await res.text().catch(() => '');
+        emit(EVENTS.RELAY_ERROR, { phase: 'retract-shot', error });
+        return { ok: false, error };
+      }
+      pokeRelay();
+      return { ok: true };
+    }
+
     async function relaySend(body, kind) {
       if (!relay) return { ok: false, reason: 'no-relay' };
       const text = String(body || '').trim();
@@ -2827,7 +2882,7 @@ const ZeroCore = (() => {
       signInAnonymously, isAnonymous, ensureIdentity,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
-      relayPushShot, relaySend, relayInfo,
+      relayPushShot, relayRetractShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return isOnline(); },
       /* The TIMESTAMP each table is up to, which is what a cursor has always
@@ -4671,11 +4726,33 @@ function App() {
   /* One shot, in the shape the relay wants. The call travels with it: the gap
    * between where a shooter said the sights were and where the hole is, is the
    * single most useful thing a coach reads off a live string. */
+  /* `sh.shotNo`, not the shot's position in the array.
+   *
+   * The number used to be `prior.filter(same sighter class).length + 1`, which
+   * is a fact about the array at push time rather than about the shot. Delete
+   * the third shot of a five-shot string and the array reindexes; the next shot
+   * fired is then numbered 5, and the relay upsert is keyed on
+   * (relay_id, user_id, shot_no, is_sighter) with merge-duplicates -- so it
+   * OVERWRITES the real shot 5 and returns 200. No 23505, no dead letter,
+   * nothing to notice.
+   *
+   * What the coach sees: 45 for a string the shooter shot 48, with a deleted 6
+   * still plotted three inches out, mean radius 2.14" against a real 0.3".
+   * And it is undetectable by inspection -- the relay row count still equals
+   * the local shot count, and the shot chips are renumbered by position, so
+   * they read a clean 1 2 3 4 5 with no gap. The only tell is that the
+   * overwritten shot's call marker vanishes, because merge-duplicates writes
+   * the incoming null over it.
+   *
+   * The non-relay sync path was fixed this way already (numbers minted once and
+   * kept, leaving an honest gap where a shot was removed); the relay path was
+   * missed. Whole-string numbering is safe against the relay's key because that
+   * key includes is_sighter, and the coach's chips are positional anyway. */
   const relayShotFor = (prior, sh, tgt) => {
     const p = shotXY(sh, tgt);
     const call = sh.callXY && typeof sh.callXY.x === 'number' ? sh.callXY : null;
     return {
-      shotNo: prior.filter(x => !!x.isSighter === !!sh.isSighter).length + 1,
+      shotNo: Number.isFinite(sh.shotNo) ? sh.shotNo : nextShotNo(prior),
       ring: sh.ring, isSighter: !!sh.isSighter, x: p.x, y: p.y,
       callX: call ? call.x : null, callY: call ? call.y : null,
       windCallMoa: Number.isFinite(sh.windCallMoa) ? sh.windCallMoa : null,
@@ -4688,9 +4765,16 @@ function App() {
    * an empty target to everyone who just arrived. */
   const bindRelay = (sess, tgt) => {
     setLiveSess(sess.id);
-    const prior = sess.shots || [];
-    prior.forEach((sh, i) =>
-      core.relayPushShot(relayShotFor(prior.slice(0, i), sh, tgt)));
+    /* Back-fill numbers before replaying. A session logged by an earlier build
+     * has shots with no `shotNo` at all, and pushing those would mint numbers
+     * from the array again -- the very thing this replaces. Numbering once and
+     * PERSISTING it means a rejoin after a dropped signal re-pushes the same
+     * numbers rather than a fresh set over the top of the old rows. */
+    const prior = numberShots(sess.shots || []);
+    if (prior !== (sess.shots || [])) {
+      saveSessions(sessions.map(s => (s.id === sess.id ? { ...s, shots: prior } : s)));
+    }
+    prior.forEach(sh => core.relayPushShot(relayShotFor(prior, sh, tgt)));
   };
 
   const goLive = async (sess, tgt, name) => {
@@ -4911,7 +4995,15 @@ function App() {
       session={sess} target={tgt} firearm={firearm} sessions={sessions} ammo={ammo}
       match={sess.matchId ? matches.find(m=>m.id===sess.matchId) : null}
       onBack={()=>{ setScreen('home'); setActiveSess(null); }}
-      onAddShot={sh=>{ const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...(s.shots||[]),sh]}:s); saveSessions(u); mirrorShot(sess, tgt, sh); }}
+      /* The number is minted HERE, once, and stored with the shot -- not
+         derived at push time from where the shot happens to sit in the array.
+         Both the sync push and the relay mirror read it, so the two can never
+         disagree about which shot is which. */
+      onAddShot={sh=>{
+        const sh2 = Number.isFinite(sh.shotNo) ? sh : { ...sh, shotNo: nextShotNo(sess.shots || []) };
+        const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...(s.shots||[]),sh2]}:s);
+        saveSessions(u); mirrorShot(sess, tgt, sh2);
+      }}
       /* A deleted shot has to be REMEMBERED, not merely dropped. Once the
          string is on the server, dropping it locally leaves the row there;
          the next pull hands Bench a hole the shooter deleted and the target
@@ -4927,6 +5019,16 @@ function App() {
           return { ...s, shots:(s.shots||[]).filter(sh=>sh.id!==sid), deletedShots: tomb };
         });
         saveSessions(u);
+        /* And take it off the relay, which stable numbers alone do not do.
+           Numbering stops the NEXT shot overwriting a live row; it does not
+           remove the hole the shooter just deleted. Left there, the coach keeps
+           scoring a shot that is not in the string -- 45 for a 48, with a
+           deleted 6 plotted three inches out and no way to tell from the
+           screen, because the chips renumber by position and show no gap. */
+        const gone = (sess.shots || []).find(sh => sh.id === sid);
+        if (liveSess === sess.id && core && gone && Number.isFinite(gone.shotNo)) {
+          try { core.relayRetractShot(gone.shotNo, !!gone.isSighter); } catch (e) {}
+        }
       }}
       /* Deleting the session takes its published score with it. Otherwise the
          entry stays live on a public board and the id that addressed it is

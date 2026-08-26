@@ -307,11 +307,27 @@ export function startMock(opts = {}) {
          * was gone, and a SELECT policy that hides tombstones cannot coexist
          * with the UPDATE that creates them. */
         if (req.method === 'DELETE' && t !== 'relay_participants') {
-          const idFilter = (u.searchParams.get('id') || '').replace(/^eq\./, '');
-          const row = table(t).get(idFilter);
+          /* Filter-general, not id-only. Retracting a relay shot is scoped by
+           * (relay_id, user_id, shot_no, is_sighter) -- there is no id to hand
+           * over, because the shooter knows the shot by its ordinal and not by
+           * the row it landed in. A mock that only understood `id=eq.` would
+           * answer that DELETE with 204 and remove nothing, and the ghost row
+           * it left behind is exactly the bug under test. */
+          const eqs = [], iss = [];
+          for (const [k, v] of u.searchParams) {
+            if (k === 'select' || k === 'limit' || k === 'offset' || k === 'order') continue;
+            if (v.startsWith('eq.')) eqs.push([k, v.slice(3)]);
+            else if (v.startsWith('is.')) iss.push([k, v.slice(3)]);
+          }
+          const matches = (r) =>
+            eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v) &&
+            iss.every(([k, v]) => (v === 'null' ? r[k] == null : !!r[k] === (v === 'true')));
           // Another account's row is invisible, not forbidden: PostgREST
           // answers a filter matching nothing with 204 and no rows removed.
-          if (row && row.user_id === a.userId) table(t).delete(idFilter);
+          const own = (r) => r.user_id === undefined || r.user_id === a.userId;
+          for (const [key, row] of [...table(t).entries()]) {
+            if (own(row) && matches(row)) table(t).delete(key);
+          }
           return json(res, 204, null);
         }
 

@@ -388,6 +388,71 @@ ok((await B.page.textContent('body')).includes('seen, dialling'),
    '...and their partner');
 
 /* ══════════════════════════════════════════════ leaving versus ending it */
+/* ══════════════════════ a shot deleted mid-string, and the one fired after it */
+/* The number used to be the shot's POSITION in the array at push time. Delete
+ * the third shot of a five-shot string and the array reindexes; the next shot
+ * fired is numbered 5, and the relay upsert is keyed on
+ * (relay_id, user_id, shot_no, is_sighter) with merge-duplicates -- so it
+ * OVERWRITES the real shot 5 and returns 200. No 23505, no dead letter.
+ *
+ * The coach then scores 45 for a string the shooter shot 48, with a deleted 6
+ * still plotted three inches out. And it is invisible: the relay row count
+ * still equals the local shot count, and the chips renumber by position, so
+ * they read a clean 1 2 3 4 5 with no gap.
+ *
+ * Two fixes, and this asserts both: numbers minted once and kept, so nothing is
+ * overwritten; and a retraction on delete, so the hole actually leaves the
+ * target rather than merely losing its claim on an ordinal. */
+section('a shot deleted mid-string, and the one fired after it');
+{
+  const aUid0 = mock.state.users.get('a@example.com').id;
+  const mine = () => shotsOn().filter(s => s.user_id === aUid0)
+    .sort((x, y) => x.shot_no - y.shot_no);
+
+  const before = mine();
+  ok(before.length === 5, `A's string is on the relay (${before.length})`);
+  const nos = before.map(s => s.shot_no);
+  ok(new Set(nos).size === 5, `...under five distinct numbers (${nos.join(', ')})`);
+
+  // Delete A's third shot through the real two-tap control.
+  const rows = A.page.locator('.shotrow, [class*="shot"]');
+  void rows;
+  await A.page.locator('button.delx').nth(2).click();
+  await A.page.waitForTimeout(200);
+  await A.page.locator('button:text-is("del")').first().click();
+  await A.page.waitForTimeout(1400);
+
+  const localAfterDel = await A.page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots.length);
+  ok(localAfterDel === 4, `the shot is gone locally (${localAfterDel})`);
+  ok(mine().length === 4,
+     `...and off the relay too — a deleted hole must not stay on the coach's paper (${mine().length})`);
+
+  // Now fire the next one. Under the old numbering this claimed a taken number.
+  await logShot(A.page);
+  await A.page.waitForTimeout(1500);
+
+  const after = mine();
+  ok(after.length === 5,
+     `the next shot is added rather than written over an existing row (${after.length})`);
+  ok(new Set(after.map(s => s.shot_no)).size === 5,
+     `...under its own number (${after.map(s => s.shot_no).join(', ')})`);
+  const localAfter = await A.page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots.length);
+  ok(after.length === localAfter,
+     `and the relay holds exactly the string the shooter has (${after.length} vs ${localAfter})`);
+
+  /* The specific row that used to be destroyed: the shot that was 5th before
+     the delete. Its call is the tell -- merge-duplicates wrote the incoming
+     null straight over it, so the coach's card silently dropped one call. */
+  const withCall = after.filter(s => s.call_x_in != null).length;
+  const localWithCall = await A.page.evaluate(() =>
+    JSON.parse(localStorage.getItem('sessions_v1'))[0].shots
+      .filter(sh => sh.callXY && typeof sh.callXY.x === 'number').length);
+  ok(withCall === localWithCall && localWithCall > 0,
+     `...and every call the shooter made is still attached (${withCall} of ${localWithCall})`);
+}
+
 section('leaving versus ending');
 await B.page.click('button:text-is("leave")');
 await B.page.waitForTimeout(3500);

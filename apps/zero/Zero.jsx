@@ -153,10 +153,36 @@ function clockToXY(h, m, r) {
  *     pad of 0.6" to avoid flickering when a shot sits right on a boundary).
  *   - If no shots, pick the step that contains the 10-ring comfortably.
  */
+/* A target is the paper a hole is measured against. Without at least one ring
+ * there is no scale, no scoring and nothing to draw, so a ringless target is
+ * not a degraded target -- it is not a target.
+ *
+ * The editor already refuses to save one: removeRing floors at one row and the
+ * save validates every diameter. But the backup importer and the cloud restore
+ * both wrote `customTargets` through untouched, and one ringless target there
+ * meant every session shot on it opened the crash screen, every time, forever
+ * -- while the app booted clean and the session list rendered fine, so nothing
+ * pointed at the target as the cause.
+ *
+ * Dropped rather than repaired, because there is no diameter to invent. It is
+ * a record that cannot mean anything; keeping a nameless placeholder in the
+ * target list would be worse than losing it. */
+function usableTargets(list) {
+  return (Array.isArray(list) ? list : []).filter(t =>
+    t && typeof t === 'object' &&
+    Array.isArray(t.rings) && t.rings.length > 0 &&
+    t.rings.every(r => r && Number.isFinite(Number(r.diam)) && Number(r.diam) > 0));
+}
+
 function steppedViewRadius(target, points, opts={}) {
   const pad = opts.pad ?? 0.6;
   const minStepIdx = opts.minStepIdx ?? 1; // never zoom tighter than this
-  const rings = target.rings;
+  const rings = (target && Array.isArray(target.rings)) ? target.rings : [];
+  /* Belt and braces behind usableTargets. Every write path is filtered now,
+   * but this is called from seven places and a crash here takes the whole app
+   * to the error boundary; an arbitrary radius takes one plot to something
+   * that looks wrong, which is a much better failure. */
+  if (!rings.length) return Math.max(pad, 1);
   // Build candidate radii from each ring's outer edge with overhang.
   const steps = rings.map(r => r.diam/2 * 1.10);
   steps.push(rings[rings.length-1].diam/2 * 1.05); // outer-edge ceiling
@@ -765,14 +791,32 @@ function parseBackupText(text) {
  * the one that makes two devices agree exactly, at the price of whatever is
  * only on this one.
  */
+/* Union by id -- and by remoteId, which is the half that stops a restore
+ * duplicating a record instead of recognising it.
+ *
+ * A local id is minted by whichever device first saw the record, and a record
+ * that arrived over the sync is minted fresh on EACH device: line 3267 pushes
+ * `{ id: uid(), remoteId: row.id, ... }` for every firearm pulled. So one rifle
+ * is `k3f9x1` on the phone and `p7a2m0` on the iPad -- two ids, one rifle.
+ * Restore the phone's backup onto the iPad and an id-only union sees two
+ * strangers and keeps both: the same rifle twice in every picker, with the
+ * session history split between them and no way to tell which is which.
+ *
+ * A remoteId is a server primary key, so a collision on one IS the same
+ * record. A record that has never synced has no remoteId and falls through to
+ * the id union exactly as before. */
 function mergeById(localList, incomingList) {
   const out = Array.isArray(localList) ? localList.slice() : [];
   const have = new Set(out.filter(r => r && r.id).map(r => r.id));
+  const haveRemote = new Set(out.map(r => r && r.remoteId).filter(Boolean));
   let added = 0, skipped = 0;
   for (const r of incomingList || []) {
     if (!r || typeof r !== 'object' || !r.id) continue;
     if (have.has(r.id)) { skipped++; continue; }
-    out.push(r); have.add(r.id); added++;
+    if (r.remoteId && haveRemote.has(r.remoteId)) { skipped++; continue; }
+    out.push(r); have.add(r.id);
+    if (r.remoteId) haveRemote.add(r.remoteId);
+    added++;
   }
   return { list: out, added, skipped };
 }
@@ -4367,7 +4411,7 @@ function App() {
         }
       } catch { bootFailed.current.sessions = true; }
       try { const r = await window.storage.get('matches_v1'); if (r) setMatches(JSON.parse(r.value)); } catch { bootFailed.current.matches = true; }
-      try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(JSON.parse(r.value)); } catch { bootFailed.current.customTargets = true; }
+      try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(usableTargets(JSON.parse(r.value))); } catch { bootFailed.current.customTargets = true; }
       try { const r = await window.storage.get('deleted_builtins_v1'); if (r) setDeletedBuiltins(JSON.parse(r.value)); } catch { bootFailed.current.deletedBuiltins = true; }
       try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(JSON.parse(r.value)); } catch { bootFailed.current.firearms = true; }
       try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(JSON.parse(r.value)); } catch { bootFailed.current.ammo = true; }
@@ -4463,8 +4507,9 @@ function App() {
     try { await window.storage.set('matches_v1', JSON.stringify(data)); } catch {}
   };
   const saveCustomTargets = async data => {
-    setCustomTargets(data);
-    try { await window.storage.set('custom_targets_v1', JSON.stringify(data)); } catch {}
+    const clean = usableTargets(data);
+    setCustomTargets(clean);
+    try { await window.storage.set('custom_targets_v1', JSON.stringify(clean)); } catch {}
   };
   const saveDeletedBuiltins = async data => {
     setDeletedBuiltins(data);

@@ -380,6 +380,77 @@ ok(again === merged.lots.length, `restoring twice changes nothing (${again} lots
 ok(/Already up to date/.test(await page.textContent('#view')),
    '...and says so rather than claiming to have restored again');
 
+/* ================== one remote row, two local ids, and a restore between them */
+/* The union was on the LOCAL id, and a local id is minted by whichever device
+ * first saw the record. A record that arrived over the per-record sync is
+ * minted fresh on each device -- `{ id: helpers.uid('se'), remote: row.id }` in
+ * sync.js -- so one Zero range session is `se8bikre2` on the tablet and
+ * `ser5iirkc` on the phone. Two ids, one row. Restore the phone's backup onto
+ * the tablet and the union saw two strangers and kept both.
+ *
+ * Not a cosmetic duplicate: rounds fired and brass wear are SUMS over the
+ * sessions on a batch, so a box of 100 with 20 fired read 60 left instead of
+ * 80, and the brass read twice the firings it had -- and brass wear is the
+ * number the retire warning is built on. Nothing healed it either: a later
+ * sync updates only the first match by remote id, and the duplicate carries
+ * mtime 0 so it is never pushed. Silent, local, permanent. */
+section('a session that came down the sync, restored from another device');
+{
+  const REMOTE = 'dddddddd-4444-4444-8444-dddddddddddd';
+  const OTHER  = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+  const seed = (localId) => page.evaluate(({ localId, REMOTE, OTHER }) => {
+    DB.batches = [{ id: 'ba_dup', serial: 'B26H01-01A', recipe: null, qty: 100,
+                    date: '2026-08-01', mtime: 0, syncedAt: Date.now() }];
+    DB.sessions = [
+      { id: localId, remote: REMOTE, batch: 'ba_dup', date: '2026-08-02', rounds: 20,
+        mtime: 0, syncedAt: Date.now() },
+      // A control that must still cross: a different row, not just a different id.
+      ...(localId === 'seA'
+        ? [{ id: 'seOnlyThere', remote: OTHER, batch: 'ba_dup', date: '2026-08-03',
+             rounds: 5, mtime: 0, syncedAt: Date.now() }]
+        : []),
+    ];
+    save();
+  }, { localId, REMOTE, OTHER });
+
+  // The other device backs up, holding the row under ITS local id.
+  await seed('seA');
+  await openData();
+  await page.click('button[data-act="cbUp"]');
+  await page.waitForTimeout(900);
+
+  // This device holds the same remote row under a local id of its own.
+  await page.evaluate(() => {
+    const keep = localStorage.getItem('zerocore.session');
+    localStorage.clear();
+    if (keep) localStorage.setItem('zerocore.session', keep);
+  });
+  await page.reload();
+  await page.waitForTimeout(700);
+  await seed('seB');
+
+  await openData();
+  await page.click('button[data-act="cbMerge"]');
+  await page.waitForTimeout(900);
+
+  const after = await page.evaluate(() => ({
+    ids: DB.sessions.map(s => s.id),
+    remotes: DB.sessions.map(s => s.remote),
+    fired: roundsFired(DB.batches[0]),
+    left: roundsLeft(DB.batches[0]),
+  }));
+  ok(after.remotes.filter(r => r === REMOTE).length === 1,
+     `the same remote row arrives under a different local id and is recognised (${after.ids.join(', ')})`);
+  ok(after.ids.includes('seB') && !after.ids.includes('seA'),
+     '...with the local copy kept, which is the rule the restore has always followed');
+  ok(after.fired === 25 && after.left === 75,
+     `so the rounds fired are counted once (${after.fired} fired, ${after.left} left of 100)`);
+  /* The control, without which the fix could be "drop everything": a row this
+   * device genuinely has not seen still crosses. */
+  ok(after.remotes.includes(OTHER),
+     '...while a row this device has never seen still comes down');
+}
+
 section('hygiene');
 ok(errors.length === 0, 'no JS errors' + (errors.length ? ' — ' + errors.slice(0, 3).join(' | ') : ''));
 

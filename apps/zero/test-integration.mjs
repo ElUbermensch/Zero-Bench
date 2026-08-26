@@ -778,6 +778,50 @@ console.log('\ncrash floor');
        '...and the session itself survives — losing the string beats losing the session');
   }
 
+  /* A target with no rings, which is the same class of bug reached a different
+   * way. The editor cannot produce one -- removeRing floors at one row and the
+   * save refuses a ring with no diameter -- but the backup importer and the
+   * cloud restore both wrote `customTargets` through unvalidated, and a target
+   * is the scale every hole is measured against. `rings[rings.length-1].diam`
+   * on an empty array threw out of GroupPlot, so EVERY session shot on that
+   * paper opened the crash screen, every time, forever. The app booted clean
+   * and the session list rendered fine, so nothing pointed at the target.
+   *
+   * Dropped on the way in rather than repaired: there is no diameter to
+   * invent, and `getTarget` already falls back to a real target for a session
+   * whose paper is gone. A mis-scaled plot beats a dead app. */
+  await page.evaluate(() => {
+    localStorage.setItem('custom_targets_v1',
+      JSON.stringify([{ id: 't_bad', name: 'RINGLESS', rings: [] }]));
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'ringless', name: 'shot on ringless paper', date: '2026-08-13', type: 'Score',
+      targetId: 't_bad', rangeYards: 100, rifleId: '', ammoId: '', ts: 1, matchId: null,
+      shots: [
+        { id: 'r1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 },
+        { id: 'r2', ring: '9', clockH: 3, clockM: 0, xy: { x: 0.42, y: 0 }, elev: 0, wind: 0 },
+      ] }]));
+  });
+  await page.reload();
+  await page.waitForTimeout(900);
+  {
+    ok(!/hit a bug and stopped/.test(await page.textContent('body')),
+       'a ringless target does not crash the app at boot');
+    await openMore('Targets');
+    ok(!/RINGLESS/.test(await page.textContent('body')),
+       '...because it is dropped on the way in — a target with no rings has no scale to measure against');
+
+    // The crash was on OPENING the session, which is where the plot is drawn.
+    await page.click('.tabbar button:has-text("Sessions")');
+    await page.waitForTimeout(300);
+    await page.getByText('shot on ringless paper').first().click();
+    await page.waitForTimeout(700);
+    const b = await page.textContent('body');
+    ok(!/hit a bug and stopped/.test(b),
+       '...and the session shot on it opens rather than landing on the boundary');
+    ok(/0\.42|MOA|ES/.test(b),
+       '...with its group still measured, against the target it fell back to');
+  }
+
   /* Then the floor itself, with a corruption nothing guards: an ammo list
    * holding a null. The boundary is what stands between that and a white
    * screen with a season behind it. */

@@ -222,6 +222,18 @@ function loadDb() {
   db.meta = Object.assign(emptyDb().meta, raw.meta || {});
   db.meta.schema = SCHEMA;
   for (const c of COLLECTIONS) if (!Array.isArray(db[c])) db[c] = [];
+  /* A brass lot's marks are the paint on the case neck, and a lot recorded
+   * before the marking scheme existed -- or restored from a backup written
+   * then, or imported from a file -- has no `marks` key at all. Most readers
+   * already write `(l.marks || {})`; Identify did not, and `l.marks[p.id]`
+   * threw on the first swatch tap. Because it throws inside a `.filter` over
+   * the whole collection, ONE such lot made Identify a dead control for every
+   * lot -- and it threw out of the render, so the previous screen simply
+   * stayed put and nothing happened at all. Normalising here fixes it for
+   * every reader at once rather than one call site at a time. */
+  for (const l of db.brassLots) {
+    if (l && (!l.marks || typeof l.marks !== 'object')) l.marks = {};
+  }
   if (!db.meta.scheme || !Array.isArray(db.meta.scheme.positions)) {
     db.meta.scheme = JSON.parse(JSON.stringify(DEFAULT_SCHEME));
   }
@@ -1620,7 +1632,11 @@ VIEWS.lookup = () => {
   }).join('');
 
   const matches = DB.brassLots.filter(l =>
-    sc.positions.every(p => st[p.id] === '?' || (l.marks[p.id] || null) === st[p.id]));
+    /* `(l.marks || {})`, not `l.marks`: loadDb normalises this on boot, but a
+     * cloud restore and a file import both merge records into the live DB
+     * without going back through it, so an unmarked lot can be on screen
+     * before the next reload. */
+    sc.positions.every(p => st[p.id] === '?' || ((l.marks || {})[p.id] || null) === st[p.id]));
   const any = sc.positions.some(p => st[p.id] !== '?');
 
   let result = '';
@@ -2647,17 +2663,42 @@ function deviceLabel() {
 
 /* Union by id, per collection. The dumbest rule that cannot destroy anything:
  * a record whose id is already here is left exactly as it is, and a record the
- * snapshot has never heard of is untouched. */
+ * snapshot has never heard of is untouched.
+ *
+ * ...and by REMOTE id as well, which is not a refinement but a correctness
+ * fix. A local id is minted by whichever device first saw the record, and a
+ * record that arrived over the per-record sync is minted fresh on each device:
+ * `DB.sessions.push({ id: helpers.uid('se'), remote: row.id, ... })` in
+ * sync.js. So one Zero range session becomes `se8bikre2` on the tablet and
+ * `ser5iirkc` on the phone -- two ids, one row. Restore the phone's backup
+ * onto the tablet and the id union sees two strangers and keeps both.
+ *
+ * That is not a cosmetic duplicate. `roundsFired` and `brassLife` SUM sessions
+ * by batch, so a box of 100 with 20 fired reads 60 left instead of 80, and the
+ * brass reads 0.40 firings instead of 0.20 -- and brass wear is what drives the
+ * retire warning, so the wrong number is the one with a safety case attached.
+ * Nothing heals it either: a later sync updates only the first match by remote
+ * id, and the duplicate carries `mtime: 0` so it is never pushed. Silent,
+ * local, and permanent.
+ *
+ * A remote id is a server primary key, so a collision on one IS the same
+ * record. A record that has never synced has no `remote` and falls through to
+ * the id union exactly as before. */
 function mergeSnapshot(db, incoming) {
   const stats = {};
   for (const k of COLLECTIONS) {
     if (!Array.isArray(incoming[k])) continue;
-    const have = new Set((db[k] || []).filter(r => r && r.id).map(r => r.id));
+    const rows = (db[k] || []).filter(r => r && r.id);
+    const have = new Set(rows.map(r => r.id));
+    const haveRemote = new Set(rows.map(r => r.remote).filter(Boolean));
     let added = 0;
     for (const r of incoming[k]) {
       if (!r || typeof r !== 'object' || !r.id || have.has(r.id)) continue;
+      if (r.remote && haveRemote.has(r.remote)) continue;   // same row, other device's id
       db[k] = db[k] || [];
-      db[k].push(r); have.add(r.id); added++;
+      db[k].push(r); have.add(r.id);
+      if (r.remote) haveRemote.add(r.remote);
+      added++;
     }
     if (added) stats[k] = added;
   }

@@ -1826,6 +1826,69 @@ section('the build says which build it is');
      `and the query does not move the scope, which comes from the path (${scope})`);
 }
 
+/* ================================ Identify survives a lot with no markings */
+/* `l.marks[p.id]` on a lot that has no `marks` key at all. A lot recorded
+ * before the marking scheme existed, or restored from a backup written then,
+ * or imported from a file -- none of those paths validate the record, and
+ * `migrate` backfills `anneals` and `annealEvery` but never `marks`.
+ *
+ * It did not throw on load: every position starts on '?', which short-circuits
+ * before the access, so the screen painted and the counter read "2 of 2 match".
+ * It threw on the first swatch tap -- the actual Identify gesture -- out of a
+ * `.filter` over the WHOLE collection, so one bad lot killed matching for
+ * every lot. And because the throw escaped before `innerHTML` was assigned,
+ * the previous screen stayed put: no error, no crash screen, just a swatch
+ * that would not light up. A dead control is the worst kind of bug to report,
+ * because there is nothing to report.
+ *
+ * Its own context: this seeds a deliberately malformed database, and the
+ * sections after this one read the bench the main page has been building. */
+section('identify, with a lot that predates the marking scheme');
+{
+  const c = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const p = await c.newPage();
+  const thrown = [];
+  p.on('pageerror', e => thrown.push(e.message));
+  await p.goto(BASE);
+  await p.evaluate(() => {
+    localStorage.setItem('reloading.Bench', JSON.stringify({
+      meta: { schema: 4 },
+      cartridges: [], firearms: [], componentLots: [], recipes: [], batches: [], sessions: [],
+      brassLots: [
+        // The one that predates marking. No `marks` key at all.
+        { id: 'bl_old', name: 'Lapua 6.5CM', qty: 100, headstamp: 'LAPUA', acquired: '2024-01-01' },
+        { id: 'bl_new', name: 'Peterson 6.5CM', qty: 100, headstamp: 'PETERSON',
+          acquired: '2025-01-01', marks: { neck: 'R', head: 'K' } },
+      ],
+    }));
+  });
+  await p.reload();
+  await p.waitForTimeout(500);
+  await p.click('[data-act="tab"][data-arg="lookup"]');
+  await p.waitForTimeout(250);
+
+  ok(thrown.length === 0, 'the Identify screen paints with an unmarked lot on the bench');
+
+  // The gesture itself: a red neck band. bl_new matches, bl_old must not.
+  await p.click('[data-act="pick"][data-pos="neck"][data-val="R"]');
+  await p.waitForTimeout(250);
+  ok(thrown.length === 0,
+     `tapping a swatch does not throw (${thrown[0] || 'no error'})`);
+  const body = await p.textContent('body');
+  ok(/1 of 2 match/.test(body) && /PETERSON/.test(body),
+     'the marked lot is identified — the control is live, not dead');
+  ok(!/LAPUA/.test(body),
+     '...and the unmarked lot does not match a colour it was never painted');
+
+  /* And the source, not just the symptom: boot normalises the record, so every
+   * other reader of `marks` gets an object rather than each one guarding. */
+  ok(await p.evaluate(() => {
+    const l = DB.brassLots.find(x => x.id === 'bl_old');
+    return !!l && !!l.marks && typeof l.marks === 'object';
+  }), 'and the lot itself was normalised on load, rather than guarded one call site at a time');
+  await c.close();
+}
+
 /* ============================ the date defaults to the loader's day, not UTC's */
 /* `today()` was the UTC day, and it defaults the date on every batch, session
  * and brass event. West of UTC that is wrong for the entire evening. The

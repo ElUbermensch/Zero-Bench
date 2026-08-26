@@ -485,6 +485,31 @@ section('a second device, same account');
   ok(twice === after.sessions.length, `restoring twice changes nothing (${twice})`);
   ok(/Already up to date/.test(await zero.textContent('body')),
      '...and says so rather than claiming to have restored again');
+
+  /* And the case idempotence-by-local-id cannot see: the SAME rifle under a
+   * different local id. A local id is minted by whichever device first saw the
+   * record, and a rifle pulled from the server is minted fresh on each device
+   * -- `{ id: uid(), remoteId: row.id, ... }`. So one Bergara is `k3f9x1` here
+   * and `p7a2m0` on the iPad. Restore across and an id-only union kept both:
+   * the same rifle twice in every picker, with the session history split
+   * between them and nothing on screen to say which is which. */
+  const rid = after.firearms[0].remoteId;
+  ok(!!rid, 'the restored rifle carries the server id it was pulled under');
+  await zero.evaluate(({ rid }) => {
+    const f = JSON.parse(localStorage.getItem('rifles_v1'))[0];
+    localStorage.setItem('rifles_v1', JSON.stringify([{ ...f, id: 'minted-on-this-device' }]));
+    void rid;
+  }, { rid });
+  await zero.reload();
+  await zero.waitForTimeout(900);
+  await zeroMore('Backup & data');
+  await zero.click('button:has-text("⤓ Restore")');
+  await zero.waitForTimeout(900);
+  const rifles = await zero.evaluate(() => JSON.parse(localStorage.getItem('rifles_v1') || '[]'));
+  ok(rifles.length === 1,
+     `the same rifle under another device's local id is recognised, not duplicated (${rifles.map(f => f.id).join(', ')})`);
+  ok(rifles[0].id === 'minted-on-this-device',
+     '...with the local copy kept, which is the rule the restore has always followed');
 }
 
 /* ==================================================================== hygiene */

@@ -1883,10 +1883,32 @@ const ZeroCore = (() => {
     const DEFER_MAX_TRIES = 3;
     const persistFloors = () => store.set(K.floors, floors);
 
+    /* ------------------------------------------------- where a pull is up to
+     *
+     * A position, not a timestamp. `updated_at` is not unique and cannot be
+     * made unique: `now()` is the TRANSACTION timestamp, so every row of one
+     * bulk push carries the identical stamp -- seven firearms in one POST come
+     * back with one distinct value between them. Ordering by it alone is a
+     * partial order, and paging through a partial order is where rows go
+     * missing.
+     *
+     * `(updated_at, id)` is total, because `id` is the primary key on every
+     * synced table. Stored cursors from before this change are bare strings;
+     * they read as `(that timestamp, '')`, which re-offers the rows sharing
+     * that stamp exactly once and then behaves. */
+    const EPOCH = { at: '1970-01-01T00:00:00Z', id: '' };
+    const posOf = (v) => (v && typeof v === 'object')
+      ? { at: v.at || EPOCH.at, id: v.id || '' }
+      : (typeof v === 'string' && v ? { at: v, id: '' } : EPOCH);
+    const posCmp = (a, b) =>
+      a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    const posOfRow = (r) => ({ at: r.updated_at, id: String(r.id == null ? '' : r.id) });
+
     function commitCursor(table, rows, since, deferred) {
       if (!rows || !rows.length) return;
-      const from = since || cursors[table] || '1970-01-01T00:00:00Z';
-      const newest = rows.reduce((m, r) => (r.updated_at > m ? r.updated_at : m), from);
+      const from = posOf(since || cursors[table]);
+      const newest = rows.reduce(
+        (m, r) => (posCmp(posOfRow(r), m) > 0 ? posOfRow(r) : m), from);
       const advance = (to) => { cursors[table] = to; store.set(K.cursors, cursors); };
 
       const oldest = (deferred || []).reduce(
@@ -1909,20 +1931,54 @@ const ZeroCore = (() => {
       floors[table] = { at: oldest, tries };
       persistFloors();
 
-      /* Strictly BELOW the deferred row: the pull filter is `gt.`, so a cursor
-       * equal to it would exclude the very row being held for. Never below the
-       * cursor we came in with, so this can only ever stall -- never rewind. */
-      advance(rows.reduce(
-        (m, r) => (r.updated_at < oldest && r.updated_at > m ? r.updated_at : m), from));
+      /* Strictly BELOW the deferred row -- and below every row that shares its
+       * stamp, since a handler reports the timestamp it could not place and
+       * not which of the rows at that timestamp it was. Re-offering the whole
+       * tie group is the safe direction: every apply handler merges by remote
+       * id and is idempotent, so a row delivered twice costs nothing and a row
+       * skipped once is gone for good.
+       *
+       * Floored at the cursor we came in with, so this can only ever stall --
+       * never rewind. */
+      const bar = { at: oldest, id: '' };
+      advance(rows.reduce((m, r) => {
+        const p = posOfRow(r);
+        return (posCmp(p, bar) < 0 && posCmp(p, m) > 0) ? p : m;
+      }, from));
     }
 
     async function pullTable(table, commit) {
-      const since = cursors[table] || '1970-01-01T00:00:00Z';
-      let offset = 0, all = [];
+      const since = posOf(cursors[table]);
+      /* A KEYSET walk, not limit/offset.
+       *
+       * OFFSET is only sound over a result set whose ordering holds still for
+       * the whole walk, and this one does not: `set_updated_at` re-stamps an
+       * edited row, which moves it to the END of the ascending order, and
+       * everything after it shifts down one slot -- so the row sitting on the
+       * next offset boundary is stepped over. The cursor then advances to the
+       * newest row the pull DID return, and `gt.` excludes the skipped one
+       * forever. Reproduced with six rows and one concurrent edit: page 1 got
+       * s1,s2, the edit moved s2, page 2 started at s4, and s3 was never seen
+       * again by that device.
+       *
+       * It is not an everyday-sync bug -- the second page is only reached when
+       * a table has more than a page of rows newer than the cursor, so: a first
+       * sync on a new phone, a restore, a reset, or a table held behind a
+       * deferred floor. Which is to say, exactly the moments a shooter is
+       * watching a year of data come down and counting on all of it.
+       *
+       * The deferred floor does NOT cover this. A floor can only hold back a
+       * row the handler saw and refused; a row lost to the offset window never
+       * reaches the handler at all.
+       *
+       * PostgREST has no row-value comparison, so `(updated_at, id) > (T, ID)`
+       * is spelled as the equivalent disjunction. */
+      let walk = since, all = [];
       for (;;) {
+        const at = encodeURIComponent(walk.at), id = encodeURIComponent(walk.id);
         const q = `/rest/v1/${table}` +
-          `?select=*&updated_at=gt.${encodeURIComponent(since)}` +
-          `&order=updated_at.asc&limit=${cfg.pageSize}&offset=${offset}`;
+          `?select=*&or=(updated_at.gt.${at},and(updated_at.eq.${at},id.gt.${id}))` +
+          `&order=updated_at.asc,id.asc&limit=${cfg.pageSize}`;
         const res = await authed(q, { method: 'GET' });
         if (!res.ok) {
           const error = await res.text().catch(() => '');
@@ -1932,13 +1988,19 @@ const ZeroCore = (() => {
         const page = await res.json();
         all = all.concat(page);
         if (page.length < cfg.pageSize) break;
-        offset += cfg.pageSize;
+        const last = page[page.length - 1];
+        const next = posOfRow(last);
+        /* A server that ignores the keyset would hand back the same page
+         * forever. Bail rather than spin: the rows already in hand are still
+         * applied, and the cursor simply does not advance past them. */
+        if (posCmp(next, walk) <= 0) break;
+        walk = next;
       }
 
       // Advance the cursor to the newest row the SERVER actually returned.
       // Using a local timestamp here loses every row written mid-sync.
       if (all.length && commit !== false) commitCursor(table, all, since);
-      emit(EVENTS.SYNC_PULLED, { table, rows: all, cursor: cursors[table] || since });
+      emit(EVENTS.SYNC_PULLED, { table, rows: all, cursor: posOf(cursors[table] || since).at });
       return all;
     }
 
@@ -2768,7 +2830,17 @@ const ZeroCore = (() => {
       relayPushShot, relaySend, relayInfo,
       uuid,
       get isOnline() { return isOnline(); },
-      get cursors() { return Object.assign({}, cursors); },
+      /* The TIMESTAMP each table is up to, which is what a cursor has always
+       * meant to a caller. Internally it is a `(updated_at, id)` position --
+       * see pullTable -- but the id half is a tiebreaker for paging, not
+       * information anyone outside asked for. */
+      get cursors() {
+        const out = {};
+        for (const t of Object.keys(cursors)) out[t] = posOf(cursors[t]).at;
+        return out;
+      },
+      /* The full positions, for anything that needs to resume a walk. */
+      get cursorPositions() { return JSON.parse(JSON.stringify(cursors)); },
       /* Which tables are holding their cursor back, and for how long. A
        * diagnostic: "Bench has 40 sessions it cannot file" is otherwise
        * invisible until the user notices they are missing. */

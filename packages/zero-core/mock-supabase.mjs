@@ -351,9 +351,49 @@ export function startMock(opts = {}) {
 
         if (req.method === 'GET') {
           state.hits.pull[t] = (state.hits.pull[t] || 0) + 1;
+          /* A seam for the one thing a paged pull has to survive and cannot be
+           * tested without: the table CHANGING between two pages of the same
+           * walk. Called before the rows are read, so a hook can re-stamp or
+           * insert exactly as another device would mid-sync. */
+          if (typeof state.onPull === 'function') {
+            try { state.onPull(t, u); } catch (e) { /* a hook's problem */ }
+          }
           const gt = (u.searchParams.get('updated_at') || '').replace(/^gt\./, '');
           const limit = parseInt(u.searchParams.get('limit') || '1000', 10);
           const offset = parseInt(u.searchParams.get('offset') || '0', 10);
+
+          /* The compound keyset the pull walks with:
+           *   or=(updated_at.gt.T,and(updated_at.eq.T,id.gt.ID))
+           * PostgREST has no row-value comparison, so `(updated_at, id) > (T,
+           * ID)` is spelled as that disjunction. Modelled here because a mock
+           * that ignored it would answer every keyset page with the whole table
+           * and the client would look correct while asking for something the
+           * real server narrows -- which is precisely the class of mistake the
+           * `eq` handling below was added to stop. */
+          const orRaw = u.searchParams.get('or') || '';
+          const ks = /^\(updated_at\.gt\.([^,]+),and\(updated_at\.eq\.([^,]+),id\.gt\.([^)]*)\)\)$/
+            .exec(orRaw);
+          const keyset = ks ? { at: ks[1], id: ks[3] } : null;
+          const afterKeyset = (r) => !keyset ||
+            r.updated_at > keyset.at ||
+            (r.updated_at === keyset.at && String(r.id == null ? '' : r.id) > keyset.id);
+
+          /* `order=updated_at.asc,id.asc` is a TOTAL order; `order=updated_at
+           * .asc` alone is not, because updated_at defaults to now() -- the
+           * transaction timestamp -- so a bulk insert stamps every row it
+           * writes identically. Sorting by the declared columns rather than
+           * assuming one keeps that distinction visible. */
+          const orderBy = (u.searchParams.get('order') || '').split(',')
+            .map(s => s.trim()).filter(Boolean)
+            .map(s => { const [col, dir] = s.split('.'); return { col, desc: dir === 'desc' }; });
+          const byOrder = (x, y) => {
+            for (const { col, desc } of orderBy) {
+              const a2 = x[col], b2 = y[col];
+              if (a2 === b2) continue;
+              return (a2 < b2 ? -1 : 1) * (desc ? -1 : 1);
+            }
+            return 0;
+          };
 
           // v_leaderboard is a view: synthesize the entries+profiles join,
           // exactly like the Postgres definition (left join, coalesce anon,
@@ -392,8 +432,15 @@ export function startMock(opts = {}) {
           let rows = [...table(t).values()]
             .filter(r => isPublic || r.user_id === a.userId)   // RLS stand-in
             .filter(r => !gt || r.updated_at > gt)
+            .filter(afterKeyset)
             .filter(r => eqs.every(([k, v]) => String(r[k] == null ? '' : r[k]) === v))
-            .sort((x, y) => (x.updated_at < y.updated_at ? -1 : 1));
+            .sort(orderBy.length
+              ? byOrder
+              /* No `order` asked for: deliberately NOT a stable sort by
+               * updated_at. Postgres gives no ordering guarantee without one,
+               * and a mock that quietly provides a consistent one hides every
+               * bug that depends on not having it. */
+              : ((x, y) => (x.updated_at < y.updated_at ? -1 : 1)));
           /* A view over a table, not a second store: `bytes` is derived and
            * `payload` is absent, which is the whole reason the view exists. */
           if (t === 'v_account_backups') {

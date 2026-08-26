@@ -1049,6 +1049,103 @@ section('a row the handler could not place holds the cursor short of it');
      '...and the cursor is released, so a permanently unplaceable row is bounded, not fatal');
 }
 
+/* ================== paging through a table that is being written underneath */
+/* The pull used to page with `limit` and `offset`, which is sound only over a
+ * result set whose ordering holds still for the whole walk. It does not:
+ * set_updated_at re-stamps an edited row, which moves it to the END of an
+ * ascending order, and everything after it shifts down a slot -- so the row
+ * sitting on the next offset boundary is stepped over. The cursor then advances
+ * to the newest row the pull DID return, and `gt.` excludes the skipped one
+ * forever. Not "eventually consistent": gone, for that device.
+ *
+ * The second page is only reached when a table has more than a page of rows
+ * newer than the cursor -- a first sync on a new phone, a restore, a reset.
+ * Which is to say, exactly the moments a shooter is watching a year of data
+ * come down and counting on all of it. */
+section('paging a table that changes underneath the walk');
+{
+  const c = mkClient(undefined, { pageSize: 2 });   // three pages of two
+  await c.signUp('paging@example.com', 'pw');
+  const uid = c.getUser().id;
+
+  const ids = [];
+  for (let i = 1; i <= 6; i++) {
+    mock.state.clock = 10_000_000 + i * 1000;
+    const id = c.uuid();
+    ids.push(id);
+    mock.seed('firearms', { id, user_id: uid, name: `rifle ${i}`, cartridge: '.308' });
+  }
+
+  /* Another device edits rifle 2 between page one and page two, exactly as a
+   * second phone syncing at the same moment would. Re-stamping moves it to the
+   * end of the order, which is what shifts everything below it up a slot. */
+  let pulls = 0;
+  mock.state.onPull = (t) => {
+    if (t !== 'firearms') return;
+    // On the request for page TWO: page one has been served, page two has not.
+    if (++pulls !== 2) return;
+    mock.state.clock = 11_000_000;
+    const row = mock.state.rows.get('firearms').get(ids[1]);
+    row.updated_at = new Date(mock.state.clock).toISOString();
+  };
+
+  let saw = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       saw = saw.concat(rows.map(r => r.name)); return { added: rows.length }; } });
+  mock.state.onPull = null;
+
+  const missing = ['rifle 1', 'rifle 3', 'rifle 4', 'rifle 5', 'rifle 6']
+    .filter(n => !saw.includes(n));
+  ok(missing.length === 0,
+     `a row re-stamped mid-walk does not push another off the page (missing: ${missing.join(', ') || 'none'})`);
+
+  // And the harder half: nothing is owed afterwards either.
+  let later = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       later = rows.map(r => r.name); return { added: rows.length }; } });
+  ok(later.length === 0,
+     `and the walk finished — nothing is still owed after it (${later.join(', ') || 'nothing'})`);
+}
+
+/* --- the tie group, which is not an edge case but the normal case --- */
+/* `updated_at` defaults to now(), and now() is the TRANSACTION timestamp, so
+ * every row of one bulk push carries an identical stamp. Ordering by it alone
+ * is a partial order, and a page boundary inside a tie group has no defined
+ * position to resume from: a naive `gt.<last stamp>` skips the rest of the
+ * group, and `gte.` returns the same page forever. */
+{
+  const c = mkClient(undefined, { pageSize: 2 });
+  await c.signUp('ties@example.com', 'pw');
+  const uid = c.getUser().id;
+
+  mock.state.clock = 20_000_000;                   // ONE stamp for all five
+  const names = [];
+  for (let i = 1; i <= 5; i++) {
+    names.push(`tied ${i}`);
+    mock.seed('firearms', { id: c.uuid(), user_id: uid, name: `tied ${i}`, cartridge: '.308' });
+  }
+
+  let saw = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       saw = saw.concat(rows.map(r => r.name)); return { added: rows.length }; } });
+  const stamps = new Set([...mock.state.rows.get('firearms').values()]
+    .filter(r => /^tied /.test(r.name)).map(r => r.updated_at));
+  ok(stamps.size === 1,
+     `five rows written together share one timestamp (${stamps.size} distinct)`);
+  ok(names.every(n => saw.includes(n)) && saw.length === 5,
+     `a tie group larger than a page is walked exactly once (${saw.length} of 5, ${saw.join(', ')})`);
+
+  let later = [];
+  await c.sync({ trigger: 'test', tables: ['firearms'],
+                 apply: (t, rows) => { if (t !== 'firearms') return undefined;
+                                       later = rows.map(r => r.name); return { added: rows.length }; } });
+  ok(later.length === 0,
+     `...and does not repeat forever, which is what gte. would do (${later.length} again)`);
+}
+
 /* ============================================================ event coverage */
 section('event coverage');
 {

@@ -206,6 +206,44 @@ begin
     '...and says how many holes are on file, so a client knows whether a plot is drawable');
 end $$;
 
+-- ============================================ the order the pull walks in (0013)
+-- The client pages with a keyset on (updated_at, id) rather than LIMIT/OFFSET,
+-- because OFFSET over a table being written underneath skips rows permanently.
+-- Two things have to be true for that walk to be sound, and both are properties
+-- of the database rather than the client, so they are pinned here.
+do $$
+declare n integer; d integer;
+begin
+  -- 1. updated_at is NOT a total order. now() is the transaction timestamp, so
+  --    rows written together are stamped identically. This is why the walk
+  --    needs the primary key as a tiebreaker, and it is worth proving rather
+  --    than assuming: if it ever became unique, the keyset could be simplified.
+  insert into public.firearms (name, cartridge)
+  select 'bulk ' || g, '.308' from generate_series(1, 5) g;
+  select count(distinct updated_at) into d from public.firearms
+   where name like 'bulk %';
+  perform test.check(d = 1,
+    'five rows written in one statement share one updated_at — so it cannot page on its own');
+
+  -- 2. ...and the index that walk needs exists, in the direction it reads.
+  select count(*) into n from pg_indexes
+   where schemaname = 'public' and indexname like 'ix\_%\_keyset';
+  perform test.check(n >= 15,
+    'every synced table has an ascending (updated_at, id) index for the keyset to walk');
+
+  select count(*) into n from pg_indexes
+   where schemaname = 'public' and indexname = 'ix_shots_keyset'
+     and indexdef like '%updated_at, id%';
+  perform test.check(n = 1,
+    '...tie-broken by the primary key, which is the only total order available');
+
+  -- 3. The DESC indexes stay: they are what the "most recent first" reads use.
+  select count(*) into n from pg_indexes
+   where schemaname = 'public' and indexname like 'ix\_%\_sync';
+  perform test.check(n >= 13,
+    'and the descending indexes are kept — the keyset is an addition, not a swap');
+end $$;
+
 reset role;
 \echo ''
 \echo 'SHOT STRING ASSERTIONS PASSED'

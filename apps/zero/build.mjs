@@ -42,7 +42,6 @@ export async function buildZero(o) {
   });
 
   const bundle = fs.readFileSync(path.join(outdir, 'bundle.js'));
-  const hash = crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 12);
 
   fs.mkdirSync(path.join(outdir, 'fonts'), { recursive: true });
   for (const f of FONT_FILES) {
@@ -57,10 +56,32 @@ export async function buildZero(o) {
   /* The build stamp goes in the HEAD, not the bundle: the cache name is a hash
    * OF the bundle, so anything derived from it cannot also be inside it. */
   const build = buildId();
+  const shellBody = fs.readFileSync(at('src/shell.html'), 'utf8')
+    .replace('</head>', () => `<style>\n${FACE_CSS}\n</style>\n</head>`);
   fs.writeFileSync(path.join(outdir, 'index.html'),
-    fs.readFileSync(at('src/shell.html'), 'utf8')
-      .replace('</head>', () => `<style>\n${FACE_CSS}\n</style>\n`
-        + `<script>window.__BUILD__=${JSON.stringify(build.id)}</script>\n</head>`));
+    shellBody.replace('</head>',
+      () => `<script>window.__BUILD__=${JSON.stringify(build.id)}</script>\n</head>`));
+
+  /* The cache name hashes the SHELL as well as the bundle.
+   *
+   * It used to hash bundle.js alone, and index.html is cache-first with no
+   * revalidation -- so a change confined to the shell never reached an
+   * installed user. Not "eventually": the served sw.js was byte-identical, and
+   * the registration URL carries ?v=window.__BUILD__ read from the CACHED
+   * index.html, so the version query did not change either. A fix to the iOS
+   * status-bar style, a theme colour, a font declaration, or the registration
+   * logic itself stayed invisible until some unrelated bundle change happened
+   * to move the hash. Worse, the on-device build stamp -- which exists purely
+   * to answer "is this the new one" -- kept reporting the old build, so the
+   * diagnosis was actively misleading.
+   *
+   * The stamp itself is deliberately EXCLUDED from the hashed text: it carries
+   * a minute-resolution timestamp, so including it would change the cache name
+   * on every build and re-download the whole shell for every installed user on
+   * every deploy, source change or not. */
+  const hash = crypto.createHash('sha256')
+    .update(bundle).update(shellBody).digest('hex').slice(0, 12);
+
   fs.writeFileSync(path.join(outdir, 'sw.js'),
     fs.readFileSync(at('src/sw.js'), 'utf8')
       .replace('__CACHE_VERSION__', `zero-${hash}`)

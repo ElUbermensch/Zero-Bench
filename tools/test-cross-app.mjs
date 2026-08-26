@@ -44,7 +44,7 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applica
   '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2' };
 
-const server = http.createServer((req, res) => {
+const serveBoth = (req, res) => {
   let p = decodeURIComponent(req.url.split('?')[0]);
   let dir = ZERO_DIR;
   if (p === '/bench' ) { res.writeHead(302, { Location: '/bench/' }); return res.end(); }
@@ -54,9 +54,24 @@ const server = http.createServer((req, res) => {
   if (!f.startsWith(dir) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) {
     res.writeHead(404); return res.end('nope');
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream' });
+  /* `no-store`, so the only offline copy is the one the service worker
+   * precached deliberately.
+   *
+   * Without it Chromium's own HTTP cache answers, and it answers even the
+   * `fetch()` INSIDE the worker -- Playwright's offline emulation cuts the
+   * network, not the cache above it. An offline assertion then passes on a
+   * precache that has been deleted, and the worker helpfully re-creates the
+   * cache from the copy it just got. That is not what a phone does at a range
+   * days later, and it is exactly the masking that hid a real bug: each app's
+   * worker was deleting the other's precache, and every offline test still
+   * passed. */
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(f)] || 'application/octet-stream',
+    'Cache-Control': 'no-store',
+  });
   fs.createReadStream(f).pipe(res);
-});
+};
+const server = http.createServer(serveBoth);
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const BASE = `http://127.0.0.1:${server.address().port}/`;
 
@@ -510,6 +525,104 @@ section('a second device, same account');
      `the same rifle under another device's local id is recognised, not duplicated (${rifles.map(f => f.id).join(', ')})`);
   ok(rifles[0].id === 'minted-on-this-device',
      '...with the local copy kept, which is the rule the restore has always followed');
+}
+
+/* ============================== both apps still open at a range with no signal */
+/* CacheStorage is scoped to the ORIGIN, not to a service worker's scope. Zero
+ * lives at / and Bench at /bench/ on the same origin, so each worker's activate
+ * sweep -- `caches.keys().filter(k => k !== CACHE)` -- was handed the OTHER
+ * app's precache and deleted it. Whichever app activated last was the only one
+ * that worked offline, and any deploy re-activated both, as did simply opening
+ * the second app for the first time.
+ *
+ * Two icons on a home screen, a drive to a range with no coverage, and one of
+ * them opens the browser's "no internet connection" page inside a standalone
+ * window -- with every record still on the device and nothing to say so. The
+ * exact failure both apps exist to prevent.
+ *
+ * Its own BROWSER, not merely its own context. Chromium keeps an HTTP cache
+ * that outlives a context, and this suite's main context has loaded both apps
+ * a dozen times by now -- so with a warm cache the app still opened offline
+ * from a copy a real phone would have evicted days earlier, and a deleted
+ * precache proved nothing. A cold browser is what a range trip actually looks
+ * like. */
+section('two apps, one origin, no signal');
+{
+  /* And its own SERVER, which is then DESTROYED rather than emulated.
+   *
+   * Playwright's `context.setOffline` does not reach requests a service worker
+   * makes: they leave from the worker, not the page, and the emulation is
+   * attached to the page. So the worker's `fetch()` still succeeded, still
+   * returned the file, and still re-created the very cache the test had just
+   * confirmed was deleted -- an offline assertion that passed on an app that
+   * was, at a range, completely dead. Killing the listener and every open
+   * socket is the only honest version of "no signal". */
+  const offServer = http.createServer(serveBoth);
+  const sockets = new Set();
+  offServer.on('connection', s => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  await new Promise(r => offServer.listen(0, '127.0.0.1', r));
+  const OFF = `http://127.0.0.1:${offServer.address().port}/`;
+
+  const cold = await chromium.launch(LAUNCH_OPTS);
+  const c = await cold.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+
+  // Install in the order a two-app user gets: Zero first, then Bench.
+  await p.goto(OFF);
+  await p.waitForTimeout(1200);
+  await p.goto(OFF + 'bench/');
+  await p.waitForTimeout(1200);
+
+  const caches = await p.evaluate(() => caches.keys());
+  ok(caches.some(k => k.startsWith('zero-')) && caches.some(k => k.startsWith('bench-')),
+     `both precaches survive installing the second app (${caches.join(', ') || 'none'})`);
+
+  // No signal at all: the listener is gone and every open socket is destroyed.
+  await new Promise(r => offServer.close(r));
+  for (const s of sockets) s.destroy();
+  await c.setOffline(true);
+  /* Each navigation also carries a unique query string, so the browser's own
+   * HTTP cache cannot answer it either. The workers match with
+   * `ignoreSearch: true`, so the query is invisible to them and a precached
+   * shell still answers. */
+  let nav = 0;
+  /* Reports the title AND whether the app actually rendered. A title alone is
+   * not proof: a failed navigation can leave the previous document standing,
+   * and the previous document has a title of its own. */
+  const opens = async (url) => {
+    const bust = url + (url.includes('?') ? '&' : '?') + 'nocache=' + (++nav);
+    try {
+      await p.goto(bust, { waitUntil: 'load' });
+      await p.waitForTimeout(600);
+      const landed = p.url().split('?')[0] === url;
+      /* The APP, not merely a document. A shell served without its script
+       * still has the right title and a body full of nothing; only the tab bar
+       * proves the bundle came out of the cache and ran. */
+      const drawn = await p.evaluate(() =>
+        (document.querySelector('.tabbar') || document.querySelector('#view')) ? 'app' : 'blank')
+        .catch(() => 'blank');
+      return `${await p.title()}|${landed ? 'landed' : 'elsewhere'}|${drawn}`;
+    } catch (e) { return 'DEAD|' + String(e.message).split('\n')[0]; }
+  };
+  const opened = (r, name) => r === `${name}|landed|app`;
+
+  const bench = await opens(OFF + 'bench/');
+  ok(opened(bench, 'Bench'), `Bench opens with no signal (${bench})`);
+  const zero = await opens(OFF);
+  ok(opened(zero, 'Zero'), `...and so does Zero, which installed first (${zero})`);
+
+  /* And the guard that keeps them apart: Zero owns the root scope, so its
+   * offline fallback would otherwise answer for Bench's URL with Zero's page --
+   * under /bench, which the edge redirects only when there IS a network. */
+  const slashless = await opens(OFF + 'bench');
+  /* `opened(...)`, not a regex on the raw string: the first version of this
+   * tested `!/^Zero$/` against a value that had become "Zero|landed|app", so it
+   * passed either way. An assertion that cannot fail is worse than no
+   * assertion, because it reads as coverage. */
+  ok(!opened(slashless, 'Zero'),
+     `and Zero's fallback does not answer for Bench's URL offline (${slashless})`);
+
+  await cold.close();
 }
 
 /* ==================================================================== hygiene */

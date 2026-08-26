@@ -9,17 +9,36 @@ const CACHE = '__CACHE_VERSION__';
 /* FONT_FILES is spliced in by the build: the faces have to be precached or an
  * offline launch falls back to a system face, which is the exact difference
  * self-hosting them was meant to remove. */
+/* The maskable icon is precached too. Android reads it at install time, and an
+ * install performed with no signal -- or an icon refresh after an eviction --
+ * otherwise falls back to the non-maskable one and gets it cropped into a
+ * circle, which is the exact outcome shipping a maskable icon prevents. */
 const SHELL = ['./', './index.html', './manifest.webmanifest',
-               './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png'].concat(__FONT_URLS__);
+               './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
+               './icons/icon-maskable-512.png'].concat(__FONT_URLS__);
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 
+/* Sweep MY OWN old caches, and only mine.
+ *
+ * CacheStorage is scoped to the ORIGIN, not to this worker's /bench/ scope, so
+ * `caches.keys()` returns Zero's precache as well -- and `k !== CACHE` is true
+ * of it, so the old sweep deleted it. Zero's worker did the same to this one.
+ * Whichever app activated last was the only one that opened at a range with no
+ * signal; the other showed the browser's offline page inside a standalone
+ * window, with all its data still sitting on the device.
+ *
+ * The scope guard in the fetch handler below does not help here: it is about
+ * which requests this worker ANSWERS. Nothing scopes what it can delete. */
+const MINE = CACHE.split('-')[0] + '-';
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys
+        .filter(k => k.startsWith(MINE) && k !== CACHE)
+        .map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

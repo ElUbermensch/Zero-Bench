@@ -21,10 +21,28 @@ self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 
+/* Sweep MY OWN old caches, and only mine.
+ *
+ * CacheStorage is scoped to the ORIGIN, not to a worker's scope. Bench lives at
+ * /bench/ on this same origin, so `caches.keys()` hands this worker Bench's
+ * precache too -- and `k !== CACHE` is true of it, so the old sweep deleted it.
+ * Bench's worker did the same to Zero's. Whichever app activated last was the
+ * only one that still worked offline, and any deploy re-activated both, as did
+ * simply opening the second app for the first time.
+ *
+ * Which means: two apps on one home screen, a drive to a range with no signal,
+ * and the other icon opens Safari's "no internet connection" page inside a
+ * standalone window -- with the data still on the device and no way to tell.
+ * The exact failure both apps exist to prevent.
+ *
+ * Prefixing is enough because both names have always been `<app>-<hash>`. */
+const MINE = CACHE.split('-')[0] + '-';
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys
+        .filter(k => k.startsWith(MINE) && k !== CACHE)
+        .map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -44,7 +62,10 @@ self.addEventListener('fetch', (e) => {
    * This guard moved here from Bench's worker when the two swapped places. It
    * belongs to whichever app sits at the root, because that is the one whose
    * scope covers the other. */
-  if (/(^|\/)bench\//.test(url.pathname)) return;
+  /* `(\/|$)`, not `\/`: the trailing-slash-less `/bench` is redirected at the
+   * edge when there is a network, and answered by THIS worker's offline
+   * fallback when there is not -- with Zero's page, under Bench's URL. */
+  if (/(^|\/)bench(\/|$)/.test(url.pathname)) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
       if (res && res.ok && res.type === 'basic') {

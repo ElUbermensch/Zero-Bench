@@ -5199,6 +5199,20 @@ function App() {
       onBack={()=>setScreen('home')}
       onCreate={(tpl, opts) => {
         const built = buildMatchFromTemplate(tpl, opts);
+        /* A template names its paper by id -- SR at 200, SR-3 at 300, MR-1 at
+         * 600 -- and the user may have hidden any of those built-ins. Nothing
+         * checked, and `getTarget` falls back to `allTargets[0]` rather than
+         * failing, so a hidden MR-1 meant a 600-yard stage was scored, plotted
+         * and COACHED against a 200-yard SR face: an invented 0.80 MOA zero
+         * error and a recommendation to go chase it. The ring score survives,
+         * because rings are stored per shot, so nothing on screen looks wrong.
+         *
+         * Un-hidden here rather than guarded at the twenty places a target is
+         * read: asking for a course of fire is asking for the paper it is shot
+         * on, and a target the user hid is hidden, not deleted. */
+        const need = tpl.stages.map(s => s.targetId)
+          .filter(id => deletedBuiltins.includes(id));
+        if (need.length) saveDeletedBuiltins(deletedBuiltins.filter(id => !need.includes(id)));
         saveMatches([built.match, ...matches]);
         saveSessions([...built.sessions, ...sessions]);
         setScreen('home');
@@ -5379,8 +5393,13 @@ function App() {
                 matches={matches}
                 getTarget={getTarget}
                 onOpenSession={id=>{ setActiveSess(id); setScreen('detail'); }}
-                onAddToMatch={matchId=>setScreen('new')}
-                onNewSessionInMatch={matchId=>{ setActiveSess(null); setScreen('new_in_match_'+matchId); }}
+                /* Wired for real. Both of these were passed and neither was
+                   destructured, so `setScreen('new_in_match_' + id)` -- for
+                   which no handler exists anywhere -- was unreachable, and an
+                   expanded match card had no way to add a stage at all. The
+                   only route was + session -> "Add to existing", which means
+                   knowing the feature is there. */
+                onAddToMatch={()=>{ setActiveSess(null); setScreen('new'); }}
                 onDelMatch={mid=>{ saveMatches(matches.filter(m=>m.id!==mid)); saveSessions(sessions.map(s=>s.matchId===mid?{...s,matchId:null}:s)); }}
               />
               {/* Two things survive on this screen, and both have to earn it.
@@ -5489,7 +5508,7 @@ function App() {
 }
 
 /* ── Sessions list with match grouping ── */
-function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch }) {
+function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch, onAddToMatch }) {
   const [collapsed, setCollapsed] = useState({});
   const [confirmDelMatch, setConfirmDelMatch] = useState(null);
   const [search, setSearch] = useState('');
@@ -5851,7 +5870,11 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch 
                         onClick={e=>{e.stopPropagation();setConfirmDelMatch(null);}}>cancel</button>
                     </>
                   ) : (
-                    <button className="bdel" style={{fontSize:9}} onClick={e=>{e.stopPropagation();setConfirmDelMatch(match.id);}}>remove match</button>
+                    <>
+                      <button style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'3px 9px',cursor:'pointer'}}
+                        onClick={e=>{e.stopPropagation();onAddToMatch(match.id);}}>+ stage</button>
+                      <button className="bdel" style={{fontSize:9}} onClick={e=>{e.stopPropagation();setConfirmDelMatch(match.id);}}>remove match</button>
+                    </>
                   )}
                 </div>
               </div>

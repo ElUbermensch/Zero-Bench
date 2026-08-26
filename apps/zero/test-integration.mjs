@@ -994,6 +994,58 @@ console.log('\nmatches');
   ok(/of 50 for a class/.test(await p.textContent('body')),
      '...and does not hand out a classification off two shots');
 
+  /* ---- an expanded match can have a stage added to it.
+   * `onAddToMatch` and `onNewSessionInMatch` were both passed to SessionsList
+   * and neither was destructured, so the handler they pointed at was
+   * unreachable and a match card had no "+ stage" at all. The only route was
+   * + session -> "Add to existing", which means knowing the feature is there. */
+  await p.getByText('Bad day').first().click();
+  await p.waitForTimeout(400);
+  ok(await p.locator('text=/\\+ stage/').count() > 0, 'an expanded match offers to add a stage');
+  await p.locator('text=/\\+ stage/').first().click();
+  await p.waitForTimeout(500);
+  ok(/New session/i.test(await p.textContent('body')),
+     '...and the button goes somewhere, rather than to a screen that does not exist');
+  await p.click('button.bback');
+  await p.waitForTimeout(300);
+
+  /* ---- a template un-hides the paper it needs.
+   * Templates name their targets by id, the user can hide any built-in, and
+   * `getTarget` falls back to allTargets[0] rather than failing -- so a hidden
+   * MR-1 meant a 600-yard stage was scored, plotted and COACHED against a
+   * 200-yard SR face, with an invented zero error and advice to go chase it. */
+  await seed({ deleted_builtins_v1: ['mr1', 'sr3', 'b8'], matches_v1: [], sessions_v1: [] });
+  await p.reload(); await p.waitForTimeout(800);
+  await p.click('button:has-text("+ match")');
+  await p.waitForTimeout(500);
+  ok(/National Match Course/i.test(await p.textContent('body')),
+     'the course-of-fire templates are reachable');
+  await p.locator('button.bprim').first().click();
+  await p.waitForTimeout(700);
+
+  const hiddenAfter = await p.evaluate(() =>
+    JSON.parse(localStorage.getItem('deleted_builtins_v1') || '[]'));
+  ok(!hiddenAfter.includes('mr1') && !hiddenAfter.includes('sr3'),
+     `a template un-hides the paper its stages are shot on (${hiddenAfter.join(', ') || 'none hidden'})`);
+  ok(hiddenAfter.includes('b8'),
+     '...and only that paper — a target no stage needs stays hidden');
+
+  /* The consequence, which is the reason it matters: the 600-yard stage is
+   * measured against MR-1 and not against whatever target happened to be
+   * first in the list. */
+  const stages = await p.evaluate(() => JSON.parse(localStorage.getItem('sessions_v1')));
+  const six = stages.find(s => s.rangeYards === 600);
+  ok(six && six.targetId === 'mr1',
+     `the 600-yard stage is on MR-1 (${six ? six.targetId : 'no 600 stage'})`);
+  await p.getByText(/National Match Course/).first().click();   // cards start collapsed
+  await p.waitForTimeout(400);
+  await p.getByText(/Prone slow · 600/).first().click();
+  await p.waitForTimeout(700);
+  ok(/MR-?1/i.test(await p.textContent('body')),
+     '...and opens against MR-1, rather than silently falling back to a 200-yard face');
+  await p.click('button.bback');
+  await p.waitForTimeout(300);
+
   ok(boom.length === 0, `no JavaScript errors through any of it${boom.length ? ' — ' + boom[0] : ''}`);
   await c.close();
 }

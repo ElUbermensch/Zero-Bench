@@ -118,6 +118,19 @@ const Store = (() => {
   };
 })();
 
+/* Ask the browser not to evict this origin.
+ *
+ * WebKit caps script-writable storage at seven days for a site that is not on
+ * the home screen, and that cap covers localStorage, IndexedDB and CacheStorage
+ * together -- so a loader who uses Bench in a Safari tab and does not open it
+ * between two range trips can lose the whole bench, cull log and all. Zero has
+ * asked for this since it shipped; Bench never did.
+ *
+ * Fire and forget, and it is insurance rather than a fix: `persist()` is a
+ * no-op on iOS today, so the real protection is installing to the home screen
+ * or signing in. Costs nothing and helps everywhere it is honoured. */
+try { navigator.storage?.persist?.().catch?.(() => {}); } catch (e) {}
+
 /* One zero-core instance per configured backend, or null when Bench is
  * local-only. Everything below has to work with null: local-only is not a
  * degraded mode, it is how the app shipped and how most of it still runs. */

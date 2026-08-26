@@ -63,7 +63,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: npm install
+      # `npm ci`, not `npm install`. The dependency ranges are carets, so
+      # install can silently resolve outside the lockfile -- most
+      # consequentially react, which ships into the user-facing bundle, and
+      # playwright, whose ^1.47.0 admits any 1.x. A dependency bump nobody
+      # chose should not be able to change a production bundle or turn CI red
+      # on a day unrelated to any commit.
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
       # NOT `|| true`. That threw away the exit code of the only place preflight
       # runs, so all of its assertions -- maskable icons, relative start_url,

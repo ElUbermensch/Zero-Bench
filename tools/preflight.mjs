@@ -12,7 +12,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { loadConfig, CONFIG_PATH } from './config.mjs';
+/* Data, not behaviour: importing the mock starts no server, and zero-core is
+ * required only for its TABLES list -- the tables the client actually syncs,
+ * which is the set the mock has to be honest about. */
+import { SCHEMA } from '../packages/zero-core/mock-supabase.mjs';
+const SYNCED = createRequire(import.meta.url)('../packages/zero-core/zero-core.js').TABLES;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rel = (p) => path.relative(ROOT, p) || p;
@@ -326,6 +332,123 @@ for (const [name, file] of [['Zero', 'apps/zero/src/shell.html'],
      `${name} pays back the bottom inset`,
      'the home indicator overlaps whatever sits at the bottom of the screen');
 }
+
+/* ────────────────────── the mock must not be softer than the server */
+/* packages/zero-core/mock-supabase.mjs is the oracle every JS suite is graded
+ * against. When it is more permissive than Postgres, a green suite means
+ * nothing: the row the client just "successfully" pushed is a permanent 4xx on
+ * the real server, and a permanent 4xx makes the client DEAD-LETTER the row --
+ * out of the outbox, for good. A client can only be as disciplined as the
+ * thing that judges it.
+ *
+ * So: every NOT NULL column in the migrations that has no default must appear
+ * in the mock's NOT_NULL map. Read out of the SQL TEXT rather than out of a
+ * live database, because preflight has to answer in a second with no network
+ * and no Postgres -- the same reason it reads the workflow file instead of
+ * running CI. `bash supabase/run_tests.sh` remains the authority; this is the
+ * tripwire that fires on the pull request that introduces the drift. */
+section('the mock agrees with the schema');
+
+const notNullFromMigrations = () => {
+  const dir = path.join(ROOT, 'supabase/migrations');
+  const sql = fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort()
+    .map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n')
+    .replace(/--[^\n]*/g, ' ');            // strip line comments, keep structure
+
+  const cols = new Map();                  // "table.col" -> { table, col, notNull, dflt }
+  const put = (t, c, patch) => {
+    const k = `${t}.${c}`;
+    cols.set(k, Object.assign({ table: t, col: c, notNull: false, dflt: false },
+                              cols.get(k), patch));
+  };
+
+  /* CREATE TABLE bodies. Split on top-level commas only -- `numeric(6,2)` and
+   * `check (x = any (array[…]))` both contain commas that are not column
+   * boundaries, and a naive split invents a column called "2)". */
+  const CT = /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?([a-z_]+)\s*\(/gi;
+  let m;
+  while ((m = CT.exec(sql))) {
+    const t = m[1];
+    let depth = 1, i = CT.lastIndex, start = i;
+    const parts = [];
+    for (; i < sql.length && depth > 0; i++) {
+      const ch = sql[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') { depth--; if (depth === 0) parts.push(sql.slice(start, i)); }
+      else if (ch === ',' && depth === 1) { parts.push(sql.slice(start, i)); start = i + 1; }
+    }
+    const pk = [];
+    for (const raw of parts) {
+      const d = raw.trim();
+      /* A table constraint, not a column -- but `primary key (a, b)` still
+       * makes its columns NOT NULL, so it is read rather than skipped. */
+      if (/^(primary\s+key|unique|check|foreign\s+key|constraint|exclude|like)\b/i.test(d)) {
+        const tpk = /^primary\s+key\s*\(([^)]*)\)/i.exec(d);
+        if (tpk) pk.push(...tpk[1].split(',').map(x => x.trim()));
+        continue;
+      }
+      const name = (/^([a-z_][a-z0-9_]*)/i.exec(d) || [])[1];
+      if (!name) continue;
+      /* PRIMARY KEY implies NOT NULL without saying the words, and that is
+       * exactly how profiles.id and leaderboard_profiles.id are declared --
+       * the two columns a plain search for "not null" silently misses. */
+      put(t, name, { notNull: /\bnot\s+null\b/i.test(d) || /\bprimary\s+key\b/i.test(d),
+                     dflt: /\bdefault\b/i.test(d) });
+    }
+    for (const c of pk) put(t, c, { notNull: true });
+  }
+
+  /* ALTER TABLE, so a column added or relaxed in a later migration wins over
+   * the CREATE that introduced it. */
+  const AT = /alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?(?:public\.)?([a-z_]+)([\s\S]*?);/gi;
+  while ((m = AT.exec(sql))) {
+    const t = m[1];
+    for (const a of m[2].split(/,(?=\s*(?:add|alter|drop)\s)/i)) {
+      let x;
+      if ((x = /^\s*add\s+column\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)([\s\S]*)$/i.exec(a)))
+        put(t, x[1], { notNull: /\bnot\s+null\b/i.test(x[2]), dflt: /\bdefault\b/i.test(x[2]) });
+      else if ((x = /^\s*alter\s+(?:column\s+)?([a-z_][a-z0-9_]*)\s+set\s+not\s+null/i.exec(a)))
+        put(t, x[1], { notNull: true });
+      else if ((x = /^\s*alter\s+(?:column\s+)?([a-z_][a-z0-9_]*)\s+drop\s+not\s+null/i.exec(a)))
+        put(t, x[1], { notNull: false });
+      else if ((x = /^\s*alter\s+(?:column\s+)?([a-z_][a-z0-9_]*)\s+set\s+default/i.exec(a)))
+        put(t, x[1], { dflt: true });
+      else if ((x = /^\s*alter\s+(?:column\s+)?([a-z_][a-z0-9_]*)\s+drop\s+default/i.exec(a)))
+        put(t, x[1], { dflt: false });
+      else if ((x = /^\s*drop\s+column\s+(?:if\s+exists\s+)?([a-z_][a-z0-9_]*)/i.exec(a)))
+        cols.delete(`${t}.${x[1]}`);
+    }
+  }
+
+  const out = {};
+  for (const c of cols.values()) {
+    if (!c.notNull || c.dflt) continue;
+    (out[c.table] ||= []).push(c.col);
+  }
+  return out;
+};
+
+const declared = notNullFromMigrations();
+const modelled = SCHEMA.notNull;
+const counted = SYNCED.reduce((n, t) => n + (declared[t] || []).length, 0);
+const gaps = SYNCED.flatMap(t => (declared[t] || [])
+  .filter(c => !(modelled[t] || []).includes(c)).map(c => `${t}.${c}`));
+ok(gaps.length === 0,
+   `every NOT NULL column on the ${SYNCED.length} synced tables is modelled by the mock (${counted} columns)`,
+   `missing from the notNull map in packages/zero-core/mock-supabase.mjs: ${gaps.join(', ')}. `
+   + 'A column the oracle does not know is a row every suite will pass and the real '
+   + 'server will dead-letter.');
+
+/* The other direction is a warning, not a blocker. A column the mock demands
+ * and the schema does not makes the suites pessimistic rather than blind --
+ * but it usually means a migration relaxed something and the map was not told,
+ * which is worth seeing before it becomes a test nobody can explain. */
+const stale = Object.keys(modelled).flatMap(t => modelled[t]
+  .filter(c => !(declared[t] || []).includes(c)).map(c => `${t}.${c}`));
+soft(stale.length === 0,
+     'and demands nothing the schema does not'
+     + (stale.length ? ' — stale: ' + stale.join(', ') : ''),
+     'a NOT NULL the migrations no longer declare makes the mock stricter than the server');
 
 const pkg = JSON.parse(read('package.json'));
 ok(/embed-core\.mjs --check/.test(pkg.scripts.test),

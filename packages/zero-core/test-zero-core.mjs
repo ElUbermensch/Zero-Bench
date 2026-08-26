@@ -385,19 +385,28 @@ section('a refusal is isolated to the row that caused it');
   const c = mkClient();
   await c.signUp('isolate@example.com', 'pw');
 
+  /* Whole rows, not the bare minimum the mock used to accept. `recipes`
+   * declares cartridge NOT NULL and `recipe_cites_a_source` demands either a
+   * citation or an admission that you worked it up yourself; `batches`
+   * declares qty_loaded and qty_remaining NOT NULL. A fixture missing any of
+   * them is refused by Postgres, so a mock that took it was testing FK
+   * isolation against five rows the real server would never have reached. */
   const recipeId = c.uuid();
-  c.upsert('recipes', { id: recipeId, name: 'good recipe', charge_gr: 41.5 });
+  c.upsert('recipes', { id: recipeId, name: 'good recipe', cartridge: '6mm Creedmoor',
+                        charge_gr: 41.5, self_developed: true });
   await c.sync({ trigger: 'test', apply: () => {} });
 
   const goodIds = [c.uuid(), c.uuid(), c.uuid(), c.uuid()];
   const badId = c.uuid();
+  const batch = (id, recipe, serial) =>
+    c.upsert('batches', { id, recipe_id: recipe, serial, qty_loaded: 50, qty_remaining: 50 });
   // Interleaved, not appended: if isolation is done by "drop everything after
   // the first failure" the tail would vanish and this would still look fine.
-  c.upsert('batches', { id: goodIds[0], recipe_id: recipeId, serial: 'A' });
-  c.upsert('batches', { id: goodIds[1], recipe_id: recipeId, serial: 'B' });
-  c.upsert('batches', { id: badId, recipe_id: c.uuid(), serial: 'ORPHAN' });
-  c.upsert('batches', { id: goodIds[2], recipe_id: recipeId, serial: 'C' });
-  c.upsert('batches', { id: goodIds[3], recipe_id: recipeId, serial: 'D' });
+  batch(goodIds[0], recipeId, 'A');
+  batch(goodIds[1], recipeId, 'B');
+  batch(badId, c.uuid(), 'ORPHAN');
+  batch(goodIds[2], recipeId, 'C');
+  batch(goodIds[3], recipeId, 'D');
 
   const rejects = [];
   c.on(c.EVENTS.OUTBOX_REJECTED, p => rejects.push(p));

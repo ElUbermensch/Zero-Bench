@@ -7,6 +7,232 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
+/* ------------------------------------------------------------------ schema
+ * What the real schema declares, extracted from supabase/migrations/*.sql by
+ * querying the database `supabase/run_tests.sh` builds:
+ *
+ *   NOT_NULL  information_schema.columns, is_nullable='NO' and no default
+ *   CHECKS    pg_constraint contype='c'
+ *   UNIQUES   pg_indexes indexdef like 'CREATE UNIQUE%', minus the pkeys
+ *
+ * Kept as three table-keyed maps rather than inline `if`s so the next column
+ * added to a migration is one line here, and so tools/preflight.mjs can diff
+ * the maps against the SQL and fail the build when they drift apart.
+ *
+ * WHERE THESE ARE EVALUATED, and why it matters:
+ *
+ * A push is `POST ?on_conflict=id` with `Prefer: resolution=merge-duplicates`
+ * -- an INSERT ... ON CONFLICT DO UPDATE. Postgres runs ExecConstraints() on
+ * the *proposed* tuple, before it ever detects the conflict, so NOT NULL and
+ * CHECK are both judged on the payload-plus-column-defaults and NOT on the row
+ * that merging would produce. Verified against the live database:
+ *
+ *   insert into probe (id,a,b) values (<existing id>, 5, 1)
+ *     on conflict (id) do update set a = excluded.a;
+ *   ERROR: new row for relation "probe" violates check constraint "probe_b_check"
+ *   DETAIL: Failing row contains (..., 5, 1)          -- the payload, not the merge
+ *
+ * That is the whole reason a delete cannot ride the outbox as an upsert of
+ * {id, deleted_at}, and it is why the mock must not judge `merged`.
+ *
+ * An UPDATE (PATCH, which is how a tombstone actually travels) is the other
+ * way round: the constraint sees the row AFTER the update. Both are modelled.
+ */
+
+/* CHECK passes when the expression is TRUE *or NULL* -- a null column does not
+ * violate a check, it only fails to satisfy it. Every predicate below returns
+ * true on null for exactly that reason; NOT NULL is a separate map. */
+const gt = (c, n) => (r) => r[c] == null || Number(r[c]) > n;
+const gte = (c, n) => (r) => r[c] == null || Number(r[c]) >= n;
+const oneOf = (c, vals) => (r) => r[c] == null || vals.includes(r[c]);
+const le = (a, b) => (r) => r[a] == null || r[b] == null || Number(r[a]) <= Number(r[b]);
+
+/* Column defaults that are plain literals. The proposed tuple carries them, so
+ * a check on a column the client omitted must see the default and not
+ * undefined -- otherwise `groups.source_app` would look like a violation on
+ * every row Zero pushes without naming the app. gen_random_uuid()/auth.uid()/
+ * now()/CURRENT_DATE are excluded: the mock supplies those itself. */
+const SCHEMA_DEFAULTS = {
+  batches:             { quarantined: false },
+  brass_lots:          { nickel: false, marks: {}, firings: 0, expected_firings: 6,
+                         cost_total: 0, track_individual: false, retired: false },
+  component_lots:      { qty_remaining: 0, cost_total: 0 },
+  dope_entries:        { confirmed: false },
+  firearms:            { round_count: 0, rounds_at_start: 0 },
+  groups:              { source_app: 'zero' },
+  leaderboard_entries: { position: 'Unspecified', x_count: 0, source_app: 'zero' },
+  profiles:            { units: 'imperial', marking_scheme: {}, overhead_per_round: 0 },
+  range_sessions:      { pressure_signs: 'none', source_app: 'bench' },
+  recipes:             { self_developed: false, status: 'workup' },
+  shots:               { excluded: false, is_sighter: false },
+};
+
+/* NOT NULL and no default: the client must send these on every push, tombstone
+ * included -- which is why tombstones are a PATCH. 37 columns, 15 tables. */
+const NOT_NULL = {
+  batches:             ['serial', 'recipe_id', 'qty_loaded', 'qty_remaining'],
+  brass_events:        ['brass_lot_id', 'kind'],
+  brass_lots:          ['serial', 'cartridge', 'headstamp', 'qty_initial', 'qty_on_hand'],
+  bullet_products:     ['model', 'weight_gr'],
+  component_lots:      ['kind', 'qty_purchased', 'unit'],
+  dope_entries:        ['distance_yd'],
+  firearms:            ['name', 'cartridge'],
+  groups:              ['session_id', 'distance_yd', 'shot_count'],
+  leaderboard_entries: ['occurred_on', 'target_name', 'distance_yd', 'shot_count', 'score'],
+  leaderboard_profiles:['id', 'handle'],
+  powder_products:     ['name'],
+  primer_products:     ['model'],
+  profiles:            ['id'],
+  recipes:             ['name', 'cartridge', 'charge_gr'],
+  shots:               ['session_id', 'shot_no'],
+  // range_sessions declares no NOT NULL column without a default.
+};
+
+const CHECKS = {
+  batches: [
+    ['batch_remaining_within_loaded', le('qty_remaining', 'qty_loaded')],
+    ['batches_qty_loaded_check',      gt('qty_loaded', 0)],
+    ['batches_qty_remaining_check',   gte('qty_remaining', 0)],
+  ],
+  brass_events: [
+    ['brass_events_kind_check', oneOf('kind', ['acquired', 'loaded', 'fired', 'tumbled',
+      'annealed', 'sized', 'trimmed', 'pocket_uniformed', 'neck_turned', 'culled', 'retired'])],
+  ],
+  brass_lots: [
+    ['brass_lots_anneal_every_check',     gte('anneal_every', 0)],
+    ['brass_lots_cost_total_check',       gte('cost_total', 0)],
+    ['brass_lots_expected_firings_check', gt('expected_firings', 0)],
+    ['brass_lots_firings_check',          gte('firings', 0)],
+    ['brass_lots_origin_check',  oneOf('origin', ['new', 'once-fired', 'range pickup', 'harvested'])],
+    ['brass_lots_qty_initial_check',      gt('qty_initial', 0)],
+    ['brass_lots_qty_on_hand_check',      gte('qty_on_hand', 0)],
+    ['brass_lots_sizing_check',  oneOf('sizing', ['FL', 'bushing', 'neck', 'none'])],
+    ['brass_on_hand_within_initial',      le('qty_on_hand', 'qty_initial')],
+  ],
+  bullet_products: [
+    ['bullet_products_bc_g1_check',       gt('bc_g1', 0)],
+    ['bullet_products_bc_g7_check',       gt('bc_g7', 0)],
+    ['bullet_products_diameter_in_check', gt('diameter_in', 0)],
+    ['bullet_products_weight_gr_check',   gt('weight_gr', 0)],
+  ],
+  component_lots: [
+    /* One lot points at exactly one product, and the pointer has to agree with
+     * `kind`. A bullet lot carrying a powder_id is not a typo the server will
+     * absorb -- it is a permanent 400 and a dead-lettered row. */
+    ['component_lot_product_matches_kind', (r) =>
+      (r.kind === 'bullet' && r.bullet_id != null && r.powder_id == null && r.primer_id == null) ||
+      (r.kind === 'powder' && r.powder_id != null && r.bullet_id == null && r.primer_id == null) ||
+      (r.kind === 'primer' && r.primer_id != null && r.bullet_id == null && r.powder_id == null)],
+    ['component_lots_cost_total_check',    gte('cost_total', 0)],
+    ['component_lots_kind_check',          oneOf('kind', ['bullet', 'powder', 'primer'])],
+    ['component_lots_qty_purchased_check', gt('qty_purchased', 0)],
+    ['component_lots_qty_remaining_check', gte('qty_remaining', 0)],
+    ['component_lots_unit_check',          oneOf('unit', ['ea', 'lb', 'gr'])],
+  ],
+  dope_entries: [
+    ['dope_entries_distance_yd_check', gt('distance_yd', 0)],
+  ],
+  firearms: [
+    ['firearms_barrel_life_positive',  gt('barrel_life_rounds', 0)],
+    ['firearms_round_count_check',     gte('round_count', 0)],
+    ['firearms_rounds_at_start_nonneg', gte('rounds_at_start', 0)],
+  ],
+  groups: [
+    ['groups_distance_yd_check',   gt('distance_yd', 0)],
+    ['groups_group_es_in_check',   gte('group_es_in', 0)],
+    ['groups_mean_radius_in_check', gte('mean_radius_in', 0)],
+    ['groups_shot_count_check',    gte('shot_count', 2)],
+    ['groups_source_app_check',    oneOf('source_app', ['bench', 'zero'])],
+  ],
+  leaderboard_entries: [
+    ['leaderboard_entries_distance_yd_check', gt('distance_yd', 0)],
+    ['leaderboard_entries_es_moa_check',      gte('es_moa', 0)],
+    ['leaderboard_entries_mr_moa_check',      gte('mr_moa', 0)],
+    ['leaderboard_entries_score_check',       gte('score', 0)],
+    ['leaderboard_entries_shot_count_check',  gte('shot_count', 2)],
+    ['leaderboard_entries_source_app_check',  oneOf('source_app', ['bench', 'zero'])],
+    ['leaderboard_entries_x_count_check',     gte('x_count', 0)],
+    ['score_plausible', (r) => r.score == null || r.shot_count == null
+                            || Number(r.score) <= Number(r.shot_count) * 10],
+    ['xs_within_shots', le('x_count', 'shot_count')],
+  ],
+  leaderboard_profiles: [
+    ['handle_shape', (r) => r.handle == null || /^[A-Za-z0-9_-]{3,24}$/.test(r.handle)],
+  ],
+  powder_products: [
+    ['powder_products_form_check', oneOf('form', ['ball', 'extruded', 'flake'])],
+  ],
+  primer_products: [
+    ['primer_products_size_check', oneOf('size',
+      ['SR', 'LR', 'SP', 'LP', 'SRM', 'LRM', 'SPM', 'LPM'])],
+  ],
+  profiles: [
+    ['profiles_units_check', oneOf('units', ['imperial', 'metric'])],
+  ],
+  range_sessions: [
+    ['range_sessions_pressure_signs_check', oneOf('pressure_signs', ['none',
+      'flattened primers', 'cratered primers', 'ejector mark', 'stiff bolt lift',
+      'case head expansion'])],
+    ['range_sessions_rounds_fired_check', gte('rounds_fired', 0)],
+    ['range_sessions_source_app_check',   oneOf('source_app', ['bench', 'zero'])],
+    /* The face is a shape, not free text: {rings:[…]}. A client that sends the
+     * target's NAME here, or an array, gets a 400 rather than a plot that
+     * renders as nothing. */
+    ['range_sessions_target_face_shape', (r) => r.target_face == null
+      || (typeof r.target_face === 'object' && !Array.isArray(r.target_face)
+          && Array.isArray(r.target_face.rings))],
+    ['range_sessions_velocity_n_check', gte('velocity_n', 0)],
+  ],
+  recipes: [
+    /* A load that cites nobody and claims no workup of its own is not a
+     * recipe, it is a rumour. */
+    ['recipe_cites_a_source', (r) => r.self_developed === true
+      || (r.source_name != null && String(r.source_name).trim().length > 0)],
+    ['recipes_charge_gr_check', gt('charge_gr', 0)],
+    ['recipes_status_check',    oneOf('status', ['workup', 'proven', 'retired'])],
+  ],
+  shots: [
+    ['shots_shot_no_check', gt('shot_no', 0)],
+    ['shots_wind_call_dir_check', (r) => r.wind_call_dir == null
+      || ['L', 'R'].includes(r.wind_call_dir)],
+  ],
+  /* Not in TABLES -- account_backups is written by its own call, not the
+   * outbox -- but the ceiling is a table constraint and belongs in the map
+   * with the rest rather than in an `if` of its own. */
+  account_backups: [
+    ['account_backups_payload_check', (r) => r.payload == null
+      || Buffer.byteLength(String(r.payload), 'utf8') <= 8388608],
+  ],
+};
+
+/* Unique INDEXES, not table constraints -- every one of them is partial, which
+ * is the point. `ux_batches_serial` is `where deleted_at is null`, so a
+ * tombstoned lot must NOT block a new lot reusing its serial; a mock that
+ * ignored the predicate would reject a legal reuse, which is the opposite
+ * failure and just as bad. `key()` returns null for a row the index does not
+ * cover. */
+const UNIQUES = {
+  batches: [{ name: 'ux_batches_serial',
+    key: (r, uid) => r.deleted_at == null ? JSON.stringify([uid, r.serial]) : null }],
+  brass_lots: [{ name: 'ux_brass_lots_serial',
+    key: (r, uid) => r.deleted_at == null ? JSON.stringify([uid, r.serial]) : null }],
+  component_lots: [{ name: 'ux_component_serial',
+    key: (r, uid) => (r.deleted_at == null && r.serial != null)
+      ? JSON.stringify([uid, r.serial]) : null }],
+  // on lower(handle), and NOT user-scoped: a handle is claimed globally.
+  leaderboard_profiles: [{ name: 'ux_lb_handle',
+    key: (r) => r.handle == null ? null : String(r.handle).toLowerCase() }],
+  account_backups: [{ name: 'account_backups_user_id_app_slot_key',
+    key: (r, uid) => JSON.stringify([uid, r.app, r.slot]) }],
+};
+
+/* Exported so tools/preflight.mjs can diff these against the migrations
+ * without standing a server up. Data, not behaviour: importing this module
+ * starts nothing. */
+export const SCHEMA = Object.freeze({
+  defaults: SCHEMA_DEFAULTS, notNull: NOT_NULL, checks: CHECKS, uniques: UNIQUES,
+});
+
 export function startMock(opts = {}) {
   const state = {
     users: new Map(),            // email -> { id, password }
@@ -19,14 +245,19 @@ export function startMock(opts = {}) {
     ttlSec: opts.ttlSec ?? 3600,
     pushOrder: [],               // tables in the order they were pushed to
     lastPush: {},                // table -> the exact payload the client sent
-    /* Columns the real schema declares NOT NULL, for the tables the clients
-     * write both ways. An upsert is INSERT ... ON CONFLICT: Postgres forms the
-     * insert tuple before it detects the conflict, so a payload missing one of
-     * these is refused even when the row already exists. That is not a detail
-     * -- it is why a delete cannot be expressed as an upsert of
-     * {id, deleted_at}, which is exactly the bug this mock failed to catch
-     * until it learned the constraint. */
-    notNull: { firearms: ['name', 'cartridge'] },
+    /* The schema, from the maps at the top of this file. An upsert is INSERT
+     * ... ON CONFLICT: Postgres forms the insert tuple before it detects the
+     * conflict, so a payload missing a NOT NULL column is refused even when
+     * the row already exists. That is not a detail -- it is why a delete
+     * cannot be expressed as an upsert of {id, deleted_at}, which is exactly
+     * the bug this mock failed to catch until it learned the constraint.
+     *
+     * They live on `state` so a test can reach in and relax one to stage a
+     * server that predates a migration, the way `legacyRelayRpc` does. */
+    notNull: NOT_NULL,
+    checks: CHECKS,
+    uniques: UNIQUES,
+    defaults: SCHEMA_DEFAULTS,
     // tables whose rows must reference an existing parent row
     fk: { shots: ['session_id', 'range_sessions'],
           groups: ['session_id', 'range_sessions'],
@@ -49,6 +280,44 @@ export function startMock(opts = {}) {
   const table = (t) => {
     if (!state.rows.has(t)) state.rows.set(t, new Map());
     return state.rows.get(t);
+  };
+
+  /* The tuple Postgres would form: the payload plus the column defaults. NOT
+   * the merge with the stored row -- an ON CONFLICT insert is judged on what
+   * the client handed over. */
+  const proposed = (t, row) => Object.assign({}, state.defaults[t] || {}, row);
+
+  /* One gate for NOT NULL, CHECK and the unique indexes, applied in the order
+   * ExecInsert applies them. Returns [status, body] or null. `self` is the id
+   * of the row being written, so its own index entry is not a conflict with
+   * itself. */
+  const violation = (t, cand, uid, self) => {
+    for (const c of state.notNull[t] || []) {
+      if (cand[c] === undefined || cand[c] === null) {
+        return [400, { code: '23502',
+          message: `null value in column "${c}" of relation "${t}" `
+                   + 'violates not-null constraint' }];
+      }
+    }
+    for (const [name, holds] of state.checks[t] || []) {
+      if (!holds(cand)) {
+        return [400, { code: '23514',
+          message: `new row violates check constraint "${name}"` }];
+      }
+    }
+    for (const ux of state.uniques[t] || []) {
+      const k = ux.key(cand, uid);
+      if (k == null) continue;          // the partial index does not cover it
+      for (const other of table(t).values()) {
+        if (self != null && other.id === self) continue;
+        if (ux.key(other, other.user_id) === k) {
+          return [409, { code: '23505',
+            message: 'duplicate key value violates unique constraint '
+                     + `"${ux.name}"` }];
+        }
+      }
+    }
+    return null;
   };
 
   const json = (res, code, body) => {
@@ -353,14 +622,15 @@ export function startMock(opts = {}) {
           // RLS: another account's row is invisible, not forbidden. PostgREST
           // answers a filter matching nothing with 204 and no rows changed.
           if (!row || row.user_id !== a.userId) return json(res, 204, null);
-          // The size ceiling is a table constraint, so it applies to an UPDATE
-          // exactly as it does to an INSERT -- and the update is the common
-          // path, since a slot is written over and over.
-          if (t === 'account_backups' && payload && payload.payload !== undefined
-              && Buffer.byteLength(String(payload.payload || ''), 'utf8') > 8388608) {
-            return json(res, 400, { code: '23514',
-              message: 'new row violates check constraint "account_backups_payload_check"' });
-          }
+          /* A table constraint applies to an UPDATE exactly as it does to an
+           * INSERT -- and for an UPDATE the constraint sees the row AFTER the
+           * change, so the candidate is the merge and not the payload. This is
+           * the path a tombstone travels, and a tombstone must keep passing:
+           * it carries only deleted_at, and every NOT NULL column survives
+           * from the stored row. */
+          const after = Object.assign({}, row, payload);
+          const badPatch = violation(t, after, a.userId, idFilter);
+          if (badPatch) return json(res, badPatch[0], badPatch[1]);
           Object.assign(row, payload, { updated_at: stamp() });
           return json(res, 204, null);
         }
@@ -512,17 +782,6 @@ export function startMock(opts = {}) {
                 message: 'All object keys must match' });
             }
           }
-          const required = state.notNull[t];
-          if (required) {
-            for (const row of incoming) {
-              const missing = required.filter(c => row[c] === undefined || row[c] === null);
-              if (missing.length) {
-                return json(res, 400, { code: '23502',
-                  message: `null value in column "${missing[0]}" of relation "${t}" `
-                           + 'violates not-null constraint' });
-              }
-            }
-          }
           const fk = state.fk[t];
           const saved = [];
           for (const row of incoming) {
@@ -564,56 +823,25 @@ export function startMock(opts = {}) {
                 return json(res, 403, { code: '42501', message: 'not a participant' });
               }
             }
-            /* account_backups is the one table with a size ceiling and a
-             * compound unique key, and both are the point of it. A mock that
-             * accepted an oversized payload would let a client ship a backup
-             * button that fails only on a real phone with real data, and one
-             * that ignored the unique key would let a second backup stack a
-             * second eight-megabyte row where the schema allows exactly one. */
-            if (t === 'account_backups') {
-              if (state.anonUsers.has(a.userId)) {
-                return json(res, 403, { code: '42501',
-                  message: 'RLS: anonymous devices cannot back up' });
-              }
-              if (Buffer.byteLength(String(row.payload || ''), 'utf8') > 8388608) {
-                return json(res, 400, { code: '23514',
-                  message: 'new row violates check constraint "account_backups_payload_check"' });
-              }
-              const clash = [...table(t).values()].find(x => x.user_id === a.userId
-                && x.app === row.app && x.slot === row.slot && x.id !== row.id);
-              if (clash) {
-                return json(res, 409, { code: '23505',
-                  message: 'duplicate key value violates unique constraint '
-                           + '"account_backups_user_id_app_slot_key"' });
-              }
+            /* account_backups' size ceiling and its compound unique key are
+             * both in the maps above with everything else; what is left here
+             * is the RLS rule, which is not a constraint. */
+            if (t === 'account_backups' && state.anonUsers.has(a.userId)) {
+              return json(res, 403, { code: '42501',
+                message: 'RLS: anonymous devices cannot back up' });
             }
-            /* shots are keyed (session_id, shot_no) in the schema, not by the
-             * client's uuid. A push that re-sends a string must therefore
-             * UPDATE the row that already holds that number rather than
-             * inserting a second one under a fresh id -- which is exactly what
-             * a client that mints a new uuid per push would do, and the real
-             * server would refuse with 23505 while this mock happily stacked
-             * twelve more holes on the target. */
-            if (t === 'shots' && row.session_id && row.shot_no != null) {
-              /* (session_id, shot_no) is NOT unique any more -- see 0012. Two
-               * devices on one account cannot coordinate a number offline, and
-               * uniqueness let the second one to sync dead-letter itself
-               * forever. A shot is identified by its id. */
-              if (row.wind_call_dir != null && !['L', 'R'].includes(row.wind_call_dir)) {
-                return json(res, 400, { code: '23514',
-                  message: 'new row violates check constraint "shots_wind_call_dir_check"' });
-              }
-            }
-            /* The face is a shape, not free text: {rings:[…]}. A client that
-             * sends the target's NAME here, or an array, gets a 400 rather
-             * than a plot that renders as nothing. */
-            if (t === 'range_sessions' && row.target_face != null) {
-              const f = row.target_face;
-              if (typeof f !== 'object' || Array.isArray(f) || !Array.isArray(f.rings)) {
-                return json(res, 400, { code: '23514',
-                  message: 'new row violates check constraint "range_sessions_target_face_shape"' });
-              }
-            }
+            /* NOT NULL, CHECK and the unique indexes, all of them, from the
+             * three maps at the top of this file. RLS WITH CHECK is applied
+             * above and constraints here, which is the order ExecInsert uses:
+             * a forbidden row is 403 before it is ever 400.
+             *
+             * (session_id, shot_no) is deliberately NOT among the unique keys
+             * -- see 0012. Two devices on one account cannot coordinate a
+             * number offline, and uniqueness let the second one to sync
+             * dead-letter itself forever. A shot is identified by its id. */
+            const bad = violation(t, proposed(t, row), a.userId, row.id);
+            if (bad) return json(res, bad[0], bad[1]);
+
             if (fk && row[fk[0]]) {
               const parent = table(fk[1]).get(row[fk[0]]);
               if (!parent) {

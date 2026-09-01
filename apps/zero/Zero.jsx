@@ -16,47 +16,638 @@ const COLOR_PRESETS = [
   '#ffffff','#dddddd','#ff6b35','#e8c840','#3a7abf',
 ];
 
+/* The NRA target library.
+ *
+ * Ring diameters are transcribed from the current NRA rule books -- High Power
+ * Rifle §4, F-Class §4, Smallbore Rifle §4, Precision Pistol §4, International
+ * Pistol §4 -- and cross-checked against licensed printers' published aiming-
+ * black diameters. All 24 targets where both sources state a black agree to
+ * within 0.01".
+ *
+ * TRANSCRIBED, NEVER COMPUTED. NRA describes targets as "a reduction of the
+ * MR-1 for 300 yards" but publishes no formula, and deriving one is how you get
+ * numbers that are quietly wrong: a scaling rule that looks right reproduces
+ * the B-19 as 1.80/3.60/5.40/7.20 where the rule book says 1.78/3.58/5.38/7.18
+ * -- off on every ring, by an amount no one would notice on screen and every
+ * score would carry. Where a reduction formula does reproduce the published
+ * numbers it is useful only as a checksum on the typing.
+ *
+ * Diameters are to the OUTSIDE EDGE of the scoring ring, which is the
+ * convention the rule books state and the one the hit test assumes.
+ *
+ * `discipline` groups the picker; `yards` is the distance the target is shot at
+ * and orders it within its group. `blackThrough` in the generator decides which
+ * rings paint black -- the aiming black is a printed area, not a scoring ring.
+ *
+ * DELIBERATELY ABSENT, because the sources do not support them:
+ *   B-27 / B-27E / B-29 / B-34 -- the rings are OVALS, and the only published
+ *     dimensions contradict the rule book they claim to follow by a factor of
+ *     two. A circular model cannot represent them and a wrong one would score
+ *     every police-course hit incorrectly.
+ *   A-36 -- absent from the smallbore rule book's target list in both the 2020
+ *     and 2024 editions. Its 1⅜" black differs from USAS-50's, so it is a
+ *     genuinely different reduction and USAS-50's rings cannot be borrowed.
+ *   B-38 / B-39 -- named in the rules with no ring table printed.
+ *
+ * The MR-1 F-Class 6 and 5 rings are the one place two current NRA books
+ * disagree: the F-Class book says 36/48, the High Power appendix says 30/36.
+ * The F-Class numbers are used -- they are what the published shift-by-one rule
+ * produces from the MR-1, they make the centre's black equal the MR-1's actual
+ * black (as the other three centres do), and F-Class is the owning discipline.
+ */
 const BUILTIN_TARGETS = [
   {
-    id:"sr", name:"SR", desc:"200yd short range", builtin:true,
+    id:"sr1", name:"SR-1", desc:"Reduction of SR — simulates the 200 yd stages",
+    discipline:"High Power", yards:100, builtin:true,
     rings:[
-      // Aiming black extended: X through 9 (13" diam). 8 and below are white.
-      {score:"X", diam:3.00,  color:'#1a1814'},
-      {score:"10",diam:7.00,  color:'#1a1814'},
-      {score:"9", diam:13.00, color:'#1a1814'},
-      {score:"8", diam:19.00, color:'#ffffff'},
-      {score:"7", diam:25.00, color:'#ffffff'},
-      {score:"6", diam:31.00, color:'#ffffff'},
-      {score:"5", diam:37.00, color:'#ffffff'},
+      {score:"X", diam:1.350, color:'#1a1814'},
+      {score:"10", diam:3.350, color:'#1a1814'},
+      {score:"9", diam:6.350, color:'#1a1814'},
+      {score:"8", diam:9.350, color:'#ffffff'},
+      {score:"7", diam:12.350, color:'#ffffff'},
+      {score:"6", diam:15.350, color:'#ffffff'},
+      {score:"5", diam:18.350, color:'#ffffff'},
     ]
   },
   {
-    id:"sr3", name:"SR-3", desc:"300yd rapid fire", builtin:true,
+    id:"sr21", name:"SR-21", desc:"Reduction of SR-3 — simulates the 300 yd stage",
+    discipline:"High Power", yards:100, builtin:true,
     rings:[
-      // Enlarged aiming black: X through 8 (19" diam). 7 and below white.
-      {score:"X", diam:3.00,  color:'#1a1814'},
-      {score:"10",diam:7.00,  color:'#1a1814'},
-      {score:"9", diam:13.00, color:'#1a1814'},
-      {score:"8", diam:19.00, color:'#1a1814'},
-      {score:"7", diam:25.00, color:'#ffffff'},
-      {score:"6", diam:31.00, color:'#ffffff'},
-      {score:"5", diam:37.00, color:'#ffffff'},
+      {score:"X", diam:0.790, color:'#1a1814'},
+      {score:"10", diam:2.120, color:'#1a1814'},
+      {score:"9", diam:4.120, color:'#1a1814'},
+      {score:"8", diam:6.120, color:'#1a1814'},
+      {score:"7", diam:8.120, color:'#ffffff'},
+      {score:"6", diam:10.120, color:'#ffffff'},
+      {score:"5", diam:12.120, color:'#ffffff'},
     ]
   },
   {
-    id:"mr1", name:"MR-1", desc:"600yd mid range", builtin:true,
+    id:"mr31", name:"MR-31", desc:"Reduction of MR-1 — simulates the 600 yd stage",
+    discipline:"High Power", yards:100, builtin:true,
     rings:[
-      // Enlarged aiming black: X through 7 (36" diam). 6 and below white.
-      {score:"X", diam:6.00,  color:'#1a1814'},
-      {score:"10",diam:12.00, color:'#1a1814'},
-      {score:"9", diam:18.00, color:'#1a1814'},
-      {score:"8", diam:24.00, color:'#1a1814'},
-      {score:"7", diam:36.00, color:'#1a1814'},
-      {score:"6", diam:48.00, color:'#ffffff'},
-      {score:"5", diam:60.00, color:'#ffffff'},
+      {score:"X", diam:0.750, color:'#1a1814'},
+      {score:"10", diam:1.750, color:'#1a1814'},
+      {score:"9", diam:2.750, color:'#1a1814'},
+      {score:"8", diam:3.750, color:'#1a1814'},
+      {score:"7", diam:5.750, color:'#1a1814'},
+      {score:"6", diam:7.750, color:'#ffffff'},
+      {score:"5", diam:9.750, color:'#ffffff'},
     ]
-  }
+  },
+  {
+    id:"sr", name:"SR", desc:"Short range — standing slow, sitting/kneeling rapid",
+    discipline:"High Power", yards:200, builtin:true,
+    rings:[
+      {score:"X", diam:3.000, color:'#1a1814'},
+      {score:"10", diam:7.000, color:'#1a1814'},
+      {score:"9", diam:13.000, color:'#1a1814'},
+      {score:"8", diam:19.000, color:'#ffffff'},
+      {score:"7", diam:25.000, color:'#ffffff'},
+      {score:"6", diam:31.000, color:'#ffffff'},
+      {score:"5", diam:37.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"sr5", name:"SR-5", desc:"SR rings through 7, for small target frames",
+    discipline:"High Power", yards:200, builtin:true,
+    rings:[
+      {score:"X", diam:3.000, color:'#1a1814'},
+      {score:"10", diam:7.000, color:'#1a1814'},
+      {score:"9", diam:13.000, color:'#1a1814'},
+      {score:"8", diam:19.000, color:'#ffffff'},
+      {score:"7", diam:25.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"sr42", name:"SR-42", desc:"Reduction of SR-3 — simulates the 300 yd stage",
+    discipline:"High Power", yards:200, builtin:true,
+    rings:[
+      {score:"X", diam:1.900, color:'#1a1814'},
+      {score:"10", diam:4.560, color:'#1a1814'},
+      {score:"9", diam:8.560, color:'#1a1814'},
+      {score:"8", diam:12.560, color:'#1a1814'},
+      {score:"7", diam:16.560, color:'#ffffff'},
+      {score:"6", diam:20.560, color:'#ffffff'},
+      {score:"5", diam:24.560, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr52", name:"MR-52", desc:"Reduction of MR-1 — simulates the 600 yd stage",
+    discipline:"High Power", yards:200, builtin:true,
+    rings:[
+      {score:"X", diam:1.790, color:'#1a1814'},
+      {score:"10", diam:3.790, color:'#1a1814'},
+      {score:"9", diam:5.790, color:'#1a1814'},
+      {score:"8", diam:7.790, color:'#1a1814'},
+      {score:"7", diam:11.790, color:'#1a1814'},
+      {score:"6", diam:15.790, color:'#ffffff'},
+      {score:"5", diam:19.790, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"sr3", name:"SR-3", desc:"Enlarged black — rapid fire only",
+    discipline:"High Power", yards:300, builtin:true,
+    rings:[
+      {score:"X", diam:3.000, color:'#1a1814'},
+      {score:"10", diam:7.000, color:'#1a1814'},
+      {score:"9", diam:13.000, color:'#1a1814'},
+      {score:"8", diam:19.000, color:'#1a1814'},
+      {score:"7", diam:25.000, color:'#ffffff'},
+      {score:"6", diam:31.000, color:'#ffffff'},
+      {score:"5", diam:37.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr63", name:"MR-63", desc:"Reduction of MR-1 — simulates the 600 yd stage",
+    discipline:"High Power", yards:300, builtin:true,
+    rings:[
+      {score:"X", diam:2.850, color:'#1a1814'},
+      {score:"10", diam:5.850, color:'#1a1814'},
+      {score:"9", diam:8.850, color:'#1a1814'},
+      {score:"8", diam:11.850, color:'#1a1814'},
+      {score:"7", diam:17.850, color:'#1a1814'},
+      {score:"6", diam:23.850, color:'#ffffff'},
+      {score:"5", diam:29.850, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr65", name:"MR-65", desc:"Mid range — 500 yd matches",
+    discipline:"High Power", yards:500, builtin:true,
+    rings:[
+      {score:"X", diam:5.000, color:'#1a1814'},
+      {score:"10", diam:10.000, color:'#1a1814'},
+      {score:"9", diam:15.000, color:'#1a1814'},
+      {score:"8", diam:20.000, color:'#1a1814'},
+      {score:"7", diam:25.000, color:'#1a1814'},
+      {score:"6", diam:30.000, color:'#1a1814'},
+      {score:"5", diam:36.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr1", name:"MR-1", desc:"Enlarged black — 600 yd prone slow fire",
+    discipline:"High Power", yards:600, builtin:true,
+    rings:[
+      {score:"X", diam:6.000, color:'#1a1814'},
+      {score:"10", diam:12.000, color:'#1a1814'},
+      {score:"9", diam:18.000, color:'#1a1814'},
+      {score:"8", diam:24.000, color:'#1a1814'},
+      {score:"7", diam:36.000, color:'#1a1814'},
+      {score:"6", diam:48.000, color:'#ffffff'},
+      {score:"5", diam:60.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr63fc", name:"MR-63 F-Class", desc:"F-Class centre over the MR-63",
+    discipline:"F-Class", yards:300, builtin:true,
+    rings:[
+      {score:"X", diam:1.420, color:'#1a1814'},
+      {score:"10", diam:2.850, color:'#1a1814'},
+      {score:"9", diam:5.850, color:'#1a1814'},
+      {score:"8", diam:8.850, color:'#1a1814'},
+      {score:"7", diam:11.850, color:'#1a1814'},
+      {score:"6", diam:17.850, color:'#1a1814'},
+      {score:"5", diam:23.850, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"mr65fc", name:"MR-65 F-Class", desc:"F-Class centre over the MR-65",
+    discipline:"F-Class", yards:500, builtin:true,
+    rings:[
+      {score:"X", diam:2.500, color:'#1a1814'},
+      {score:"10", diam:5.000, color:'#1a1814'},
+      {score:"9", diam:10.000, color:'#1a1814'},
+      {score:"8", diam:15.000, color:'#1a1814'},
+      {score:"7", diam:20.000, color:'#1a1814'},
+      {score:"6", diam:25.000, color:'#1a1814'},
+      {score:"5", diam:30.000, color:'#1a1814'},
+    ]
+  },
+  {
+    id:"mr1fc", name:"MR-1 F-Class", desc:"F-Class centre over the MR-1",
+    discipline:"F-Class", yards:600, builtin:true,
+    rings:[
+      {score:"X", diam:3.000, color:'#1a1814'},
+      {score:"10", diam:6.000, color:'#1a1814'},
+      {score:"9", diam:12.000, color:'#1a1814'},
+      {score:"8", diam:18.000, color:'#1a1814'},
+      {score:"7", diam:24.000, color:'#1a1814'},
+      {score:"6", diam:36.000, color:'#1a1814'},
+      {score:"5", diam:48.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a17", name:"A-17", desc:"50 ft — conventional 4-position, 11 bulls",
+    discipline:"Smallbore", yards:17, builtin:true,
+    rings:[
+      {score:"10", diam:0.150, color:'#1a1814'},
+      {score:"9", diam:0.483, color:'#1a1814'},
+      {score:"8", diam:0.817, color:'#1a1814'},
+      {score:"7", diam:1.150, color:'#1a1814'},
+      {score:"6", diam:1.483, color:'#1a1814'},
+      {score:"5", diam:1.817, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a32", name:"A-32", desc:"50 ft — NRA Light Rifle, 6 bulls",
+    discipline:"Smallbore", yards:17, builtin:true,
+    rings:[
+      {score:"10", diam:0.439, color:'#1a1814'},
+      {score:"9", diam:1.187, color:'#1a1814'},
+      {score:"8", diam:1.874, color:'#1a1814'},
+      {score:"7", diam:2.656, color:'#ffffff'},
+      {score:"6", diam:3.374, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a7", name:"A-7", desc:"75 ft — conventional 4-position",
+    discipline:"Smallbore", yards:25, builtin:true,
+    rings:[
+      {score:"10", diam:0.335, color:'#1a1814'},
+      {score:"9", diam:0.835, color:'#1a1814'},
+      {score:"8", diam:1.335, color:'#1a1814'},
+      {score:"7", diam:1.835, color:'#1a1814'},
+      {score:"6", diam:2.335, color:'#1a1814'},
+      {score:"5", diam:2.835, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a23", name:"A-23", desc:"50 yd — 4-position and the 50 yd prone stage",
+    discipline:"Smallbore", yards:50, builtin:true,
+    rings:[
+      {score:"X", diam:0.390, color:'#1a1814'},
+      {score:"10", diam:0.890, color:'#1a1814'},
+      {score:"9", diam:1.890, color:'#1a1814'},
+      {score:"8", diam:2.890, color:'#1a1814'},
+      {score:"7", diam:3.890, color:'#1a1814'},
+      {score:"6", diam:4.890, color:'#ffffff'},
+      {score:"5", diam:5.890, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a27", name:"A-27", desc:"50 yd — the 50 m target reduced; prone only",
+    discipline:"Smallbore", yards:50, builtin:true,
+    rings:[
+      {score:"X", diam:0.359, color:'#1a1814'},
+      {score:"10", diam:0.719, color:'#1a1814'},
+      {score:"9", diam:1.439, color:'#1a1814'},
+      {score:"8", diam:2.159, color:'#1a1814'},
+      {score:"7", diam:2.879, color:'#1a1814'},
+      {score:"6", diam:3.599, color:'#1a1814'},
+      {score:"5", diam:4.319, color:'#ffffff'},
+      {score:"4", diam:5.038, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a26", name:"A-26", desc:"50 m — conventional prone",
+    discipline:"Smallbore", yards:55, builtin:true,
+    rings:[
+      {score:"X", diam:0.393, color:'#1a1814'},
+      {score:"10", diam:0.787, color:'#1a1814'},
+      {score:"9", diam:1.574, color:'#1a1814'},
+      {score:"8", diam:2.361, color:'#1a1814'},
+      {score:"7", diam:3.148, color:'#1a1814'},
+      {score:"6", diam:3.936, color:'#1a1814'},
+      {score:"5", diam:4.723, color:'#ffffff'},
+      {score:"4", diam:5.510, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a25", name:"A-25", desc:"100 yd — conventional prone, the Dewar 100 yd leg",
+    discipline:"Smallbore", yards:100, builtin:true,
+    rings:[
+      {score:"X", diam:1.000, color:'#1a1814'},
+      {score:"10", diam:2.000, color:'#1a1814'},
+      {score:"9", diam:4.000, color:'#1a1814'},
+      {score:"8", diam:6.000, color:'#1a1814'},
+      {score:"7", diam:8.000, color:'#1a1814'},
+      {score:"6", diam:10.000, color:'#ffffff'},
+      {score:"5", diam:12.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a33", name:"A-33", desc:"100 yd — the ISSF 300 m target reduced; metric prone",
+    discipline:"Smallbore", yards:100, builtin:true,
+    rings:[
+      {score:"10", diam:1.045, color:'#1a1814'},
+      {score:"9", diam:2.245, color:'#1a1814'},
+      {score:"8", diam:3.445, color:'#1a1814'},
+      {score:"7", diam:4.645, color:'#1a1814'},
+      {score:"6", diam:5.845, color:'#1a1814'},
+      {score:"5", diam:7.045, color:'#1a1814'},
+      {score:"4", diam:8.245, color:'#1a1814'},
+      {score:"3", diam:9.445, color:'#ffffff'},
+      {score:"2", diam:10.645, color:'#ffffff'},
+      {score:"1", diam:11.845, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a21", name:"A-21", desc:"200 yd — long range conventional prone",
+    discipline:"Smallbore", yards:200, builtin:true,
+    rings:[
+      {score:"X", diam:2.000, color:'#1a1814'},
+      {score:"10", diam:4.000, color:'#1a1814'},
+      {score:"9", diam:8.000, color:'#1a1814'},
+      {score:"8", diam:12.000, color:'#1a1814'},
+      {score:"7", diam:16.000, color:'#ffffff'},
+      {score:"6", diam:20.000, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a37", name:"A-37", desc:"100 yd \"Mini-Palma\" — the LR at 800 yd reduced",
+    discipline:"Smallbore", yards:100, builtin:true,
+    rings:[
+      {score:"X", diam:1.000, color:'#1a1814'},
+      {score:"10", diam:2.000, color:'#1a1814'},
+      {score:"9", diam:2.900, color:'#1a1814'},
+      {score:"8", diam:3.900, color:'#1a1814'},
+      {score:"7", diam:4.900, color:'#1a1814'},
+      {score:"6", diam:5.800, color:'#1a1814'},
+      {score:"5", diam:6.800, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a50", name:"A-50", desc:"50 m ISSF — metric position and prone",
+    discipline:"Smallbore", yards:55, builtin:true,
+    rings:[
+      {score:"X", diam:0.197, color:'#1a1814'},
+      {score:"10", diam:0.409, color:'#1a1814'},
+      {score:"9", diam:1.039, color:'#1a1814'},
+      {score:"8", diam:1.669, color:'#1a1814'},
+      {score:"7", diam:2.299, color:'#1a1814'},
+      {score:"6", diam:2.929, color:'#1a1814'},
+      {score:"5", diam:3.559, color:'#1a1814'},
+      {score:"4", diam:4.189, color:'#1a1814'},
+      {score:"3", diam:4.819, color:'#ffffff'},
+      {score:"2", diam:5.449, color:'#ffffff'},
+      {score:"1", diam:6.079, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"a51", name:"A-51", desc:"50 yd — the 50 m ISSF target reduced",
+    discipline:"Smallbore", yards:50, builtin:true,
+    rings:[
+      {score:"X", diam:0.161, color:'#1a1814'},
+      {score:"10", diam:0.356, color:'#1a1814'},
+      {score:"9", diam:0.932, color:'#1a1814'},
+      {score:"8", diam:1.508, color:'#1a1814'},
+      {score:"7", diam:2.084, color:'#1a1814'},
+      {score:"6", diam:2.660, color:'#1a1814'},
+      {score:"5", diam:3.236, color:'#1a1814'},
+      {score:"4", diam:3.812, color:'#1a1814'},
+      {score:"3", diam:4.388, color:'#ffffff'},
+      {score:"2", diam:4.964, color:'#ffffff'},
+      {score:"1", diam:5.540, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"usas50", name:"USAS-50", desc:"50 ft — the 50 m ISSF target reduced, 12 bulls",
+    discipline:"Smallbore", yards:17, builtin:true,
+    rings:[
+      {score:"10", diam:0.030, color:'#1a1814'},
+      {score:"9", diam:0.162, color:'#1a1814'},
+      {score:"8", diam:0.354, color:'#1a1814'},
+      {score:"7", diam:0.546, color:'#1a1814'},
+      {score:"6", diam:0.738, color:'#1a1814'},
+      {score:"5", diam:0.930, color:'#1a1814'},
+      {score:"4", diam:1.122, color:'#1a1814'},
+      {score:"3", diam:1.314, color:'#1a1814'},
+    ]
+  },
+  {
+    id:"b2", name:"B-2", desc:"50 ft slow fire",
+    discipline:"Pistol", yards:17, builtin:true,
+    rings:[
+      {score:"10", diam:0.900, color:'#1a1814'},
+      {score:"9", diam:1.540, color:'#1a1814'},
+      {score:"8", diam:2.230, color:'#1a1814'},
+      {score:"7", diam:3.070, color:'#1a1814'},
+      {score:"6", diam:4.160, color:'#ffffff'},
+      {score:"5", diam:5.560, color:'#ffffff'},
+      {score:"4", diam:7.330, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b3", name:"B-3", desc:"50 ft timed and rapid fire",
+    discipline:"Pistol", yards:17, builtin:true,
+    rings:[
+      {score:"X", diam:0.900, color:'#1a1814'},
+      {score:"10", diam:1.800, color:'#1a1814'},
+      {score:"9", diam:3.060, color:'#1a1814'},
+      {score:"8", diam:4.460, color:'#ffffff'},
+      {score:"7", diam:6.140, color:'#ffffff'},
+      {score:"6", diam:8.320, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b4", name:"B-4", desc:"20 yd slow fire",
+    discipline:"Pistol", yards:20, builtin:true,
+    rings:[
+      {score:"10", diam:1.120, color:'#1a1814'},
+      {score:"9", diam:1.880, color:'#1a1814'},
+      {score:"8", diam:2.720, color:'#1a1814'},
+      {score:"7", diam:3.730, color:'#1a1814'},
+      {score:"6", diam:5.040, color:'#ffffff'},
+      {score:"5", diam:6.720, color:'#ffffff'},
+      {score:"4", diam:8.840, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b5", name:"B-5", desc:"20 yd timed and rapid fire",
+    discipline:"Pistol", yards:20, builtin:true,
+    rings:[
+      {score:"X", diam:1.120, color:'#1a1814'},
+      {score:"10", diam:2.250, color:'#1a1814'},
+      {score:"9", diam:3.760, color:'#1a1814'},
+      {score:"8", diam:5.440, color:'#ffffff'},
+      {score:"7", diam:7.460, color:'#ffffff'},
+      {score:"6", diam:10.080, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b16", name:"B-16", desc:"25 yd slow fire — NRA short course",
+    discipline:"Pistol", yards:25, builtin:true,
+    rings:[
+      {score:"X", diam:0.670, color:'#1a1814'},
+      {score:"10", diam:1.510, color:'#1a1814'},
+      {score:"9", diam:2.600, color:'#1a1814'},
+      {score:"8", diam:3.820, color:'#1a1814'},
+      {score:"7", diam:5.320, color:'#1a1814'},
+      {score:"6", diam:7.220, color:'#ffffff'},
+      {score:"5", diam:9.660, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b8", name:"B-8", desc:"25 yd timed and rapid fire",
+    discipline:"Pistol", yards:25, builtin:true,
+    rings:[
+      {score:"X", diam:1.695, color:'#1a1814'},
+      {score:"10", diam:3.360, color:'#1a1814'},
+      {score:"9", diam:5.540, color:'#1a1814'},
+      {score:"8", diam:8.000, color:'#ffffff'},
+      {score:"7", diam:11.000, color:'#ffffff'},
+      {score:"6", diam:14.800, color:'#ffffff'},
+      {score:"5", diam:19.680, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b6", name:"B-6", desc:"50 yd slow fire — the Standard American",
+    discipline:"Pistol", yards:50, builtin:true,
+    rings:[
+      {score:"X", diam:1.695, color:'#1a1814'},
+      {score:"10", diam:3.360, color:'#1a1814'},
+      {score:"9", diam:5.540, color:'#1a1814'},
+      {score:"8", diam:8.000, color:'#1a1814'},
+      {score:"7", diam:11.000, color:'#ffffff'},
+      {score:"6", diam:14.800, color:'#ffffff'},
+      {score:"5", diam:19.680, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b40", name:"B-40", desc:"10 m air pistol",
+    discipline:"Pistol", yards:11, builtin:true,
+    rings:[
+      {score:"X", diam:0.197, color:'#1a1814'},
+      {score:"10", diam:0.453, color:'#1a1814'},
+      {score:"9", diam:1.083, color:'#1a1814'},
+      {score:"8", diam:1.713, color:'#1a1814'},
+      {score:"7", diam:2.343, color:'#1a1814'},
+      {score:"6", diam:2.972, color:'#ffffff'},
+      {score:"5", diam:3.602, color:'#ffffff'},
+      {score:"4", diam:4.232, color:'#ffffff'},
+      {score:"3", diam:4.862, color:'#ffffff'},
+      {score:"2", diam:5.492, color:'#ffffff'},
+      {score:"1", diam:6.122, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b11", name:"B-11", desc:"50 ft slow fire — free pistol, the 50 m reduced",
+    discipline:"Pistol", yards:17, builtin:true,
+    rings:[
+      {score:"X", diam:0.150, color:'#1a1814'},
+      {score:"10", diam:0.450, color:'#1a1814'},
+      {score:"9", diam:1.050, color:'#1a1814'},
+      {score:"8", diam:1.650, color:'#1a1814'},
+      {score:"7", diam:2.250, color:'#1a1814'},
+      {score:"6", diam:2.850, color:'#ffffff'},
+      {score:"5", diam:3.450, color:'#ffffff'},
+      {score:"4", diam:4.050, color:'#ffffff'},
+      {score:"3", diam:4.650, color:'#ffffff'},
+      {score:"2", diam:5.250, color:'#ffffff'},
+      {score:"1", diam:5.850, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b33", name:"B-33", desc:"50 ft — standard, sport and centre fire pistol",
+    discipline:"Pistol", yards:17, builtin:true,
+    rings:[
+      {score:"10", diam:1.100, color:'#1a1814'},
+      {score:"9", diam:2.300, color:'#1a1814'},
+      {score:"8", diam:3.500, color:'#1a1814'},
+      {score:"7", diam:4.700, color:'#1a1814'},
+      {score:"6", diam:5.900, color:'#ffffff'},
+      {score:"5", diam:7.100, color:'#ffffff'},
+      {score:"4", diam:8.300, color:'#ffffff'},
+      {score:"3", diam:9.500, color:'#ffffff'},
+      {score:"2", diam:10.700, color:'#ffffff'},
+      {score:"1", diam:11.900, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b19", name:"B-19", desc:"25 yd precision and 50 yd free pistol — the 50 m reduced",
+    discipline:"Pistol", yards:25, builtin:true,
+    rings:[
+      {score:"X", diam:0.880, color:'#1a1814'},
+      {score:"10", diam:1.780, color:'#1a1814'},
+      {score:"9", diam:3.580, color:'#1a1814'},
+      {score:"8", diam:5.380, color:'#1a1814'},
+      {score:"7", diam:7.180, color:'#1a1814'},
+      {score:"6", diam:8.980, color:'#ffffff'},
+      {score:"5", diam:10.780, color:'#ffffff'},
+      {score:"4", diam:12.580, color:'#ffffff'},
+      {score:"3", diam:14.380, color:'#ffffff'},
+      {score:"2", diam:16.180, color:'#ffffff'},
+      {score:"1", diam:17.980, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b17", name:"B-17", desc:"25 m and 50 m — free, standard, centre fire and sport",
+    discipline:"Pistol", yards:27, builtin:true,
+    rings:[
+      {score:"X", diam:0.984, color:'#1a1814'},
+      {score:"10", diam:1.969, color:'#1a1814'},
+      {score:"9", diam:3.937, color:'#1a1814'},
+      {score:"8", diam:5.906, color:'#1a1814'},
+      {score:"7", diam:7.874, color:'#1a1814'},
+      {score:"6", diam:9.843, color:'#ffffff'},
+      {score:"5", diam:11.811, color:'#ffffff'},
+      {score:"4", diam:13.780, color:'#ffffff'},
+      {score:"3", diam:15.748, color:'#ffffff'},
+      {score:"2", diam:17.717, color:'#ffffff'},
+      {score:"1", diam:19.685, color:'#ffffff'},
+    ]
+  },
+  {
+    id:"b37", name:"B-37", desc:"25 m rapid fire pistol",
+    discipline:"Pistol", yards:27, builtin:true,
+    rings:[
+      {score:"X", diam:1.969, color:'#1a1814'},
+      {score:"10", diam:3.937, color:'#1a1814'},
+      {score:"9", diam:7.087, color:'#1a1814'},
+      {score:"8", diam:10.236, color:'#1a1814'},
+      {score:"7", diam:13.386, color:'#1a1814'},
+      {score:"6", diam:16.535, color:'#1a1814'},
+      {score:"5", diam:19.685, color:'#1a1814'},
+    ]
+  },
+  /* The two Long Range targets are ZONE targets, not ring targets, because
+   * their outermost scoring area is the 72"×72" sheet itself -- everything
+   * inside the paper and outside the 7 ring. A radius-only model scores a
+   * corner hit as a miss when the rule book scores it a 6. */
+  {
+    id:"lr", name:"LR", desc:"800 / 900 / 1000 yd — prone slow fire, Palma and Long Range",
+    discipline:"Long Range", yards:1000, builtin:true,
+    zones:[
+      {score:"X",  color:'#1a1814', shape:{kind:'circle', d:10}},
+      {score:"10", color:'#1a1814', shape:{kind:'circle', d:20}},
+      {score:"9",  color:'#1a1814', shape:{kind:'circle', d:30}},
+      {score:"8",  color:'#1a1814', shape:{kind:'circle', d:44}},
+      {score:"7",  color:'#ffffff', shape:{kind:'circle', d:60}},
+      /* Not a ring. The 6 is the rest of the sheet. */
+      {score:"6",  color:'#ffffff', shape:{kind:'rect', w:72, h:72}},
+    ]
+  },
+  {
+    id:"lrfc", name:"LR F-Class", desc:"800 / 900 / 1000 yd — F-Class centre over the LR",
+    discipline:"Long Range", yards:1000, builtin:true,
+    zones:[
+      {score:"X",  color:'#1a1814', shape:{kind:'circle', d:5}},
+      {score:"10", color:'#1a1814', shape:{kind:'circle', d:10}},
+      {score:"9",  color:'#1a1814', shape:{kind:'circle', d:20}},
+      {score:"8",  color:'#1a1814', shape:{kind:'circle', d:30}},
+      {score:"7",  color:'#1a1814', shape:{kind:'circle', d:44}},
+      {score:"6",  color:'#ffffff', shape:{kind:'circle', d:60}},
+      {score:"5",  color:'#ffffff', shape:{kind:'rect', w:72, h:72}},
+    ]
+  },
 ];
+/* A zone target carries synthetic bounding-circle rings so that every
+ * ring-reading consumer -- the view stepping, the library pills, ring colours,
+ * the shot chips -- works on it untouched. A user-created zone target gets
+ * these at save time; the two built-in ones get them here. `function`
+ * declarations hoist, so this runs before anything reads a target. */
+for (const t of BUILTIN_TARGETS) {
+  if (t.zones && t.zones.length && !t.rings) t.rings = synthRingsFromZones(t.zones);
+}
+
+/* Which targets this shooter actually uses, kept at the top of every picker.
+ *
+ * Forty targets is the right library and the wrong list to scroll on a phone at
+ * a firing point. A High Power shooter wants SR, SR-3 and MR-1; a smallbore
+ * prone shooter wants A-23 and A-50; neither wants to pass the other's on the
+ * way. Pinning is per shooter and rides the backup like every other preference,
+ * because it is a fact about the person rather than about the data. */
+const DEFAULT_PINNED = ['sr', 'sr3', 'mr1'];
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
@@ -4931,6 +5522,7 @@ function App() {
   const [matches, setMatches] = useState([]);
   const [customTargets, setCustomTargets] = useState([]);
   const [deletedBuiltins, setDeletedBuiltins] = useState([]);
+  const [pinnedTargets, setPinnedTargets] = useState(DEFAULT_PINNED);
   const [firearms, setFirearms] = useState([]);
   const [ammo, setAmmo] = useState([]);
   const [screen, setScreen] = useState('home');
@@ -4996,6 +5588,11 @@ function App() {
       try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(usableTargets(JSON.parse(r.value))); } catch { bootFailed.current.customTargets = true; }
       try { const r = await window.storage.get('deleted_builtins_v1'); const v = r ? JSON.parse(r.value) : null;
              if (r) setDeletedBuiltins(Array.isArray(v) ? v.filter(x => typeof x === 'string') : []); } catch { bootFailed.current.deletedBuiltins = true; }
+      /* Absent means "never chosen", which is not the same as "chose none" --
+         a new shooter gets the three conventional High Power targets pinned so
+         the picker is useful before they have told it anything. */
+      try { const r = await window.storage.get('pinned_targets_v1'); const v = r ? JSON.parse(r.value) : null;
+             if (r) setPinnedTargets(Array.isArray(v) ? v.filter(x => typeof x === 'string') : []); } catch { bootFailed.current.pinnedTargets = true; }
       try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.firearms = true; }
       try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.ammo = true; }
       try { const r = await window.storage.get('backup_meta_v1'); if (r) setBackupMeta(JSON.parse(r.value)); } catch {}
@@ -5071,7 +5668,24 @@ function App() {
   }, [ready, sessions, matches, customTargets, deletedBuiltins, firearms, ammo]);
 
   const visibleBuiltins = BUILTIN_TARGETS.filter(t => !deletedBuiltins.includes(t.id));
-  const allTargets = [...visibleBuiltins, ...customTargets];
+  /* Pinned first, in the order they were pinned; then everything else grouped
+     by discipline and ordered by the distance it is shot at, which is how a
+     shooter thinks about them. Custom targets sit with the built-ins of no
+     discipline, at the end, because they are usually one-offs. */
+  const targetOrder = (list) => {
+    const pin = (t) => pinnedTargets.indexOf(t.id);
+    return [...list].sort((a, b) => {
+      const pa = pin(a), pb = pin(b);
+      if (pa >= 0 || pb >= 0) {
+        if (pa >= 0 && pb >= 0) return pa - pb;
+        return pa >= 0 ? -1 : 1;
+      }
+      const da = a.discipline || 'zzz', db = b.discipline || 'zzz';
+      if (da !== db) return da < db ? -1 : 1;
+      return (a.yards || 0) - (b.yards || 0);
+    });
+  };
+  const allTargets = targetOrder([...visibleBuiltins, ...customTargets]);
 
   const saveSessions = async data => {
     setSessions(data);
@@ -5093,6 +5707,10 @@ function App() {
     const clean = usableTargets(data);
     setCustomTargets(clean);
     try { await window.storage.set('custom_targets_v1', JSON.stringify(clean)); } catch {}
+  };
+  const savePinnedTargets = async data => {
+    setPinnedTargets(data);
+    try { await window.storage.set('pinned_targets_v1', JSON.stringify(data)); } catch {}
   };
   const saveDeletedBuiltins = async data => {
     setDeletedBuiltins(data);
@@ -5265,7 +5883,8 @@ function App() {
       schema: 'zero-backup', version: 1, exportedAt: new Date().toISOString(),
       data: {
         sessions_v1: sessions, matches_v1: matches, custom_targets_v1: customTargets,
-        deleted_builtins_v1: deletedBuiltins, rifles_v1: firearms, ammo_v1: ammo,
+        deleted_builtins_v1: deletedBuiltins, pinned_targets_v1: pinnedTargets,
+        rifles_v1: firearms, ammo_v1: ammo,
       },
     };
     const text = JSON.stringify(payload, null, 2);
@@ -5673,7 +6292,9 @@ function App() {
           {tab==='more' && more !== null && (
             <>
               {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
-              {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))} />}
+              {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))}
+                pinned={pinnedTargets}
+                onTogglePin={id=>savePinnedTargets(pinnedTargets.includes(id) ? pinnedTargets.filter(p=>p!==id) : [...pinnedTargets, id])} />}
               {more==='bench' && <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />}
               {more==='sync' && (
                 <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
@@ -9737,7 +10358,7 @@ function RingColorPicker({ color, onChange }) {
 }
 
 /* ── Targets tab ── */
-function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, onRestoreBuiltin }) {
+function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, onRestoreBuiltin, pinned, onTogglePin }) {
   const [open, setOpen] = useState(null);
   const [adding, setAdding] = useState(false);
   const [confirmDel, setConfirmDel] = useState(null);
@@ -9751,7 +10372,25 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
 
   const visibleBuiltins = BUILTIN_TARGETS.filter(t => !deletedBuiltins.includes(t.id));
   const hiddenBuiltins = BUILTIN_TARGETS.filter(t => deletedBuiltins.includes(t.id));
+  /* Forty targets is the right library and the wrong flat list. Pinned first --
+     the handful this shooter actually uses -- then grouped by discipline and
+     ordered by the distance each is shot at, which is how they are thought
+     about. Custom targets land in their own group at the end. */
   const allVisible = [...visibleBuiltins, ...customTargets];
+  const pinnedList = (pinned || []).map(id => allVisible.find(t => t.id === id)).filter(Boolean);
+  const rest = allVisible.filter(t => !(pinned || []).includes(t.id));
+  const groups = [];
+  if (pinnedList.length) groups.push(['Yours', pinnedList]);
+  for (const t of rest) {
+    const key = t.discipline || (t.builtin ? 'Other' : 'Custom');
+    let g = groups.find(x => x[0] === key);
+    if (!g) { g = [key, []]; groups.push(g); }
+    g[1].push(t);
+  }
+  for (const g of groups) {
+    if (g[0] === 'Yours') continue;
+    g[1].sort((a2, b2) => (a2.yards || 0) - (b2.yards || 0));
+  }
 
   return (
     <div>
@@ -9760,7 +10399,13 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
         <button className="badd" onClick={()=>setAdding(true)} style={{fontSize:11,padding:'5px 11px'}}>+ target</button>
       </div>
 
-      {allVisible.map(t=>(
+      {groups.map(([label, list]) => (
+       <div key={label}>
+        <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.14em',
+                     textTransform:'uppercase',padding:'12px 13px 4px'}}>
+          {label}{label === 'Yours' ? '' : ` · ${list.length}`}
+        </div>
+        {list.map(t=>(
         <div className="tcard" key={t.id}>
           <div className="tch" onClick={()=>setOpen(open===t.id?null:t.id)}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
@@ -9795,7 +10440,21 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
                     onClick={()=>setConfirmDel(null)}>no</button>
                 </div>
               ) : (
-                <button className="bdel" style={{fontSize:9}} onClick={e=>{e.stopPropagation();setConfirmDel(t.id);}}>remove</button>
+                <>
+                  {/* The pin is the whole point of a forty-target library: it
+                      is what keeps the three you shoot at the top of every
+                      picker instead of scrolling past thirty-seven you do not. */}
+                  <button
+                    onClick={e=>{e.stopPropagation();onTogglePin(t.id);}}
+                    title={(pinned||[]).includes(t.id) ? 'Unpin' : 'Pin to the top of every picker'}
+                    style={{fontFamily:'var(--fm)',fontSize:9,cursor:'pointer',borderRadius:4,
+                            padding:'3px 8px',background:'none',
+                            color:(pinned||[]).includes(t.id) ? 'var(--acc)' : 'var(--dim)',
+                            border:`1px solid ${(pinned||[]).includes(t.id) ? 'var(--acc)' : 'var(--bdr)'}`}}>
+                    {(pinned||[]).includes(t.id) ? '★ pinned' : '☆ pin'}
+                  </button>
+                  <button className="bdel" style={{fontSize:9}} onClick={e=>{e.stopPropagation();setConfirmDel(t.id);}}>remove</button>
+                </>
               )}
               <div style={{color:'var(--dim)',fontSize:12}}>{open===t.id?'▲':'▼'}</div>
             </div>
@@ -9825,6 +10484,8 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
             </table>
           )}
         </div>
+        ))}
+       </div>
       ))}
 
       {hiddenBuiltins.length > 0 && (
@@ -10269,6 +10930,7 @@ function CloudBackupCard({ core, data, onMerge, onReplace, compact }) {
     data: {
       sessions_v1: data.sessions, matches_v1: data.matches,
       custom_targets_v1: data.customTargets, deleted_builtins_v1: data.deletedBuiltins,
+      pinned_targets_v1: data.pinnedTargets,
       rifles_v1: data.firearms, ammo_v1: data.ammo,
     },
   });

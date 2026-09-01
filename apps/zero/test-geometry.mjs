@@ -151,5 +151,107 @@ section('ring targets are unchanged');
      'and a miss on a ring target is still just outside the outermost ring');
 }
 
+/* ==================================== the NRA library, checked against itself */
+/* Forty targets of transcribed numbers is forty chances to fat-finger a
+ * diameter, and a wrong one is invisible: the target renders, the shot scores,
+ * and every group measured against it is quietly wrong. These are the checks
+ * that can be made without a rule book in hand.
+ *
+ * The reduction arithmetic is the strongest of them. NRA publishes the
+ * relationships in words ("the MR-31 is a reduction of the MR-1 for 300 yards")
+ * and no formula, but the published numbers do follow one:
+ *
+ *     D_reduced = ratio × (D_parent + 0.30) − 0.30      (.30-cal allowance)
+ *
+ * It is used here ONLY as a checksum on the typing, never as a source. Where it
+ * disagrees by more than a hundredth, someone mistyped. */
+section('the NRA target library');
+{
+  const lib = (() => {
+    const i = src.indexOf('const BUILTIN_TARGETS = [');
+    /* Through the loop that follows the array, not just the array: the two
+     * zone targets get their synthetic rings there, and a library evaluated
+     * without it is not the library the app runs. */
+    const j = src.indexOf('const DEFAULT_PINNED', i);
+    if (j < 0) throw new Error('test-geometry: DEFAULT_PINNED no longer follows the library');
+    return new Function(grab('shapeBoundR') + grab('synthRingsFromZones')
+      + src.slice(i, j) + '\nreturn BUILTIN_TARGETS;')();
+  })();
+
+  ok(lib.length >= 40, `${lib.length} targets in the library`);
+  ok(new Set(lib.map(t => t.id)).size === lib.length, 'every target id is unique');
+  ok(new Set(lib.map(t => t.name)).size === lib.length, 'and so is every name');
+
+  /* The three that shipped before this library must keep their ids, or every
+   * session already logged against them loses its paper. */
+  for (const id of ['sr', 'sr3', 'mr1']) {
+    ok(lib.some(t => t.id === id), `the original ${id} keeps its id, so existing sessions still resolve`);
+  }
+
+  const bad = [];
+  for (const t of lib) {
+    const rings = t.rings || [];
+    if (!rings.length) { bad.push(`${t.name}: no rings`); continue; }
+    for (let i = 1; i < rings.length; i++) {
+      if (!(rings[i].diam > rings[i - 1].diam)) {
+        bad.push(`${t.name}: ${rings[i].score} (${rings[i].diam}") is not outside ${rings[i-1].score} (${rings[i-1].diam}")`);
+      }
+    }
+    if (rings.some(r => !(r.diam > 0))) bad.push(`${t.name}: a ring with no diameter`);
+    if (!t.discipline) bad.push(`${t.name}: no discipline, so it cannot be grouped`);
+  }
+  ok(bad.length === 0, `every ring is larger than the one inside it${bad.length ? ' — ' + bad.slice(0, 3).join('; ') : ''}`);
+
+  /* Scores run inward: X (or 10) is the smallest ring. A target whose scores
+   * ascend outward would score every shot backwards. */
+  const backwards = lib.filter(t => {
+    const nums = (t.rings || []).map(r => (r.score === 'X' ? 11 : Number(r.score)))
+      .filter(n => Number.isFinite(n));
+    return nums.some((n, i) => i > 0 && n > nums[i - 1]);
+  });
+  ok(backwards.length === 0,
+     `scores descend outward on every target${backwards.length ? ' — ' + backwards.map(t => t.name).join(', ') : ''}`);
+
+  /* The reduction checksum. */
+  const byId = Object.fromEntries(lib.map(t => [t.id, t]));
+  const REDUCTIONS = [
+    ['sr1',  'sr',   1 / 2],   ['sr42', 'sr3', 2 / 3],
+    ['mr31', 'mr1',  1 / 6],   ['mr63', 'mr1', 1 / 2],
+    ['mr52', 'mr1',  1 / 3],   ['sr21', 'sr3', 1 / 3],
+  ];
+  const off = [];
+  for (const [kid, parent, ratio] of REDUCTIONS) {
+    const c = byId[kid], p = byId[parent];
+    if (!c || !p) { off.push(`${kid}: missing`); continue; }
+    for (let i = 0; i < c.rings.length && i < p.rings.length; i++) {
+      const want = ratio * (p.rings[i].diam + 0.30) - 0.30;
+      const got = c.rings[i].diam;
+      /* 0.02" of slack: NRA truncates rather than rounds, and the two
+       * one-third reductions are uniformly 0.01 low against an exact ratio --
+       * consistent with the ratio itself having been truncated to 0.3333
+       * before the rings were computed. */
+      if (Math.abs(got - want) > 0.02) {
+        off.push(`${c.name} ${c.rings[i].score}: ${got}" vs ${want.toFixed(2)}" from ${p.name}`);
+      }
+    }
+  }
+  ok(off.length === 0,
+     `all 6 published reductions reproduce their parent's rings${off.length ? ' — ' + off.slice(0, 4).join('; ') : ''}`);
+
+  /* The two Long Range targets are zone targets because their outermost
+   * scoring area is the square sheet, not a ring. A radius-only model scores a
+   * corner hit as a miss where the rule book scores it a 6. */
+  const lr = byId['lr'];
+  ok(lr && lr.zones && lr.zones.some(z => z.shape.kind === 'rect'),
+     'the LR carries a square outer zone, not a seventh circle');
+  if (lr) {
+    const corner = G.xyToZone(lr, 34, 34);      // inside the 72" sheet, far outside the 7 ring
+    ok(corner.ring === '6',
+       `a hit in the corner of the LR sheet scores a 6, not a miss (${corner.ring})`);
+    const off72 = G.xyToZone(lr, 40, 40);       // outside the sheet
+    ok(off72.ring === 'M', `and a hit off the paper is still a miss (${off72.ring})`);
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

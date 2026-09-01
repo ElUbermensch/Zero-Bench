@@ -569,6 +569,78 @@ console.log('\nlogbooks written by an earlier build');
   await ctx2.close();
 }
 
+/* ============================ forty targets, and the three you actually shoot */
+/* The library is the right size and the wrong list to scroll at a firing point.
+ * Pinning is what makes it usable: the handful this shooter uses sit at the top
+ * of every picker, and the other thirty-seven are grouped by discipline behind
+ * them. Per shooter, and it rides the backup, because it is a fact about the
+ * person rather than about the data. */
+console.log('\nthe target library');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+  await p.evaluate(() => localStorage.clear());
+  await p.reload(); await p.waitForTimeout(800);
+
+  await p.click('.tabbar button:has-text("More")');
+  await p.waitForTimeout(250);
+  await p.click('button:has-text("Targets")');
+  await p.waitForTimeout(500);
+
+  const body = await p.textContent('body');
+  for (const [name, why] of [['SR-3', 'High Power'], ['MR-1 F-Class', 'F-Class'],
+                             ['A-23', 'Smallbore'], ['B-8', 'Pistol'], ['LR', 'Long Range']]) {
+    ok(body.includes(name), `the library has the ${name} (${why})`);
+  }
+  ok(/High Power/.test(body) && /Smallbore/.test(body) && /Pistol/.test(body),
+     '...grouped by discipline rather than as one flat list of forty');
+
+  /* A new shooter starts with the three conventional High Power targets
+     pinned, so the picker is useful before they have told it anything. */
+  ok(/Yours/.test(body), 'and a group of the shooter\'s own at the top');
+  const pinnedAtStart = await p.evaluate(() =>
+    JSON.parse(localStorage.getItem('pinned_targets_v1') || 'null'));
+  ok(pinnedAtStart === null, '...defaulted rather than written, so it is not a choice they made');
+
+  /* Pin one, and check it reaches the picker a session is actually started
+     from -- which is the only place pinning matters. */
+  const pinBtn = p.locator('button:has-text("☆ pin")').first();
+  await pinBtn.scrollIntoViewIfNeeded();
+  await pinBtn.click();
+  await p.waitForTimeout(400);
+  const pinned = await p.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1') || '[]'));
+  ok(pinned.length === 4, `pinning writes the choice (${pinned.join(', ')})`);
+
+  await p.click('.tabbar button:has-text("Sessions")');
+  await p.waitForTimeout(300);
+  await p.click('button:has-text("+ session")');
+  await p.waitForTimeout(500);
+  /* The TARGET dropdown specifically — the form has half a dozen selects and
+     reading them all together returns the type and position lists first, which
+     is how the first version of this assertion managed to look at "Score |
+     Sight adjustment" and call it a target order. */
+  const opts = await p.$$eval('select.inp', sels => {
+    const t = sels.find(s => [...s.options].some(o => /^SR\b|^MR-1\b/.test(o.textContent.trim())));
+    return t ? [...t.options].map(o => o.textContent.trim()) : [];
+  });
+  ok(opts.length > 30, `the new-session target picker is populated (${opts.length} targets)`);
+  const first = opts.slice(0, 4);
+  ok(first.length === 4 && first.every(t => /^(SR|SR-3|MR-1)\b/.test(t)),
+     `...with the pinned targets at the top, in pin order (${first.join(' | ')})`);
+  // The option text carries the description too, so match on the name prefix.
+  const at = (name) => opts.findIndex(o => o.startsWith(name + ' '));
+  ok(at('A-23') > 10 && at('B-8') > 10,
+     `...and the other disciplines behind them (A-23 at ${at('A-23')}, B-8 at ${at('B-8')})`);
+  await p.click('button.bback');
+  await p.waitForTimeout(300);
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
 /* ==================== a shot that could not be written to the card says so */
 /* `localStorage.setItem` throws when the card is full, and every save in
  * Zero.jsx is wrapped in a bare `catch {}`. So React state kept the shot, the

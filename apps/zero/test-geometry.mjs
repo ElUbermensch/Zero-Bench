@@ -32,10 +32,39 @@ const grab = (name) => {
   }
   throw new Error(`test-geometry: could not read the body of ${name}`);
 };
-const NAMES = ['pointInShape', 'shapeBoundR', 'rayToEdge', 'zoneMidR', 'xyToZone',
-               'synthRingsFromZones', 'ringMidR', 'clockToXY', 'shotXY'];
+/* Same idea, for a component whose parameters are destructured: `grab` starts
+ * brace-matching at the first `{` it sees, which for `function C({ a, b })` is
+ * the parameter list and not the body. Skip the parameter list first. */
+const grabComponent = (name) => {
+  const i = src.indexOf(`function ${name}(`);
+  if (i < 0) throw new Error(`test-geometry: Zero.jsx has no function ${name} — renamed?`);
+  let k = src.indexOf('(', i), par = 0;
+  for (; k < src.length; k++) {
+    if (src[k] === '(') par++;
+    else if (src[k] === ')') { par--; if (!par) break; }
+  }
+  let depth = 0;
+  for (let j = src.indexOf('{', k); j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (!depth) return src.slice(i, j + 1); }
+  }
+  throw new Error(`test-geometry: could not read the body of ${name}`);
+};
+const NAMES = ['pointInShape', 'shapeBoundR', 'rayToEdge', 'zoneInnerR', 'zoneMidR',
+               'xyToZone', 'synthRingsFromZones', 'ringMidR', 'clockToXY', 'shotXY'];
 const G = new Function(NAMES.map(grab).join('\n') + `\nreturn {${NAMES.join(',')}};`)();
 const mk = (zones) => ({ zones, rings: G.synthRingsFromZones(zones) });
+
+/* The two shipped zone targets, read out of the library rather than retyped,
+ * so the suite exercises the paper people actually shoot. */
+const BUILTINS = (() => {
+  const i = src.indexOf('const BUILTIN_TARGETS = [');
+  const j = src.indexOf('const DEFAULT_PINNED', i);
+  if (i < 0 || j < 0) throw new Error('test-geometry: BUILTIN_TARGETS no longer reads the same way');
+  const lib = new Function(grab('shapeBoundR') + grab('synthRingsFromZones')
+    + src.slice(i, j) + '\nreturn BUILTIN_TARGETS;')();
+  return Object.fromEntries(lib.map(t => [t.id, t]));
+})();
 
 /* ================================================ the shot comes back where it went */
 /* A shot is stored as (score, how-far-through-that-zone, clock) whenever its
@@ -63,12 +92,68 @@ section('a shot on a zone target reconstructs where it was fired');
       { score: 'C', shape: { kind: 'rect', w: 12, h: 24 } }])],
     ['a six-sided silhouette', mk([{ score: '1', shape: { kind: 'poly',
       pts: [[-5, -8], [5, -8], [7, 0], [5, 9], [-5, 9], [-7, 0]] } }])],
+    /* The two that ship. The suite used to touch them in two hit tests only,
+     * so the one target in the app with a rectangular outer zone was the one
+     * target the round trip never ran on. */
+    ['the LR, as shipped', BUILTINS.lr],
+    ['the LR F-Class, as shipped', BUILTINS.lrfc],
   ];
 
-  for (const [label, target] of cases) {
-    let worst = 0, n = 0, at = null;
+  /* ── the tolerance, and where it comes from ────────────────────────────
+   * A clock is stored to the nearest MINUTE. A minute is 360/(12x60) = 0.5
+   * degrees -- not 0.1, which is what the comment here used to say -- so the
+   * stored bearing is rounded by at most HALF a minute: 0.25 deg, 0.0043633
+   * radians. That rounding is the only lossy step in the round trip. The
+   * radius is stored as a fraction of a span both directions recompute
+   * exactly, so given the same bearing the inverse is exact to floating point;
+   * everything left over is "the same shot, fired a quarter of a degree away".
+   *
+   * On a circle that is a pure arc, r x dTheta: 0.222" at the 50.9" corner
+   * radius of the LR's 72" sheet. On a RECTANGLE it is bigger, because the
+   * fraction is divided by edge(true bearing) and multiplied by
+   * edge(rounded bearing), and a rectangle's edge distance moves fast near the
+   * corner direction -- d(edge)/dTheta = r x tan(angle off the normal), which
+   * on a square at 45 deg equals r itself. So the radial term matches the
+   * tangential one and the total is r x dTheta x sqrt(2) = 0.314" worst case
+   * on the LR: about 45% more than the arc alone.
+   *
+   * That amplification is accepted rather than designed away. Widening the
+   * stored bearing (seconds of clock, or a raw angle) would migrate a field
+   * that every ring target and every already-written row shares, to buy back
+   * a tenth of an inch that only appears 50" from centre on the largest sheet
+   * in the library, where it is 0.2% of the radius and well inside one bullet
+   * hole. Tap entry -- the only way to enter a zone shot -- stores exact `xy`
+   * anyway, so this path is reached only by imported and synced rows.
+   *
+   * The assertion is not a number picked to pass. Each sample is checked
+   * against the bearing-rounding envelope computed FROM THAT SAMPLE'S OWN
+   * GEOMETRY, and separately against exactness at the unrounded bearing, so a
+   * radial bug cannot hide inside the angular allowance. */
+  const DTH = 0.25 * Math.PI / 180;            // half a minute of clock, radians
+  const reconAt = (target, ring, pos, th) => {
+    const ux = Math.sin(th), uy = Math.cos(th);
+    const r = G.zoneMidR(target, ring, pos, ux, uy, 2);
+    return { x: ux * r, y: uy * r };
+  };
+  // How far the reconstruction can move for a bearing rounded by up to DTH.
+  const bearingEnvelope = (target, ring, pos, th) => {
+    const base = reconAt(target, ring, pos, th);
+    let b = 0;
+    for (let k = -20; k <= 20; k++) {
+      const q = reconAt(target, ring, pos, th + (k / 20) * DTH);
+      b = Math.max(b, Math.hypot(q.x - base.x, q.y - base.y));
+    }
+    return b;
+  };
+
+  const sweep = (target, stepDeg) => {
+    let worst = 0, worstBound = 0, n = 0, at = null, exact = 0, exactAt = null, over = 0;
     for (const z of target.zones) {
-      for (let a = 0; a < 360; a += 7) {
+      /* Deliberately not a multiple of 0.5 deg. At 7 deg -- 14 whole minutes
+       * -- every sampled bearing survived the rounding untouched and the
+       * measured error was identically zero, so the tolerance below and the
+       * paragraph justifying it were both dead code. */
+      for (let a = 0; a < 360; a += stepDeg) {
         const th = a * Math.PI / 180, ux = Math.sin(th), uy = Math.cos(th);
         const edge = G.rayToEdge(z.shape, ux, uy);
         if (!edge) continue;
@@ -76,31 +161,103 @@ section('a shot on a zone target reconstructs where it was fired');
           const x = ux * edge * frac, y = uy * edge * frac;
           if (!G.pointInShape(z.shape, x, y)) continue;
           const s = G.xyToZone(target, x, y);
-          const back = G.shotXY({ ring: s.ring, ringPos: s.ringPos,
+          const back = G.shotXY({ ring: s.ring, ringPos: s.ringPos, rpv: s.rpv,
                                  clockH: s.clockH, clockM: s.clockM }, target);
           const err = Math.hypot(back.x - x, back.y - y);
+          // The same reconstruction at the shot's TRUE bearing: this is the
+          // radius arithmetic on its own, with the clock taken out of it.
+          const trueTh = Math.atan2(x, y);
+          const idealPt = reconAt(target, s.ring, s.ringPos, trueTh);
+          const ideal = Math.hypot(idealPt.x - x, idealPt.y - y);
+          const bound = bearingEnvelope(target, s.ring, s.ringPos, trueTh);
           n++;
+          if (err > bound + 1e-9) over++;
+          if (bound > worstBound) worstBound = bound;
+          if (ideal > exact) { exact = ideal; exactAt = [x, y]; }
           if (err > worst) { worst = err; at = [x, y, back.x, back.y]; }
         }
       }
     }
-    /* 0.02" is the clock's own resolution -- a bearing is stored to the
-     * nearest minute, which is 0.1 degrees, and at 13" that is about ten
-     * thousandths. A RING target has exactly the same floor, so this is the
-     * representation's limit and not the shape's. */
-    ok(n > 100 && worst < 0.02,
-       `${label}: ${n} points, worst error ${worst.toFixed(4)}"`
-       + (worst >= 0.02 && at ? ` at (${at[0].toFixed(2)},${at[1].toFixed(2)}) -> (${at[2].toFixed(2)},${at[3].toFixed(2)})` : ''));
+    return { worst, worstBound, n, at, exact, exactAt, over };
+  };
+
+  for (const [label, target] of cases) {
+    const r = sweep(target, 7.3);
+    ok(r.n > 100 && r.exact < 1e-9,
+       `${label}: ${r.n} points, the radius inverts exactly (${r.exact.toExponential(1)}")`
+       + (r.exact >= 1e-9 && r.exactAt ? ` — worst at (${r.exactAt[0].toFixed(2)},${r.exactAt[1].toFixed(2)})` : ''));
+    ok(r.over === 0,
+       `${label}: every point lands inside its own bearing-rounding envelope`
+       + ` (worst error ${r.worst.toFixed(4)}", envelope ${r.worstBound.toFixed(4)}"`
+       + (r.over ? `, ${r.over} outside` : '') + ')');
   }
+
+  /* The headline number, stated in inches rather than left as a per-sample
+   * comparison, because "within its own envelope" is satisfiable by an
+   * envelope that has quietly grown. 0.25 deg x 50.911" x sqrt(2) = 0.3141"
+   * is the arithmetic above; nothing on the shipped paper may exceed it. */
+  const lrDense = sweep(BUILTINS.lr, 0.37);
+  ok(lrDense.worst < 0.3142,
+     `a dense sweep of the shipped LR (${lrDense.n} points) stays under the`
+     + ` 0.3141" half-minute bound: worst ${lrDense.worst.toFixed(4)}"`
+     + (lrDense.at ? ` at (${lrDense.at[0].toFixed(2)},${lrDense.at[1].toFixed(2)})` : ''));
 
   /* The specific number that started this, kept as its own assertion because a
    * summary statistic is easy to read past. */
   const t = mk([{ score: 'A', shape: { kind: 'rect', w: 6, h: 11 } },
                 { score: 'C', shape: { kind: 'rect', w: 12, h: 24 } }]);
   const s = G.xyToZone(t, 3.1, 0);
-  const back = G.shotXY({ ring: s.ring, ringPos: s.ringPos, clockH: s.clockH, clockM: s.clockM }, t);
+  const back = G.shotXY({ ring: s.ring, ringPos: s.ringPos, rpv: s.rpv, clockH: s.clockH, clockM: s.clockM }, t);
   ok(Math.abs(back.x - 3.1) < 0.01,
      `a hole 3.1" right of centre comes back at ${back.x.toFixed(2)}", not 7.92"`);
+}
+
+/* ============================== a stored fraction stays in the zone it scored */
+/* The round trip above only ever feeds back values this code wrote. Every
+ * OTHER value the field can hold -- a default, a row a human edited, a shot
+ * entered before tap mode, anything synced -- goes through the same inverse,
+ * and it has to mean the same thing there: `ringPos` is how far through THIS
+ * ZONE, 0 at the boundary with the better score inside it and 1 at its own
+ * edge, exactly as on a ring target. It did not. It was a fraction of the
+ * distance to the edge measured from the CENTRE, so a stored 6 at 0.5 came
+ * back 18" out on the LR -- inside the 8 ring -- and a stored anything at 0
+ * came back dead centre and scored an X. */
+section('a fraction through a zone stays inside that zone');
+{
+  const lr = BUILTINS.lr;
+  const mid = G.shotXY({ ring: '6', ringPos: 0.5, clockH: 12, clockM: 0, rpv: 2 }, lr);
+  ok(G.xyToZone(lr, mid.x, mid.y).ring === '6',
+     `a 6 stored halfway through the zone comes back a 6 at ${mid.y.toFixed(2)}", not an 8 at 18.00"`);
+
+  const zero = G.shotXY({ ring: '6', ringPos: 0, clockH: 12, clockM: 0, rpv: 2 }, lr);
+  ok(Math.abs(zero.y - 30) < 1e-9,
+     `and at 0 it sits on the 7/6 boundary (${zero.y.toFixed(2)}"), not at dead centre scoring an X`);
+
+  const one = G.shotXY({ ring: '6', ringPos: 1, clockH: 12, clockM: 0, rpv: 2 }, lr);
+  ok(Math.abs(one.y - 36) < 1e-9, `...and at 1 on the edge of the 72" sheet (${one.y.toFixed(2)}")`);
+
+  /* The sweep the review ran: every fraction, at four bearings, for every zone
+   * on both shipped targets. 63 of 84 samples for the LR's 6 used to land in
+   * some other zone. */
+  let strayed = 0, total = 0, first = null;
+  for (const target of [BUILTINS.lr, BUILTINS.lrfc]) {
+    for (const z of target.zones) {
+      for (const [h, m] of [[12, 0], [3, 0], [1, 30], [7, 45]]) {
+        for (let p = 0; p <= 1.0001; p += 0.05) {
+          const pt = G.shotXY({ ring: z.score, ringPos: Math.min(1, p), clockH: h, clockM: m, rpv: 2 }, target);
+          total++;
+          const got = G.xyToZone(target, pt.x, pt.y).ring;
+          /* The endpoints sit exactly ON a boundary, where the hit test is
+           * entitled to award the better score -- that is the rule book. */
+          const onEdge = p < 1e-9 || p > 1 - 1e-9;
+          if (got !== z.score && !onEdge) { strayed++; if (!first) first = `${z.score}@${p.toFixed(2)}->${got}`; }
+        }
+      }
+    }
+  }
+  ok(strayed === 0,
+     `${total} stored fractions across both shipped targets, none reconstructs into a different zone`
+     + (strayed ? ` — ${strayed} did, e.g. ${first}` : ''));
 }
 
 /* ============================================ and it still scores the right zone */
@@ -251,6 +408,187 @@ section('the NRA target library');
     const off72 = G.xyToZone(lr, 40, 40);       // outside the sheet
     ok(off72.ring === 'M', `and a hit off the paper is still a miss (${off72.ring})`);
   }
+}
+
+/* ============================ a row from an older build still reads correctly */
+/* `ringPos` on a zone target has had two meanings: a fraction of the zone's
+ * BOUNDING CIRCLE, and the fraction-through-the-zone above. Nothing in the row
+ * itself distinguished them, so a record written by an older build -- or
+ * pulled from the server, where rows outlive builds -- was read with the wrong
+ * denominator and moved. On the LR a 6 fired at 34" came back at 24.04", ten
+ * inches in, and scored a 7.
+ *
+ * New rows are stamped `rpv: 2`. An unstamped row is read the old way, which
+ * is the only reading that puts it back where it was fired. The stamp is
+ * cheap, it is local to the row, and it needs no migration pass over data the
+ * app may never see again -- rows on a phone that syncs next month are read
+ * correctly the moment they arrive. */
+section('a legacy zone row is read with the denominator it was written with');
+{
+  const lr = BUILTINS.lr;
+  const legacyPos = 34 / G.shapeBoundR({ kind: 'rect', w: 72, h: 72 });  // what the old build stored
+  const legacy = G.shotXY({ ring: '6', ringPos: legacyPos, clockH: 12, clockM: 0 }, lr);
+  ok(Math.abs(legacy.y - 34) < 1e-9,
+     `an unstamped 6 fired at 34" is drawn at ${legacy.y.toFixed(2)}", not 24.04"`);
+  ok(G.xyToZone(lr, legacy.x, legacy.y).ring === '6',
+     'and still scores the 6 it was recorded as, not a 7');
+
+  /* Four of eight sampled legacy rows changed zone before this. */
+  let moved = 0, n = 0;
+  for (const z of lr.zones) {
+    const bR = G.shapeBoundR(z.shape);
+    for (const [h, m] of [[12, 0], [4, 30]]) {
+      for (const frac of [0.35, 0.6, 0.85, 0.98]) {
+        const u = G.clockToXY(h, m, 1);
+        // Only fractions that were actually reachable: the hole has to have
+        // been inside this zone when the old build measured it.
+        const p = { x: u.x * bR * frac, y: u.y * bR * frac };
+        if (!G.pointInShape(z.shape, p.x, p.y)) continue;
+        if (G.xyToZone(lr, p.x, p.y).ring !== z.score) continue;
+        const back = G.shotXY({ ring: z.score, ringPos: frac, clockH: h, clockM: m }, lr);
+        n++;
+        if (Math.hypot(back.x - p.x, back.y - p.y) > 0.32) moved++;
+      }
+    }
+  }
+  ok(n > 4 && moved === 0,
+     `${n} rows in the old format all land where the old build put them (${moved} moved)`);
+
+  /* And the stamp is actually written, or none of the above matters. */
+  const fresh = G.xyToZone(lr, 0, 34);
+  ok(fresh.rpv === 2, `a row written now carries its format marker (rpv: ${fresh.rpv})`);
+  ok(G.xyToZone(lr, 40, 40).rpv === 2, '...including a miss');
+}
+
+/* ===================================== a ray that misses a zone says so */
+/* The slab code took the nearest far plane over whichever axes had a positive
+ * crossing. That is the exit GIVEN the ray hits the box; with no entry/exit
+ * ordering test, a ray that misses entirely still had positive crossings of
+ * the slabs it never entered together, and returned a confident number.
+ * Non-offset rectangles always contain the origin so they were safe -- which
+ * made this exactly the offset-zone case the feature was added for. */
+section('a ray that misses a rectangle returns nothing');
+{
+  const box = { kind: 'rect', w: 6, h: 4, cx: 0, cy: 9 };  // a head box 9" up
+  const at = (h, m) => { const u = G.clockToXY(h, m, 1); return G.rayToEdge(box, u.x, u.y); };
+  ok(!at(3, 0), `3 o'clock misses the head box entirely (${at(3, 0).toFixed(2)}", was 3.00")`);
+  ok(!at(4, 30), `4:30 misses it too (${at(4, 30).toFixed(2)}", was 4.24")`);
+  ok(!at(6, 0), `6 o'clock, with the box behind the origin, misses (${at(6, 0).toFixed(2)}")`);
+  ok(Math.abs(at(12, 0) - 11) < 1e-9, `and 12 o'clock, which does hit it, exits at ${at(12, 0).toFixed(2)}"`);
+  // 12:10 is 5 deg off vertical: still leaves through the top, 11"/cos5.
+  ok(Math.abs(at(12, 10) - 11 / Math.cos(5 * Math.PI / 180)) < 1e-9,
+     `...as does 12:10, out through the top edge at ${at(12, 10).toFixed(3)}"`);
+  // 12:40 is 20 deg off: far enough over to leave through the 3" side.
+  ok(Math.abs(at(12, 40) - 3 / Math.sin(20 * Math.PI / 180)) < 1e-9,
+     `...and 12:40, out through the side at ${at(12, 40).toFixed(3)}"`);
+
+  /* The corner case the review confirmed is right, pinned so the rewrite
+   * cannot have broken it. */
+  const sq = G.rayToEdge({ kind: 'rect', w: 72, h: 72 }, Math.SQRT1_2, Math.SQRT1_2);
+  ok(Math.abs(sq - 50.911688) < 1e-5,
+     `a ray through the corner of a 72" square still exits at ${sq.toFixed(6)}"`);
+}
+
+/* ============================ the inverse has the forward path's fallback */
+/* xyToZone guards with `rayToEdge(...) || shapeBoundR(...) || 1`. zoneMidR had
+ * no guard, so a bearing that misses the zone multiplied zero by the fraction
+ * and put the shot at dead centre -- a clean X, out of a record that says
+ * otherwise, with nothing anywhere to say it had happened. */
+section('a zone the bearing misses falls back instead of collapsing to centre');
+{
+  const head = mk([{ score: 'A', shape: { kind: 'rect', w: 6, h: 4, cx: 0, cy: 9 } },
+                   { score: 'C', shape: { kind: 'rect', w: 12, h: 24 } }]);
+  const p = G.shotXY({ ring: 'A', ringPos: 0.9, clockH: 6, clockM: 0, rpv: 2 }, head);
+  ok(Math.hypot(p.x, p.y) > 1,
+     `an A stored at 6 o'clock, where the head box is not, does not land at dead centre`
+     + ` (${Math.hypot(p.x, p.y).toFixed(2)}", was 0.00" and scored a C)`);
+
+  /* A bow-tie: self-intersecting, so pointInShape accepts points the ray
+   * casting finds no crossing for. Not a shape the editor should make, but it
+   * is a shape it can save. */
+  const bow = mk([{ score: '1', shape: { kind: 'poly',
+    pts: [[-8, -8], [8, 8], [-8, 8], [8, -8]] } }]);
+  /* 4:30 is a bearing where the outline's own ray casting finds no crossing
+   * at all, while the hit test still calls points along it inside. */
+  const q = G.shotXY({ ring: '1', ringPos: 0.7, clockH: 4, clockM: 30, rpv: 2 }, bow);
+  ok(Number.isFinite(q.x) && Number.isFinite(q.y) && Math.hypot(q.x, q.y) > 1,
+     `a self-intersecting outline still puts a 0.7 somewhere other than the X ring`
+     + ` (${Math.hypot(q.x, q.y).toFixed(2)}")`);
+}
+
+/* ============================================ an offset polygon has a size */
+section('shapeBoundR measures an offset polygon');
+{
+  const asRect = G.shapeBoundR({ kind: 'rect', w: 6, h: 6, cx: 0, cy: 20 });
+  const asPoly = G.shapeBoundR({ kind: 'poly', cx: 0, cy: 20,
+    pts: [[-3, -3], [3, -3], [3, 3], [-3, 3]] });
+  ok(Math.abs(asRect - asPoly) < 1e-9,
+     `the same 6" box 20" above centre measures the same either way`
+     + ` (rect ${asRect.toFixed(2)}", poly ${asPoly.toFixed(2)}", was 4.24")`);
+  /* It feeds the synthetic rings, which is where a wrong one does damage. */
+  const rings = G.synthRingsFromZones([
+    { score: 'A', shape: { kind: 'poly', cx: 0, cy: 20, pts: [[-3, -3], [3, -3], [3, 3], [-3, 3]] } },
+    { score: 'C', shape: { kind: 'circle', d: 30 } }]);
+  ok(rings[0].score === 'C' && rings[1].score === 'A',
+     'and an offset poly zone gets a synthetic ring outside the 30" circle it sits beyond, not inside it');
+}
+
+/* ========================================= a record with no clock is not NaN */
+section('a shot record with no clock');
+{
+  const t = { rings: [{ score: 'X', diam: 3 }, { score: '10', diam: 7 }] };
+  const p = G.shotXY({ ring: '10', ringPos: 0.5 }, t);      // clockH undefined
+  ok(Number.isFinite(p.x) && Number.isFinite(p.y),
+     `a ring shot with no clock has coordinates, not NaN (${p.x.toFixed(2)},${p.y.toFixed(2)})`);
+  ok(Math.abs(p.x) < 1e-9 && Math.abs(p.y - 2.5) < 1e-9,
+     '...and reads as twelve o\'clock, which is where the entry screen starts');
+
+  const z = G.shotXY({ ring: '6', ringPos: 0.5, rpv: 2 }, BUILTINS.lr);
+  ok(Number.isFinite(z.x) && Number.isFinite(z.y),
+     `and so does a zone shot with no clock (${z.x.toFixed(2)},${z.y.toFixed(2)})`);
+
+  /* The asymmetry that made this nasty: under NaN the circle branch returned
+   * NaN and the rect branch returned 0, so one corrupt record produced two
+   * different kinds of wrong on the same target. */
+  ok(G.rayToEdge({ kind: 'circle', d: 10 }, NaN, NaN) === 0
+     && G.rayToEdge({ kind: 'rect', w: 10, h: 10 }, NaN, NaN) === 0
+     && G.rayToEdge({ kind: 'poly', pts: [[-5, -5], [5, -5], [0, 5]] }, NaN, NaN) === 0,
+     'a bearing that is not a number is rejected the same way by all three shapes');
+}
+
+/* ================================= the two call sites that are not arithmetic */
+/* ShotInspector and ShotEntry are React components; they are asserted through
+ * the source, because building them needs a DOM and the thing being asserted
+ * is which function they call, not what it returns. The extraction fails loudly
+ * if either is renamed. */
+section('the components that read and write these numbers');
+{
+  const inspector = grabComponent('ShotInspector');
+  ok(/const impactXY = shotXY\(shot, target\)/.test(inspector),
+     'ShotInspector asks shotXY where the shot landed');
+  ok(!/ringMidR\s*\(/.test(inspector),
+     'and no longer reimplements the fallback against the synthetic bounding circle');
+
+  /* What that fallback did: it fed a fraction measured against the zone's edge
+   * into ringMidR's bounding-circle interpolation. Reproduced here so the
+   * assertion above has a number attached to it. */
+  const lr = BUILTINS.lr;
+  const s = G.xyToZone(lr, 0, 34);
+  const oldWay = G.ringMidR(lr, s.ring, s.ringPos);
+  const drawn = G.shotXY({ ring: s.ring, ringPos: s.ringPos, rpv: s.rpv,
+                           clockH: s.clockH, clockM: s.clockM }, lr);
+  const nowIs = Math.hypot(drawn.x, drawn.y);
+  ok(Math.abs(nowIs - 34) < 0.01 && oldWay > 36,
+     `a 6 fired at 34" on the LR is drawn at ${nowIs.toFixed(2)}", not ${oldWay.toFixed(2)}" — which is past the 36" edge of the paper`);
+
+  const entry = grabComponent('ShotEntry');
+  ok(/const needsTap = !!\(target\.zones && target\.zones\.length\)/.test(entry)
+     && /const canLog = /.test(entry),
+     'ShotEntry knows a zone target cannot be logged without a tap');
+  ok(/function doSave\(andNext\) \{\s*\n?\s*if \(!canLog\) return;/.test(entry),
+     'doSave refuses to invent one');
+  ok((entry.match(/disabled=\{!canLog\}/g) || []).length === 2,
+     'and both Log buttons are dead until the shot is placed');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

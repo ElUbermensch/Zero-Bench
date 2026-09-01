@@ -752,8 +752,18 @@ function ringMidR(target, score, pos) {
 }
 
 function clockToXY(h, m, r) {
-  const ang = ((h%12) + m/60) * 30 * Math.PI / 180;
-  return { x: r * Math.sin(ang), y: r * Math.cos(ang) };
+  /* A record with no clock -- imported from a backup, or synced from a build
+   * that did not write one -- made `h % 12` NaN and returned NaN coordinates.
+   * Nothing downstream checks: the group size, the mean radius and the
+   * centroid all go NaN, the plot draws nothing, and no error is raised
+   * anywhere, so one bad row silently empties a whole session's analytics.
+   * An unknown bearing reads as twelve o'clock, which is where the entry
+   * screen starts and what the shot list already shows for a missing clock. */
+  const hh = Number(h), mm = Number(m), rr = Number(r);
+  const ang = ((Number.isFinite(hh) ? hh % 12 : 0)
+             + (Number.isFinite(mm) ? mm / 60 : 0)) * 30 * Math.PI / 180;
+  const rad = Number.isFinite(rr) ? rr : 0;
+  return { x: rad * Math.sin(ang), y: rad * Math.cos(ang) };
 }
 
 /* ── Stable, stepped view radius for target rendering ──
@@ -830,7 +840,7 @@ function shotXY(shot, target) {
   if (target && target.zones && target.zones.length) {
     const u = clockToXY(shot.clockH, shot.clockM, 1);
     return clockToXY(shot.clockH, shot.clockM,
-                     zoneMidR(target, shot.ring, shot.ringPos, u.x, u.y));
+                     zoneMidR(target, shot.ring, shot.ringPos, u.x, u.y, shot.rpv));
   }
   return clockToXY(shot.clockH, shot.clockM, ringMidR(target, shot.ring, shot.ringPos));
 }
@@ -877,7 +887,13 @@ function shapeBoundR(shape) {
   const cx = shape.cx||0, cy = shape.cy||0;
   if (shape.kind === 'circle') return Math.hypot(cx,cy) + shape.d/2;
   if (shape.kind === 'rect')  return Math.hypot(Math.abs(cx)+shape.w/2, Math.abs(cy)+shape.h/2);
-  if (shape.kind === 'poly')  return shape.pts.reduce((m,[x,y])=>Math.max(m,Math.hypot(x,y)),0);
+  /* cx/cy, like the other two kinds. A polygon's points are in the shape's own
+   * frame, so a 6"x6" box drawn 20" above centre measured 4.24" as a poly and
+   * 23.19" as the identical rect. That number is the synthetic ring diameter
+   * (synthRingsFromZones), so an offset poly zone got a ring five times too
+   * small -- wrong ring ordering, a view radius that cropped the zone off the
+   * screen, and a wrong answer in both zero-edge fallbacks. */
+  if (shape.kind === 'poly')  return shape.pts.reduce((m,[x,y])=>Math.max(m,Math.hypot(x+cx,y+cy)),0);
   return 0;
 }
 
@@ -904,6 +920,12 @@ function shapeBoundR(shape) {
  */
 function rayToEdge(shape, ux, uy) {
   const cx = shape.cx || 0, cy = shape.cy || 0;
+  /* A bearing that is not a number cannot name a direction. Without this the
+   * three branches disagree about what to do with one -- the circle returns
+   * NaN, the rect returned 0, the poly returns 0 -- so one corrupt record
+   * produced two different kinds of wrong on the same target depending on
+   * which zone it claimed. Falsy, so every caller's fallback runs. */
+  if (!Number.isFinite(ux) || !Number.isFinite(uy)) return 0;
 
   if (shape.kind === 'circle') {
     /* |o + t·u − c| = r, with o at the origin. Standard quadratic; the far
@@ -917,22 +939,37 @@ function rayToEdge(shape, ux, uy) {
   }
 
   if (shape.kind === 'rect') {
-    /* Slab method: the exit is the nearest of the four half-plane crossings.
-     * The corner radius is deliberately ignored -- it moves the edge by at
-     * most rx·(√2−1) in the corner directions and modelling it would not
-     * round-trip any better, because the forward and inverse use the same
-     * function either way. */
+    /* Slab method, entry and exit both. The corner radius is deliberately
+     * ignored -- it moves the edge by at most rx·(√2−1) in the corner
+     * directions and modelling it would not round-trip any better, because
+     * the forward and inverse use the same function either way.
+     *
+     * The ordering test is what makes an OFFSET rect work. Taking the nearest
+     * far plane over whichever axes happened to have a positive crossing is
+     * the right exit only if the ray hits the box at all; a ray that misses
+     * still has positive crossings of the slabs it never enters together. On a
+     * 6"x4" head box 9" above centre that answered 3.00" at 3 o'clock -- a
+     * point seven inches below the box, in the middle of the C zone -- and
+     * 4.24" at 4:30. tEnter <= tExit is the miss test, and tExit > 0 rejects a
+     * box entirely behind the origin instead of silently dropping that axis. */
     const hw = shape.w / 2, hh = shape.h / 2;
-    let t = Infinity;
+    let tEnter = -Infinity, tExit = Infinity;
     if (Math.abs(ux) > 1e-12) {
-      const tx = ((ux > 0 ? cx + hw : cx - hw)) / ux;
-      if (tx > 0) t = Math.min(t, tx);
+      const t1 = (cx - hw) / ux, t2 = (cx + hw) / ux;
+      tEnter = Math.max(tEnter, Math.min(t1, t2));
+      tExit  = Math.min(tExit,  Math.max(t1, t2));
+    } else if (0 < cx - hw || 0 > cx + hw) {
+      return 0;                       // parallel to the slab and outside it
     }
     if (Math.abs(uy) > 1e-12) {
-      const ty = ((uy > 0 ? cy + hh : cy - hh)) / uy;
-      if (ty > 0) t = Math.min(t, ty);
+      const t1 = (cy - hh) / uy, t2 = (cy + hh) / uy;
+      tEnter = Math.max(tEnter, Math.min(t1, t2));
+      tExit  = Math.min(tExit,  Math.max(t1, t2));
+    } else if (0 < cy - hh || 0 > cy + hh) {
+      return 0;
     }
-    return Number.isFinite(t) ? t : 0;
+    if (!(tExit >= tEnter) || !(tExit > 0) || !Number.isFinite(tExit)) return 0;
+    return tExit;
   }
 
   if (shape.kind === 'poly') {
@@ -956,12 +993,45 @@ function rayToEdge(shape, ux, uy) {
   return 0;
 }
 
+/* A zone's INNER boundary along one bearing: how far out the better-scoring
+ * zones reach in this direction. The zone list runs best score first and the
+ * hit test returns the first zone containing the hole, so everything before
+ * `idx` outscores this zone, and the region that actually scores `idx` starts
+ * where they stop. This is the zone twin of `rings[idx-1].diam/2`.
+ *
+ * Only zones containing the target's origin count. An offset zone -- a head
+ * box floating above centre -- does not enclose the centre in any direction,
+ * so its far side is not an inner boundary for anything: taking it as one
+ * would push every C-zone hole UNDERNEATH the head box out past the top of
+ * it. The forward and the inverse both use this function, so whatever it
+ * decides, the round trip still closes. */
+function zoneInnerR(zones, idx, ux, uy) {
+  let inner = 0;
+  for (let i = 0; i < idx; i++) {
+    const s = zones[i] && zones[i].shape;
+    if (!s || !pointInShape(s, 0, 0)) continue;
+    const e = rayToEdge(s, ux, uy);
+    if (e > inner) inner = e;
+  }
+  return inner;
+}
+
 /* The zone-target twin of ringMidR: where a shot sits, given its score, how
- * far through that zone it was, and which way it lies from centre. */
-function zoneMidR(target, score, pos, ux, uy) {
+ * far through that zone it was, and which way it lies from centre.
+ *
+ * `ringMidR` interpolates across [innerR, outerR] -- halfway through the 10
+ * ring is halfway between the X's edge and the 10's. This did not: it returned
+ * edge × pos, mapping the fraction onto [0, edge] with nothing holding the
+ * result outside the next zone in. On the LR, a stored 6 at pos 0.5 came back
+ * 18" from centre, which is inside the 8 ring and scores an 8; pos 0 came back
+ * dead centre and scored an X whatever the card said. Sweeping the fraction
+ * across the LR's 6 zone, three quarters of the samples reconstructed into a
+ * different zone than the one they were stored as. */
+function zoneMidR(target, score, pos, ux, uy, rpv) {
   const zones = target.zones || [];
-  const z = zones.find(zn => zn.score === score);
-  const p = (pos !== undefined && pos !== null) ? pos : 0.5;
+  const idx = zones.findIndex(zn => zn.score === score);
+  const z = idx >= 0 ? zones[idx] : null;
+  const p = (pos !== undefined && pos !== null && Number.isFinite(Number(pos))) ? Number(pos) : 0.5;
   if (!z) {
     /* A miss, placed just outside the outermost zone IN ITS OWN DIRECTION --
      * not outside the bounding circle, which on a tall rectangle is half a
@@ -970,7 +1040,23 @@ function zoneMidR(target, score, pos, ux, uy) {
     const edge = outer ? rayToEdge(outer.shape, ux, uy) : 0;
     return (edge || shapeBoundR(outer ? outer.shape : {})) * 1.15;
   }
-  return rayToEdge(z.shape, ux, uy) * p;
+  /* What `ringPos` MEANS on a zone target changed, so records carry which
+   * meaning they were written with. Without the marker a row from an older
+   * build is read with the wrong denominator: a 6 fired at 34" and stored as
+   * a fraction of the bounding circle redraws 10" in and scores a 7. `rpv: 2`
+   * is stamped by xyToZone below; absent means the original bounding-circle
+   * fraction, which is what those rows were measured against and the only
+   * reading that puts them back where they were fired. */
+  if (rpv !== 2) return (shapeBoundR(z.shape) || 1) * p;
+
+  /* Same zero-edge fallback chain as the forward path in xyToZone. Without it
+   * a bearing that misses the zone -- an offset head box looked at from below,
+   * or a self-intersecting outline the hit test still accepts -- multiplied
+   * zero by the fraction and put the shot at dead centre: a clean X, from a
+   * record that says otherwise, with nothing to show it had happened. */
+  const outerEdge = rayToEdge(z.shape, ux, uy) || shapeBoundR(z.shape) || 1;
+  const innerEdge = Math.min(zoneInnerR(zones, idx, ux, uy), outerEdge);
+  return innerEdge + p * (outerEdge - innerEdge);
 }
 // Same return contract as xyToRing so shot storage/chips/misses need no changes.
 function xyToZone(target, x, y) {
@@ -981,15 +1067,31 @@ function xyToZone(target, x, y) {
   let minute = Math.round((hourFloat - hour) * 60);
   if (minute === 60) { minute = 0; hour = (hour + 1) % 12; }
   if (hour === 0) hour = 12;
-  const z = target.zones.find(zn => pointInShape(zn.shape, x, y));
-  if (!z) return { ring: 'M', ringPos: 1, clockH: hour, clockM: minute };
-  /* Fraction of the way to the edge ALONG THIS SHOT'S OWN BEARING, not to the
-   * bounding circle. On a rectangle those are different numbers -- see
-   * rayToEdge -- and only this one can be undone. */
+  const zones = target.zones;
+  const idx = zones.findIndex(zn => pointInShape(zn.shape, x, y));
+  if (idx < 0) return { ring: 'M', ringPos: 1, clockH: hour, clockM: minute, rpv: 2 };
+  const z = zones[idx];
+  /* How far through THIS ZONE, measured along the shot's own bearing: 0 at the
+   * boundary with the better-scoring zone inside it, 1 at this zone's own
+   * edge. Exactly what ringPos means on a ring target, and the exact inverse
+   * of zoneMidR, so the round trip closes to the resolution of the clock.
+   *
+   * Not a fraction of the bounding circle: on a rectangle those are different
+   * numbers -- see rayToEdge -- and that one cannot be undone. Not a fraction
+   * of the edge either: that inverts, but 0.5 then means "half way to the
+   * edge" rather than "half way through the zone", so every value that did not
+   * come from this function -- an edited row, a default, a synced record --
+   * lands in the wrong zone. */
   const d = Math.hypot(x, y);
-  if (d < 1e-9) return { ring: z.score, ringPos: 0, clockH: hour, clockM: minute };
-  const edge = rayToEdge(z.shape, x / d, y / d) || shapeBoundR(z.shape) || 1;
-  return { ring: z.score, ringPos: Math.min(1, d / edge), clockH: hour, clockM: minute };
+  if (d < 1e-9) return { ring: z.score, ringPos: 0, clockH: hour, clockM: minute, rpv: 2 };
+  const ux = x / d, uy = y / d;
+  const outerEdge = rayToEdge(z.shape, ux, uy) || shapeBoundR(z.shape) || 1;
+  const innerEdge = Math.min(zoneInnerR(zones, idx, ux, uy), outerEdge);
+  const span = outerEdge - innerEdge;
+  const ringPos = span > 1e-9 ? Math.max(0, Math.min(1, (d - innerEdge) / span)) : 0;
+  /* Stamped, because the meaning above is the second one this field has had on
+   * a zone target and nothing else distinguishes them. See zoneMidR. */
+  return { ring: z.score, ringPos, clockH: hour, clockM: minute, rpv: 2 };
 }
 // Bounding-circle rings so ring-based consumers work unchanged. Sorted
 // ascending like real rings; duplicate scores collapse to the smallest.
@@ -7228,12 +7330,13 @@ function ShotInspector({ shot, target }) {
   const SZ = 220;
   const c = SZ / 2;
 
-  // Determine view radius from this shot's points (tap mode or derived)
-  const impactXY = shot.xy || (() => {
-    const r = ringMidR(target, shot.ring, shot.ringPos);
-    const ang = ((shot.clockH%12) + (shot.clockM||0)/60) * 30 * Math.PI/180;
-    return { x: r*Math.sin(ang), y: r*Math.cos(ang) };
-  })();
+  /* Through shotXY, which is the single answer to "where did this shot land".
+   * This reimplemented the fallback inline and so kept the ring-only version
+   * of it: on a zone target it fed a ringPos measured against the zone's edge
+   * into the synthetic BOUNDING CIRCLE, and a 6 fired at 34" on the LR was
+   * drawn at 49.75" -- 15.75" out and past the 36" edge of the paper, a
+   * scoring hit rendered off the target it scored on. */
+  const impactXY = shotXY(shot, target);
   const callXY = shot.callXY || null;
   const trace = shot.holdTrace || [];
   // Stepped view: stable, frames everything in this shot with even margin
@@ -7900,7 +8003,11 @@ function TargetPreview({ target, yards, ring, ringPos, clockH, clockM, priorShot
   const SZ = 200;
   const c = SZ / 2;
 
-  const shotR = ringMidR(target, ring, ringPos);
+  // Through shotXY for the same reason as ShotInspector: on a zone target
+  // ringMidR reads the fraction against the synthetic bounding circle. Classic
+  // entry is suppressed for zone targets, so this is belt and braces.
+  const curXY = shotXY({ ring, ringPos, clockH, clockM, rpv: 2 }, target);
+  const shotR = Math.hypot(curXY.x, curXY.y);
   const ang = ((clockH % 12) + clockM / 60) * 30 * Math.PI / 180;
 
   // Stepped view radius: stable, ring-aligned, doesn't whiplash on outliers.
@@ -8540,9 +8647,20 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
   function onDrag(e) { if(!dragging) return; e.preventDefault(); const p=angleFromEvent(e,faceRef.current); setH(p.h); setM(p.m); }
   function endDrag() { setDragging(false); }
 
+  /* A zone target is tap-only -- ring + clock has no meaning on non-concentric
+   * zones, and the mode toggle above offers only "Tap to place" for one. With
+   * no tap there is nothing to log, but the classic branch below would still
+   * write a shot: the last ring used, halfway through it, at twelve o'clock,
+   * with no `xy`. A shot nobody fired, scored and averaged and plotted with
+   * the real ones. Pressing Log before placing the dot has to do nothing. */
+  const needsTap = !!(target.zones && target.zones.length);
+  const hasTap = !!(tapXY && Number.isFinite(tapXY.x) && Number.isFinite(tapXY.y));
+  const canLog = !needsTap || (inputMode === 'tap' && hasTap);
+
   function doSave(andNext) {
+    if (!canLog) return;   // the guard behind the disabled buttons
     let shot;
-    if (inputMode === 'tap' && tapXY) {
+    if (inputMode === 'tap' && hasTap) {
       const derived = xyToRing(target, tapXY.x, tapXY.y);
       shot = {
         id: uid(),
@@ -8553,11 +8671,19 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
         xy: { x: tapXY.x, y: tapXY.y },
         elev, wind, notes, isSighter, ts: Date.now(),
       };
+      // Which meaning `ringPos` carries, for a zone target. See zoneMidR.
+      if (derived.rpv) shot.rpv = derived.rpv;
       if (callXY) shot.callXY = { x: callXY.x, y: callXY.y };
       if (holdTrace.length > 1) shot.holdTrace = holdTrace.slice();
     } else {
+      /* Normalised rather than trusted. A NaN written into a shot record is
+       * permanent: it survives every sync and every backup, and it turns the
+       * whole session's group size and mean radius into NaN with no error. */
       shot = {
-        id: uid(), ring, ringPos, clockH: h, clockM: m,
+        id: uid(), ring,
+        ringPos: Number.isFinite(Number(ringPos)) ? Number(ringPos) : 0.5,
+        clockH:  Number.isFinite(Number(h)) ? Number(h) : 12,
+        clockM:  Number.isFinite(Number(m)) ? Number(m) : 0,
         elev, wind, notes, isSighter, ts: Date.now(),
       };
     }
@@ -9212,12 +9338,20 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
 
         </div>
 
-        {/* Sticky bottom action bar */}
+        {/* Sticky bottom action bar. On a zone target both buttons are dead
+            until the shot is placed — there is no ring-and-clock fallback to
+            log, and logging without one invented a shot. */}
         <div className="shotbar">
-          <button className="bgreen" style={{flex:2,fontSize:14}} onClick={()=>doSave(true)}>
+          <button className="bgreen" disabled={!canLog}
+            title={canLog ? undefined : 'Tap the target to place the shot first'}
+            style={{flex:2,fontSize:14,opacity:canLog?1:0.4,cursor:canLog?'pointer':'not-allowed'}}
+            onClick={()=>doSave(true)}>
             Log &amp; next →
           </button>
-          <button className="bprim" style={{flex:1,fontSize:12}} onClick={()=>doSave(false)}>
+          <button className="bprim" disabled={!canLog}
+            title={canLog ? undefined : 'Tap the target to place the shot first'}
+            style={{flex:1,fontSize:12,opacity:canLog?1:0.4,cursor:canLog?'pointer':'not-allowed'}}
+            onClick={()=>doSave(false)}>
             Log &amp; done
           </button>
         </div>

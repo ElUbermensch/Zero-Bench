@@ -1,0 +1,9 @@
+{
+  "name": "zero-bench-info",
+  "private": true,
+  "type": "module",
+  "description": "The Zero & Bench information page, deployed as its own Vercel project.",
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

@@ -342,6 +342,95 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
 }
 @keyframes shot { from { opacity: 0; } to { opacity: 1; } }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SPACING PASS
+   The rhythm is one scale, driven by the viewport, so the page is not
+   generous on a desktop and cramped on a phone. Every value below replaces
+   a fixed pixel number set earlier in this sheet.
+   ═══════════════════════════════════════════════════════════════════════ */
+.wrap { padding: 0 clamp(20px, 4.5vw, 40px); }
+section { padding: clamp(56px, 7.5vw, 100px) 0; }
+.hero-grid { padding: clamp(52px, 8vw, 104px) 0 clamp(44px, 6vw, 80px); gap: clamp(32px, 4vw, 56px); }
+.cards { gap: clamp(14px, 1.6vw, 20px); margin-top: clamp(28px, 3.4vw, 44px); }
+.card { padding: clamp(20px, 2.2vw, 28px); }
+.sec-sub { margin-top: 16px; }
+.sec-head { margin-bottom: 14px; }
+.book { margin-top: clamp(28px, 3.4vw, 44px); }
+.book.compact { margin-top: 0; }
+.disc-grid { margin-top: clamp(28px, 3.4vw, 44px); }
+.limits { margin-top: clamp(24px, 3vw, 38px); }
+.split { margin-top: clamp(36px, 4.6vw, 60px); gap: clamp(28px, 3.4vw, 48px); }
+.readout div { padding: clamp(10px, 1.1vw, 14px) clamp(11px, 1.2vw, 15px); }
+th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5vw, 18px); }
+.book-head, .book-foot { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5vw, 18px); }
+@media (max-width: 560px) {
+  .hero h1 { font-size: clamp(38px, 11vw, 52px); }
+  .readout .v { font-size: 17px; }
+  .topbar-in { height: 56px; }
+}
+
+/* ── The walkthroughs ──────────────────────────────────────────────────
+   Three tracks rather than one long list, because the person setting up a
+   loading bench and the person trying to get dope out of it are not at the
+   same point and should not have to scroll past each other. */
+.tut {
+  margin-top: clamp(28px, 3.4vw, 44px);
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); overflow: hidden;
+}
+.tut-tabs { display: flex; flex-wrap: wrap; gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+.tut-tab {
+  flex: 1 1 200px; background: var(--raised); border: 0; cursor: pointer;
+  font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--dim);
+  padding: 15px 16px; text-align: left; line-height: 1.4;
+  border-bottom: 2px solid transparent;
+  transition: color .12s ease, background .12s ease;
+}
+.tut-tab:hover { color: var(--ink); }
+.tut-tab[aria-selected="true"] { background: var(--surface); color: var(--acc); border-bottom-color: var(--acc); }
+.tut-tab:focus-visible { outline: 2px solid var(--acc); outline-offset: -3px; }
+.tut-panel { padding: clamp(22px, 2.6vw, 34px); }
+
+.steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 20px; }
+.steps li {
+  counter-increment: step; position: relative; padding-left: 46px;
+  color: var(--dim); font-size: 15px; line-height: 1.62; max-width: 68ch;
+}
+.steps li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 1px;
+  font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: .06em;
+  color: var(--acc); border: 1px solid var(--line); border-radius: 3px;
+  width: 30px; height: 24px; display: grid; place-items: center;
+}
+.steps li b { color: var(--ink); font-weight: 700; }
+.steps li em { color: var(--ink); font-style: italic; }
+.steps .path {
+  display: inline-block; font-family: 'Space Mono', monospace; font-size: 10.5px;
+  letter-spacing: .04em; color: var(--faint);
+  border: 1px solid var(--line); border-radius: 3px; padding: 1px 7px;
+  margin: 0 5px; white-space: nowrap; vertical-align: 1px;
+}
+@media (max-width: 520px) {
+  .steps li { padding-left: 0; }
+  .steps li::before { position: static; margin-bottom: 8px; }
+}
+
+/* ── The close ─────────────────────────────────────────────────────────
+   The page ends on the thing you can do, not on the list of things it
+   will not do for you. */
+.close { border-bottom: 0; }
+.close-in { max-width: 62ch; }
+.close h2 { font-size: clamp(28px, 3.4vw, 42px); }
+.close .sec-sub { margin-top: 14px; }
+
+/* The close keeps the page's left rhythm rather than centring, so the last
+   thing you read sits on the same axis as everything above it. */
+.close-in { max-width: 1080px; }
+.close-in .sec-sub { max-width: 56ch; }
+#limits h2 { font-size: clamp(26px, 3vw, 36px); }
+
 </style>
 
 <header class="topbar">
@@ -351,7 +440,7 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
       <a href="#solver">The solver</a>
       <a href="#targets">Targets</a>
       <a href="#inside">What's inside</a>
-      <a href="#limits">Limits</a>
+      <a href="#start">Get started</a>
       <a href="#about">About</a>
     </nav>
     <button id="themeBtn" class="themetoggle" type="button" aria-label="Switch theme">Paper</button>
@@ -533,7 +622,7 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
     <div class="split">
       <div>
         <h3 class="display sub">Pin the ones you shoot.</h3>
-        <p class="sec-sub">A High Power shooter needs three faces and will never open the other thirty&#8209;nine. Pinned targets sit at the top of the picker, in your order, saved to your account and not to the device — so it follows you to the phone in your range bag. Everything else stays one scroll away.</p>
+        <p class="sec-sub">A High Power shooter needs three faces and will never open the other thirty&#8209;nine. Pinned targets sit at the top of the picker, in your order, and they ride your backup — file, cloud and crash rescue — so they come with you to a new phone. Everything else stays one scroll away.</p>
       </div>
       <div>
         <h3 class="display sub">Rectangles score correctly.</h3>
@@ -558,18 +647,49 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
   </div>
 </section>
 
-<section id="limits">
+<section id="start">
   <div class="wrap">
-    <div class="sec-head"><p class="eyebrow">Straight about it</p></div>
-    <h2 class="display">What it does not do.</h2>
-    <p class="sec-sub">Written down here rather than discovered on the line.</p>
+    <div class="sec-head"><p class="eyebrow">Getting started</p></div>
+    <h2 class="display">Three walkthroughs. None of them is long.</h2>
+    <p class="sec-sub">If you keep a data book already, you know all of this — it is the same sequence, with the arithmetic done for you.</p>
 
-    <div class="limits">
-      <div class="limit"><div class="what">It does not call the wind</div><div class="why">There is no wind solver. Wind is recorded with the string and it is part of what you review afterwards, but the number on the knob is still yours. A wind call from an app that cannot see the flags is theatre.</div></div>
-      <div class="limit"><div class="what">Two zeros, 100 yd apart</div><div class="why">Below that the solver will not true, because those anchors cannot separate velocity from drag. It says so rather than fitting something. One confirmed zero gets you a curve from the box numbers, marked as such.</div></div>
-      <div class="limit"><div class="what">The B&#8209;27 series is absent</div><div class="why">Its scoring rings are ovals, and the geometry engine works in circles, rectangles and polygons. A B&#8209;27 drawn with round rings would score wrong at the 9 and 8 line, so it is not in the library rather than in it and lying.</div></div>
-      <div class="limit"><div class="what">Bench syncs one direction</div><div class="why">Firearms, sessions and groups come down to every device. Component lots, recipes, batches and brass go up but not yet down — each needs a defensible merge before it can, and cloud backup covers moving a bench to a new device meanwhile.</div></div>
-      <div class="limit"><div class="what">Transonic is a caution</div><div class="why">Past about Mach 1.2 the drag model is doing its worst work and a real bullet may do something no model predicts. The prediction is still shown, marked, with a wider interval. Confirm it on paper.</div></div>
+    <div class="tut">
+      <div class="tut-tabs" role="tablist" aria-label="Walkthroughs">
+        <button class="tut-tab" role="tab" aria-selected="true"  aria-controls="tut-zero"   id="tab-zero"   data-t="zero">In Zero &mdash; your first string</button>
+        <button class="tut-tab" role="tab" aria-selected="false" aria-controls="tut-bench"  id="tab-bench"  data-t="bench">In Bench &mdash; your first batch</button>
+        <button class="tut-tab" role="tab" aria-selected="false" aria-controls="tut-solver" id="tab-solver" data-t="solver">The solver &mdash; your first come-up</button>
+      </div>
+
+      <div class="tut-panel" role="tabpanel" id="tut-zero" aria-labelledby="tab-zero" data-p="zero">
+        <ol class="steps">
+          <li><b>Add the rifle.</b> <span class="path">More &rarr; Firearms</span> Name, cartridge, sight height above bore, and the distance it is zeroed at. Sight height matters more than people expect &mdash; it is what makes the near end of the trajectory come out right.</li>
+          <li><b>Add the load.</b> Under the rifle. If you loaded it yourself, pull the batch across instead <span class="path">More &rarr; Bench</span> and the round count stays honest on both sides.</li>
+          <li><b>Start the session.</b> <span class="path">Home &rarr; New session</span> Date, target face, distance, position, rifle and load &mdash; then the conditions: wind speed and direction, temperature, light. The conditions are two taps now and the only thing that explains a strange string six months from now.</li>
+          <li><b>Fire, and place the shots.</b> Tap each hole where it went on the face. It is scored on the ring it touches, the way a scorer does it. Transcribing an old paper target instead? Enter ring and clock and it lands in the same place.</li>
+          <li><b>Read the string.</b> Score, X count, group size and where the group centre sits are computed as you go. Nothing to add up at the end.</li>
+          <li><b>Mark the confirmed zero.</b> That is the one step people skip, and it is the one that feeds everything downstream &mdash; the DOPE card, the position offsets, and the solver.</li>
+        </ol>
+      </div>
+
+      <div class="tut-panel" role="tabpanel" id="tut-bench" aria-labelledby="tab-bench" data-p="bench" hidden>
+        <ol class="steps">
+          <li><b>Enter your component lots.</b> Powder, primer, bullet. A <em>lot</em>, not a type &mdash; a lot number is what lets you explain a group that opened up in October.</li>
+          <li><b>Enter the brass.</b> Headstamp, serial, count. Firings, trim length and annealing accrue against that lot for the rest of its life.</li>
+          <li><b>Write the recipe.</b> Charge, seating depth, and which lots it draws on. A ladder can hang off it if you are still working the load up.</li>
+          <li><b>Load a batch.</b> A recipe plus a brass lot plus a date plus a count. That is the object that actually leaves the bench.</li>
+          <li><b>Fire it in Zero.</b> Pick the batch on the session. The rounds come off it without anybody typing a number twice, and the brass gets its firing.</li>
+        </ol>
+      </div>
+
+      <div class="tut-panel" role="tabpanel" id="tut-solver" aria-labelledby="tab-solver" data-p="solver" hidden>
+        <ol class="steps">
+          <li><b>Collect two confirmed zeros.</b> Same rifle, same position, at least 100 yards apart. Three is better. Four is what protects you from a single mistyped one, because three zeros against two unknowns leaves nothing in the residuals to see.</li>
+          <li><b>Open it.</b> <span class="path">More &rarr; Solver</span> Pick the rifle and the position you are solving for. It shows you which zeros it is using.</li>
+          <li><b>Give it today's air.</b> Temperature, and station pressure &mdash; the number off the meter, not the sea-level figure a weather app shows you. Thin air at altitude is worth several MOA at 1000.</li>
+          <li><b>Read the come-ups.</b> Distances you have confirmed are marked as confirmed. Everything else carries an interval that widens the further past your furthest zero it reaches, and the transonic band is flagged where a drag model is doing its worst work.</li>
+          <li><b>Believe the refusals.</b> If it will not solve, it says which zero disagrees with the others, or that two zeros fifty yards apart cannot separate velocity from drag. That is the solver protecting you from a confident wrong number.</li>
+        </ol>
+      </div>
     </div>
   </div>
 </section>
@@ -583,6 +703,29 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
       <p>The design rule is that the app never invents a number. A score comes from the ring the shot touched. A round count comes from a batch that was actually fired. A come-up comes from a drag model fitted to zeros you confirmed, with an interval on it, and when the data cannot support a solution the app says so instead of producing one. That rule is why the solver refuses single anchors and why the B&#8209;27 is missing.</p>
       <p>It is held to that by test rather than by intention: <span class="mono">1,019</span> assertions across the geometry, the solver, the sync engine, the relay and both apps, plus a separate suite that runs against the database's own access rules. Every fix carries a test that fails without it. That is the only way to know a fix is a fix.</p>
     </div>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="sec-head"><p class="eyebrow">Before you ask</p></div>
+    <h2 class="display">The honest limits.</h2>
+    <p class="sec-sub">Written down here rather than discovered on the line.</p>
+
+    <div class="limits">
+      <div class="limit"><div class="what">It does not call the wind</div><div class="why">There is no wind solver. Wind is recorded with the string and it is part of what you review afterwards, but the number on the knob is still yours. A wind call from an app that cannot see the flags is theatre.</div></div>
+      <div class="limit"><div class="what">Two zeros, 100 yd apart</div><div class="why">Below that the solver will not true, because those anchors cannot separate velocity from drag. It says so rather than fitting something. One confirmed zero gets you a curve from the box numbers, marked as such.</div></div>
+      <div class="limit"><div class="what">The B&#8209;27 series is absent</div><div class="why">Its scoring rings are ovals, and the geometry engine works in circles, rectangles and polygons. A B&#8209;27 drawn with round rings would score wrong at the 9 and 8 line, so it is not in the library rather than in it and lying.</div></div>
+      <div class="limit"><div class="what">Bench syncs one direction</div><div class="why">Firearms, sessions and groups come down to every device. Component lots, recipes, batches and brass go up but not yet down — each needs a defensible merge before it can, and cloud backup covers moving a bench to a new device meanwhile.</div></div>
+      <div class="limit"><div class="what">Transonic is a caution</div><div class="why">Past about Mach 1.2 the drag model is doing its worst work and a real bullet may do something no model predicts. The prediction is still shown, marked, with a wider interval. Confirm it on paper.</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="close" class="close">
+  <div class="wrap close-in">
+    <h2 class="display">Start with one string.</h2>
+    <p class="sec-sub">Add a rifle, log a session, tap ten shots. Everything else &mdash; the DOPE card, the position offsets, the solver &mdash; is built out of strings you were going to shoot anyway.</p>
     <div class="cta-row">
       <a class="btn" href="https://zero-wine-one.vercel.app">Open Zero</a>
       <a class="btn ghost" href="https://zero-wine-one.vercel.app/bench/">Open Bench</a>
@@ -619,5 +762,24 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
   try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
   } catch (e) {}
+}());
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tut-tab'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('.tut-panel'));
+  if (!tabs.length) return;
+  function show(name) {
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.t === name)); });
+    panels.forEach(function (p) { p.hidden = p.dataset.p !== name; });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { show(t.dataset.t); });
+    t.addEventListener('keydown', function (e) {
+      var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      e.preventDefault();
+      var next = tabs[(i + d + tabs.length) % tabs.length];
+      next.focus(); show(next.dataset.t);
+    });
+  });
 }());
 </script>

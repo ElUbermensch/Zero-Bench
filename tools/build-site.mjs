@@ -65,6 +65,18 @@ if (!cfg.ok && process.env.ALLOW_UNCONFIGURED_BUILD !== '1') {
 execFileSync(process.execPath, [path.join(ROOT, 'apps/bench/build.mjs')], { stdio: 'inherit' });
 execFileSync(process.execPath, [path.join(ROOT, 'apps/zero/build.mjs')], { stdio: 'inherit' });
 
+/* The information page is built here too, and published somewhere else.
+ *
+ * Here, because one command that produces everything is the same argument this
+ * file already makes: a second procedure is a second thing to forget. Somewhere
+ * else, because it must not land in site/. Zero's worker is registered from the
+ * root, so its scope is `/` and it answers for every same-origin GET but
+ * `/bench` -- it would runtime-cache the page into a cache only a Zero code
+ * deploy can bust, and serve Zero's shell under the page's URL offline. It
+ * goes to site-info/dist/, which a Vercel project of its own publishes; the
+ * reasoning is written out in site-info/build.mjs and site-info/DEPLOY.md. */
+execFileSync(process.execPath, [path.join(ROOT, 'site-info/build.mjs')], { stdio: 'inherit' });
+
 fs.rmSync(SITE, { recursive: true, force: true });
 fs.mkdirSync(path.join(SITE, 'bench'), { recursive: true });
 fs.cpSync(path.join(ROOT, 'apps/zero/dist'), SITE, { recursive: true });

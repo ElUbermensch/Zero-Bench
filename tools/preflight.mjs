@@ -185,7 +185,31 @@ ok(deploy.includes('build:site'),
    'inlining the copy here means Pages and Vercel can drift apart silently');
 ok(site.includes('apps/bench/dist') && site.includes('apps/zero/dist'),
    'that script publishes both apps');
+/* Vercel validates vercel.json against a schema that forbids unknown
+ * properties, and it does so at DEPLOY time -- the file is fine locally, the
+ * build never starts, and the error names a JSON path rather than a cause.
+ *
+ * This caught us with `"//"` keys used as comments inside `headers` entries.
+ * JSON has no comments; that convention is tolerated by some tools and not
+ * by this one. The reasoning those keys carried now lives in DEPLOY.md,
+ * where a human deploying will actually read it.
+ *
+ * Checked structurally rather than by grepping for "//", so a stray key of
+ * any name is caught. Written as a function because there are two of these
+ * files now -- the app origin's, and the information page's. */
+const HEADER_KEYS = new Set(['source', 'headers', 'has', 'missing']);
+const strayHeaderKeys = (v) => (v.headers || []).flatMap((h, i) =>
+  Object.keys(h).filter(k => !HEADER_KEYS.has(k)).map(k => `headers[${i}].${k}`));
+
+/* And a BOM is the other way this file fails before a build starts. It is
+ * invisible in an editor, it survives a copy-paste out of a document, and
+ * `JSON.parse` throws on it -- which would take this check out with a stack
+ * trace instead of a line, so it is asserted BEFORE the parse. */
+const noBom = (p) => !read(p).startsWith('\uFEFF');
+
 if (has('vercel.json')) {
+  ok(noBom('vercel.json'), 'vercel.json has no byte-order mark',
+     'Vercel cannot parse it and the deploy fails before the build starts');
   const v = JSON.parse(read('vercel.json'));
   ok(v.buildCommand === 'npm run build:site' && v.outputDirectory === 'site',
      'vercel.json builds and publishes the same thing',
@@ -193,26 +217,101 @@ if (has('vercel.json')) {
   ok(JSON.stringify(v.headers || []).includes('must-revalidate'),
      'vercel.json stops service workers being served stale',
      'a cached sw.js can pin a returning user to an old build indefinitely');
-
-  /* Vercel validates vercel.json against a schema that forbids unknown
-   * properties, and it does so at DEPLOY time -- the file is fine locally, the
-   * build never starts, and the error names a JSON path rather than a cause.
-   *
-   * This caught us with `"//"` keys used as comments inside `headers` entries.
-   * JSON has no comments; that convention is tolerated by some tools and not
-   * by this one. The reasoning those keys carried now lives in DEPLOY.md,
-   * where a human deploying will actually read it.
-   *
-   * Checked structurally rather than by grepping for "//", so a stray key of
-   * any name is caught. */
-  const HEADER_KEYS = new Set(['source', 'headers', 'has', 'missing']);
-  const strays = [];
-  (v.headers || []).forEach((h, i) => {
-    Object.keys(h).forEach(k => { if (!HEADER_KEYS.has(k)) strays.push(`headers[${i}].${k}`); });
-  });
+  const strays = strayHeaderKeys(v);
   ok(strays.length === 0,
      `vercel.json carries no properties the schema will reject${strays.length ? ' — ' + strays.join(', ') : ''}`,
      'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
+}
+
+/* ──────────────────────────────────────────────── the information page */
+section('the information page');
+
+/* It is deployed by a Vercel project of its own, from site-info/, and NOT into
+ * site/. Zero's worker is registered from the root, so its scope is `/` and its
+ * fetch handler answers for every same-origin GET except `/bench`: a marketing
+ * page under site/ would be runtime-cached into a cache that only a Zero code
+ * deploy can bust, and answered with Zero's shell offline. So the thing to
+ * check is not "did it reach site/" -- it is that the one assembly path still
+ * produces it, and that what it produced is the page and not a stub. */
+ok(site.includes('site-info/build.mjs'),
+   'build:site builds the information page too',
+   'one command has to produce everything, or the page silently stops being built');
+ok(has('site-info/index.html') && has('site-info/build.mjs'),
+   'the information page and its build are in the repo');
+
+if (has('site-info/vercel.json')) {
+  ok(noBom('site-info/vercel.json'), 'site-info/vercel.json has no byte-order mark',
+     'Vercel cannot parse it and the deploy fails before the build starts');
+  const iv = JSON.parse(read('site-info/vercel.json'));
+  ok(iv.buildCommand === 'npm run build' && iv.outputDirectory === 'dist',
+     'site-info/vercel.json builds and publishes the same thing site-info/build.mjs writes',
+     'the info project reads THIS file, not the one at the repo root');
+  ok(JSON.stringify(iv.headers || []).includes('must-revalidate'),
+     'the page is served revalidating, not immutable',
+     'a marketing page changes far more often than an app bundle');
+  const istrays = strayHeaderKeys(iv);
+  ok(istrays.length === 0,
+     `site-info/vercel.json carries no properties the schema will reject${istrays.length ? ' — ' + istrays.join(', ') : ''}`,
+     'Vercel validates this at deploy time, so a stray key fails the build rather than the checkout');
+} else {
+  ok(false, 'site-info/vercel.json exists',
+     'without it the info project depends on dashboard settings nobody can review in a diff');
+}
+
+/* The page has two hosts that disagree about who owns the document. As a Claude
+ * Artifact it is WRAPPED at publish time -- the host supplies the doctype,
+ * <html>, <head>, charset and viewport, and the source must NOT carry its own.
+ * Served as a plain file from Vercel none of that exists, and the viewport line
+ * is the one that shows: a phone lays the page out at 980px and zooms out,
+ * which on a marketing page is the whole page.
+ *
+ * So the contract is split, and both halves are checked: the SOURCE stays
+ * Artifact-shaped, and the BUILD supplies the wrapper. Getting this backwards
+ * in either direction is a silent, visible-only-on-a-phone defect. */
+const infoSrc = read('site-info/index.html');
+const infoTop = infoSrc.slice(0, 4096).toLowerCase();
+ok(!/<html[\s>]/.test(infoTop) && !/<body[\s>]/.test(infoTop),
+   'the source page stays Artifact-shaped — no <html>, no <body>',
+   'an Artifact is wrapped by its host; a second <html> in the body is a parse error');
+ok(/<\/style>/.test(infoSrc) && infoSrc.split('</style>').length === 2,
+   'the source has exactly one </style>, which is where the build splits head from body',
+   'a second style block would put the whole page inside <head> and render blank');
+
+/* The emitted page, when there is one. site-info/dist/ is build output and
+ * gitignored, so a preflight run before a build has nothing to look at -- and
+ * preflight has never required a build to be useful. */
+if (has('site-info/dist')) {
+  const there = has('site-info/dist/index.html');
+  const emitted = there ? read('site-info/dist/index.html') : '';
+  const bytes = there ? fs.statSync(path.join(ROOT, 'site-info/dist/index.html')).size : 0;
+  ok(bytes > 1024 && /<\/style>/.test(emitted),
+     `site-info/dist/index.html carries the page — ${bytes} bytes`,
+     'the publish directory exists but the page in it is missing, empty or truncated');
+  /* doctype, charset and viewport have to be near the TOP to do their job --
+   * a charset declared past the first kilobyte is one the parser has already
+   * guessed around. <html> and <body> only have to exist, and <body> sits
+   * after a stylesheet several kilobytes long, so it is looked for in the
+   * whole document rather than in the opening slice. */
+  const emittedTop = emitted.slice(0, 1024).toLowerCase();
+  const emittedAll = emitted.toLowerCase();
+  const wrapMissing = [
+    [/^\s*<!doctype\s+html/, 'doctype', emittedTop],
+    [/charset\s*=\s*["']?utf-8/, 'charset', emittedTop],
+    [/name\s*=\s*["']viewport["']/, 'viewport', emittedTop],
+    [/<html[\s>]/, '<html>', emittedAll],
+    [/<body[\s>]/, '<body>', emittedAll],
+  ].filter(([re, , hay]) => !re.test(hay)).map(([, n]) => n);
+  ok(wrapMissing.length === 0,
+     `and the build wrapped it as a real document${wrapMissing.length ? ' — missing: ' + wrapMissing.join(', ') : ''}`,
+     'without a viewport meta a phone renders it at 980px and zooms out; without a doctype, in quirks mode');
+  /* The wrapper is the only thing the build may add. Everything after the
+   * source's </style> must survive verbatim, or something rewrote the copy. */
+  const srcBody = read('site-info/index.html').split('</style>')[1].trim();
+  ok(emitted.includes(srcBody),
+     'and the page body reached the publish directory verbatim',
+     'the build supplies a document wrapper and nothing else — any other edit is a bug');
+} else {
+  console.log('      (site-info/dist not built — run npm run build:site to check the emitted page)');
 }
 
 /* ──────────────────────────────────────────── the two bars must agree */

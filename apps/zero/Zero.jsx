@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback, Component } from "react";
+import { trueToDope, predict, positionOffsets, airDensityRatio, G1_TO_G7 } from "./src/solver.js";
 
 const MOA_PER_100YD = 1.0472;
 
@@ -6008,6 +6009,8 @@ function App() {
       `${firearms.length} firearm${firearms.length === 1 ? '' : 's'} · ${ammo.length} load${ammo.length === 1 ? '' : 's'}`],
     ['targets', 'Targets',
       `${customTargets.length} custom · ${visibleBuiltins.length} built in`],
+    ['solver', 'Trajectory',
+      'extrapolate your DOPE to distances you have not shot'],
     ...(core ? [['bench', 'Loads from Bench',
       linkedLoadCount ? `${linkedLoadCount} linked to a batch` : 'import batches you have loaded']] : []),
     ...(core ? [['sync', 'Cloud sync',
@@ -6292,6 +6295,7 @@ function App() {
           {tab==='more' && more !== null && (
             <>
               {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
+              {more==='solver' && <SolverTab sessions={sessions} firearms={firearms} ammo={ammo} />}
               {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))}
                 pinned={pinnedTargets}
                 onTogglePin={id=>savePinnedTargets(pinnedTargets.includes(id) ? pinnedTargets.filter(p=>p!==id) : [...pinnedTargets, id])} />}
@@ -9285,6 +9289,280 @@ function findConfirmedZero(sessions, { rifleId, location, yards, position }, exc
  * per-firearm click value yet — if a 1/8-MOA optic ever enters the stable,
  * that constant must become a firearm field threaded through fmtMoaSigned.
  */
+/* ── Trajectory ──────────────────────────────────────────────────────────
+ * The solver's screen. It reads the shooter's own confirmed zeros out of their
+ * sessions, trues a trajectory to them, and answers for distances they have not
+ * fired -- with an interval that says how much of the answer is physics and how
+ * much is extrapolation.
+ *
+ * It deliberately does NOT ask the shooter to type a ballistic profile. Every
+ * number it needs, they have already entered somewhere: the rifle's sight
+ * height on the firearm, the load's velocity and BC on the Bench batch, the
+ * confirmed zeros in their sessions. Asking again would be asking them to
+ * maintain the same fact in two places, and the second copy is the one that
+ * goes stale.
+ */
+function SolverTab({ sessions, firearms, ammo }) {
+  const [rifleId, setRifleId] = useState('');
+  const [tempF, setTempF] = useState('');
+  const [pressure, setPressure] = useState('');
+
+  /* Confirmed zeros, the same way the DOPE tab reads them: the last shot's
+   * dialled elevation in a session that has shots, keyed by distance. Prone
+   * only -- mixing positions into one curve fits a line through two different
+   * rifles' worth of hold. */
+  const cells = useMemo(() => sessions
+    .filter(s => (s.shots?.length || 0) >= 1)
+    .map(s => {
+      const rec = (s.shots || []).filter(sh => !sh.isSighter);
+      const pool = rec.length ? rec : s.shots;
+      const last = pool[pool.length - 1] || {};
+      const elevs = pool.map(sh => sh.elev || 0), winds = pool.map(sh => sh.wind || 0);
+      return {
+        rifleId: s.rifleId || '', location: (s.rangeLocation || '').trim() || 'Unspecified location',
+        position: (s.position || '').trim() || 'Unspecified',
+        yards: Number(s.rangeYards) || 0, date: s.date || '', ts: s.ts || 0,
+        elev: clicksToMoa(last.elev || 0), wind: clicksToMoa(last.wind || 0),
+        noDope: elevs.every(v => v === 0) && winds.every(v => v === 0),
+      };
+    }), [sessions]);
+
+  const rifles = useMemo(() => {
+    const ids = [...new Set(cells.map(c => c.rifleId))];
+    return ids.map(id => ({ id, name: firearms.find(f => f.id === id)?.name
+      || (id ? 'Unknown firearm' : 'Unspecified firearm') }));
+  }, [cells, firearms]);
+
+  const rid = rifleId || (rifles[0]?.id ?? '');
+  const rifle = firearms.find(f => f.id === rid) || null;
+
+  /* One anchor per distance: the most recent confirmed zero at that distance,
+   * because an old one was shot with a different lot in different air. */
+  const anchors = useMemo(() => {
+    const byYd = new Map();
+    for (const c of cells) {
+      if (c.rifleId !== rid || c.noDope || !c.yards) continue;
+      const prev = byYd.get(c.yards);
+      if (!prev || c.ts > prev.ts) byYd.set(c.yards, c);
+    }
+    return [...byYd.values()].sort((a, b) => a.yards - b.yards)
+      .map(c => ({ yd: c.yards, moa: c.elev, date: c.date, position: c.position }));
+  }, [cells, rid]);
+
+  /* The load, from whatever the shooter has already told the app. A Bench
+   * batch carries a measured velocity; the bullet's BC comes with it. */
+  const load = useMemo(() => {
+    const linked = (ammo || []).filter(a => a.batch);
+    const b = linked.length ? linked[0].batch : null;
+    const g7 = b && Number(b.bulletBcG7);
+    const g1 = b && Number(b.bulletBcG1);
+    return {
+      mv: (b && Number(b.velocityAvgFps)) || 2700,
+      bc: (g7 && g7 > 0) ? g7 : ((g1 && g1 > 0) ? g1 * G1_TO_G7 : 0.243),
+      bcSource: (g7 && g7 > 0) ? 'G7, from the batch'
+              : ((g1 && g1 > 0) ? 'converted from the batch’s G1' : 'assumed'),
+      mvSource: (b && Number(b.velocityAvgFps)) ? 'chronographed on the batch' : 'assumed',
+      name: linked.length ? (linked[0].name || 'linked load') : null,
+    };
+  }, [ammo]);
+
+  const solved = useMemo(() => {
+    if (anchors.length === 0) return null;
+    return trueToDope(anchors, {
+      mv: load.mv, bc: load.bc,
+      sightHeightIn: (rifle && Number(rifle.sightHeight)) || 1.75,
+      zeroYd: (rifle && Number(rifle.zeroRange)) || anchors[0].yd,
+      densityRatio: airDensityRatio({
+        tempF: tempF === '' ? undefined : Number(tempF),
+        pressureInHg: pressure === '' ? undefined : Number(pressure),
+      }),
+      tempF: tempF === '' ? 59 : Number(tempF),
+      horizonYd: 1200,
+    });
+  }, [anchors, load, rifle, tempF, pressure]);
+
+  const offsets = useMemo(() => positionOffsets(cells.filter(c => c.rifleId === rid)), [cells, rid]);
+
+  const note = { fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)', lineHeight: 1.6 };
+  const card = { margin: '8px 13px 0', background: 'var(--surf)', border: '1px solid var(--bdr)',
+                 borderRadius: 9, padding: '11px 13px' };
+
+  if (!rifles.length) return (
+    <div className="empty">
+      <div className="et">Nothing to solve from yet</div>
+      <div className="es">Log a session with a firearm, a distance and your dialled sight setting.
+        Two confirmed zeros at least a hundred yards apart is enough to true a trajectory to your
+        rifle — three is better.</div>
+    </div>
+  );
+
+  const ROWS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200];
+
+  return (
+    <div style={{ paddingBottom: 24 }}>
+      <div style={{ ...card, marginTop: 12 }}>
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)',
+                      letterSpacing: '.14em', textTransform: 'uppercase', marginBottom: 7 }}>Trajectory</div>
+        <div style={note}>
+          Your confirmed zeros, with the physics fitted to them — not a chart from a box.
+          The fit solves for the muzzle velocity and drag that make a real trajectory pass
+          through what your rifle actually did, then carries it to distances you have not shot.
+        </div>
+
+        {rifles.length > 1 && (
+          <select className="inp" style={{ marginTop: 9 }} value={rid} onChange={e => setRifleId(e.target.value)}>
+            {rifles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        )}
+
+        <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+          <div style={{ flex: 1 }}>
+            <div className="lbl">Temp °F</div>
+            <input className="inp" type="number" value={tempF} placeholder="59"
+                   onChange={e => setTempF(e.target.value)} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div className="lbl">Station pressure inHg</div>
+            <input className="inp" type="number" step="0.01" value={pressure} placeholder="29.92"
+                   onChange={e => setPressure(e.target.value)} />
+          </div>
+        </div>
+        <div style={{ ...note, marginTop: 5 }}>
+          Station pressure, not the sea-level figure a weather app reports — they differ by
+          about an inch per thousand feet of elevation, which is real at a mountain range.
+        </div>
+      </div>
+
+      {/* What it was given */}
+      <div style={card}>
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)',
+                      letterSpacing: '.14em', textTransform: 'uppercase', marginBottom: 6 }}>
+          Anchors · {anchors.length}
+        </div>
+        {anchors.length === 0
+          ? <div style={note}>No confirmed zeros for this rifle yet.</div>
+          : anchors.map(a => (
+            <div key={a.yd} style={{ display: 'flex', justifyContent: 'space-between',
+                                     fontFamily: 'var(--fm)', fontSize: 10, padding: '3px 0' }}>
+              <span>{a.yd} yd<span style={{ color: 'var(--dim)' }}> · {a.position}</span></span>
+              <span style={{ color: 'var(--acc)', fontWeight: 700 }}>{fmtMoaSigned(a.moa / MOA_PER_CLICK)} MOA</span>
+            </div>
+          ))}
+        <div style={{ ...note, marginTop: 6 }}>
+          {load.name ? <>Load: {load.name} — </> : null}
+          {load.mv} fps ({load.mvSource}), BC {load.bc.toFixed(3)} ({load.bcSource}).
+        </div>
+      </div>
+
+      {/* What it made of them */}
+      {solved && (
+        <div style={card}>
+          {solved.trued ? (
+            <>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--green)', fontWeight: 700 }}>
+                ✓ trued to your rifle
+              </div>
+              <div style={{ ...note, marginTop: 5 }}>
+                Fitted muzzle velocity <strong style={{ color: 'var(--ink)' }}>{solved.mv.toFixed(0)} fps</strong>
+                {' '}({solved.mvScale >= 1 ? '+' : ''}{((solved.mvScale - 1) * 100).toFixed(1)}% on what was entered)
+                and BC <strong style={{ color: 'var(--ink)' }}>{solved.bc.toFixed(3)}</strong>
+                {' '}({solved.bcScale >= 1 ? '+' : ''}{((solved.bcScale - 1) * 100).toFixed(1)}%).
+                The curve passes through your zeros to {solved.rmsMoa.toFixed(2)} MOA.
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--acc)', fontWeight: 700 }}>
+                ⚠ not trued
+              </div>
+              <div style={{ ...note, marginTop: 5 }}>
+                {solved.reason}. The table below is the load's own numbers, which is a
+                starting point and not your rifle. Confirm a zero at a second distance
+                at least a hundred yards from the first and it becomes one.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* The answer */}
+      {solved && (
+        <>
+          <div className="shdr" style={{ marginTop: 12 }}>Come-ups</div>
+          <table className="rt">
+            <thead><tr><th>Distance</th><th>Elevation</th><th>Velocity</th><th></th></tr></thead>
+            <tbody>
+              {ROWS.map(yd => {
+                const p = predict(solved, yd);
+                if (!p) return null;
+                const anchored = anchors.some(a => a.yd === yd);
+                return (
+                  <tr key={yd}>
+                    <td style={{ fontFamily: 'var(--fm)', fontSize: 11 }}>
+                      {yd}
+                      {anchored && <span style={{ color: 'var(--green)', marginLeft: 5 }} title="a confirmed zero">●</span>}
+                    </td>
+                    <td style={{ fontFamily: 'var(--fm)', fontSize: 12, fontWeight: 700,
+                                 color: p.inside ? 'var(--acc)' : 'var(--ink)' }}>
+                      {p.moa.toFixed(2)}
+                      <span style={{ fontWeight: 400, color: 'var(--dim)', fontSize: 9 }}> ±{p.ci.toFixed(2)}</span>
+                    </td>
+                    <td style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)' }}>
+                      {p.velocity.toFixed(0)}
+                    </td>
+                    <td style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)' }}>
+                      {anchored ? 'confirmed'
+                        : p.inside ? 'between your zeros'
+                        : `${p.stretch.toFixed(1)}× past your furthest`}
+                      {p.subsonic ? ' · subsonic'
+                        : p.transonic ? ' · transonic' : ''}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{ ...note, margin: '8px 13px 0' }}>
+            The interval widens with the distance past your furthest confirmed zero, and
+            widens fastest through the transonic region, where a drag model is least reliable
+            and a bullet can go unstable. A prediction is a place to start a string, not a
+            substitute for shooting one.
+          </div>
+        </>
+      )}
+
+      {/* Learned position offsets */}
+      {offsets.length > 0 && (
+        <>
+          <div className="shdr" style={{ marginTop: 14 }}>Between positions</div>
+          <div style={{ ...note, margin: '0 13px 6px' }}>
+            Measured from your own zeros — wherever two positions have a confirmed zero for
+            this rifle at the same distance and place. Nobody's are the same, so none are
+            assumed.
+          </div>
+          {offsets.filter(o => o.from < o.to).map(o => (
+            <div key={`${o.from}-${o.to}`} style={{ ...card, marginTop: 6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontFamily: 'var(--fm)', fontSize: 10 }}>
+                  {o.from} → {o.to}
+                </span>
+                <span style={{ fontFamily: 'var(--fm)', fontSize: 11, fontWeight: 700 }}>
+                  <span style={{ color: 'var(--acc)' }}>E {o.elevMoa >= 0 ? '+' : ''}{o.elevMoa.toFixed(2)}</span>
+                  <span style={{ color: '#4a9eff', marginLeft: 8 }}>W {o.windMoa >= 0 ? '+' : ''}{o.windMoa.toFixed(2)}</span>
+                </span>
+              </div>
+              <div style={{ ...note, marginTop: 4 }}>
+                {o.n} observation{o.n === 1 ? '' : 's'}
+                {o.elevSd != null ? ` · spread ±${o.elevSd.toFixed(2)} MOA` : ' · no spread from one observation'}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function DopeTab({ sessions, firearms, getTarget }) {
   const [open, setOpen] = useState(() => new Set());
   const [cardText, setCardText] = useState(null);

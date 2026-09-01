@@ -11,7 +11,7 @@
     "test:core": "node packages/zero-core/test-zero-core.mjs",
     "test:bench": "cd apps/bench && node test.mjs && node test-sync-ui.mjs",
     "test:bench-sync": "cd apps/bench && node test-sync.mjs",
-    "test:zero": "cd apps/zero && node test-geometry.mjs && node test-integration.mjs && node test-leaderboard.mjs && node test-relay.mjs && node test-relay-overlay.mjs",
+    "test:zero": "cd apps/zero && node test-geometry.mjs && node test-solver.mjs && node test-integration.mjs && node test-leaderboard.mjs && node test-relay.mjs && node test-relay-overlay.mjs",
     "test:sql": "bash supabase/run_tests.sh",
     "embed": "node tools/embed-core.mjs",
     "preflight": "node tools/preflight.mjs",

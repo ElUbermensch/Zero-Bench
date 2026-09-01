@@ -569,6 +569,80 @@ console.log('\nlogbooks written by an earlier build');
   await ctx2.close();
 }
 
+/* ================== the solver, fed by sessions rather than by a form */
+/* The point of reading the anchors out of logged sessions is that the shooter
+ * never types a ballistic profile: the sight height is on the firearm, the
+ * velocity and BC are on the Bench batch, and the confirmed zeros are in their
+ * own log. A solver that asks for all of it again is asking them to maintain
+ * the same fact twice, and the second copy is the one that goes stale. */
+console.log('\nthe trajectory solver');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+
+  /* Three prone sessions at 200, 300 and 600, each ending on a dialled
+     elevation — which is exactly what a season of range trips leaves behind.
+     Sight settings are in CLICKS at a quarter minute each, as the app stores
+     them: 8 clicks = 2 MOA, 18 = 4.5, 58 = 14.5. */
+  await p.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: 'r1', name: 'Palma rifle', caliber: '.308', sightHeight: 1.9, zeroRange: 100, ts: 1 }]));
+    const sess = (id, yd, clicks) => ({
+      id, name: `${yd} prone`, date: '2026-08-01', type: 'Score', position: 'Prone',
+      targetId: 'any', rangeYards: yd, rangeLocation: 'home range', rifleId: 'r1',
+      ammoId: '', ts: yd, matchId: null,
+      shots: [
+        { id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: clicks, wind: 0 },
+        { id: id + 'b', ring: '10', clockH: 3, clockM: 0, xy: { x: 0.3, y: 0 }, elev: clicks, wind: 0 },
+      ],
+    });
+    localStorage.setItem('sessions_v1', JSON.stringify([
+      sess('s200', 200, 8), sess('s300', 300, 18), sess('s600', 600, 58),
+    ]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+
+  await p.click('.tabbar button:has-text("More")');
+  await p.waitForTimeout(250);
+  await p.click('button:has-text("Trajectory")');
+  await p.waitForTimeout(1500);          // the fit runs a few hundred trajectories
+
+  const body = await p.textContent('body');
+  ok(/Anchors · 3/.test(body),
+     'it finds the three confirmed zeros in the log without being told about them');
+  ok(/trued to your rifle/.test(body),
+     '...and three anchors over four hundred yards is enough to true');
+  ok(!/not trued/.test(body), '...so it does not fall back to the box numbers');
+
+  /* The answer for a distance never shot, which is the entire point. */
+  const rows = await p.$$eval('table.rt tbody tr', trs => trs.map(tr =>
+    [...tr.children].map(td => td.textContent.trim())));
+  const at = (yd) => rows.find(r => r[0].startsWith(String(yd)));
+  ok(rows.length >= 10, `a come-up table (${rows.length} distances)`);
+  const r1000 = at(1000);
+  ok(!!r1000, 'including 1000, which this shooter has never fired');
+  const moa1000 = parseFloat(r1000[1]);
+  /* 58 clicks = 14.5 MOA at 600 for a .308 is a slow Palma load; 1000 lands in
+     the mid-thirties. A wide band, because this asserts the answer is in the
+     right universe rather than to a hundredth -- the arithmetic is pinned in
+     test-solver.mjs against a rifle whose truth is known. */
+  ok(moa1000 > 25 && moa1000 < 50,
+     `and the number is a plausible come-up for the load (${moa1000} MOA)`);
+  ok(/±/.test(r1000[1]), '...carrying an interval rather than a bare figure');
+  ok(/past your furthest/.test(r1000[3]),
+     '...and saying plainly that it is extrapolated');
+
+  const r300 = at(300);
+  ok(/confirmed/.test(r300[3]), 'a distance with a zero is marked confirmed, not predicted');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
 /* ============================ forty targets, and the three you actually shoot */
 /* The library is the right size and the wrong list to scroll at a firing point.
  * Pinning is what makes it usable: the handful this shooter uses sit at the top

@@ -230,6 +230,16 @@ function shotXY(shot, target) {
   if (shot && shot.xy && typeof shot.xy.x === 'number' && typeof shot.xy.y === 'number') {
     return { x: shot.xy.x, y: shot.xy.y };
   }
+  /* A ZONE target is reconstructed against the zone's real edge in the shot's
+   * own direction. Going through `ringMidR` here used the synthetic bounding
+   * circles, which on a rectangle are its diagonal -- so every shot without
+   * stored coordinates landed further out than it was fired, by up to 4.8" on
+   * a 12"-wide zone, and took group size and the plot with it. */
+  if (target && target.zones && target.zones.length) {
+    const u = clockToXY(shot.clockH, shot.clockM, 1);
+    return clockToXY(shot.clockH, shot.clockM,
+                     zoneMidR(target, shot.ring, shot.ringPos, u.x, u.y));
+  }
   return clockToXY(shot.clockH, shot.clockM, ringMidR(target, shot.ring, shot.ringPos));
 }
 
@@ -278,6 +288,98 @@ function shapeBoundR(shape) {
   if (shape.kind === 'poly')  return shape.pts.reduce((m,[x,y])=>Math.max(m,Math.hypot(x,y)),0);
   return 0;
 }
+
+/* How far it is from the target's centre to a zone's EDGE, in one direction.
+ *
+ * This is what a rectangle needs and a circle does not. A circle's boundary is
+ * the same distance away whichever way you look; a 12"×24" rectangle's is 6"
+ * to the side and 12" up, and 13.4" to the corner. `shapeBoundR` answers only
+ * the last of those -- it is the bounding circle, which is the right thing for
+ * deciding how far to zoom out and the wrong thing for saying where a shot is.
+ *
+ * A shot used to be stored as (score, fraction-of-the-bounding-radius, clock),
+ * and that cannot be undone on a rectangle: a hole 3.1" right of centre on a
+ * 12"-wide zone came back 7.9" right, because 3.1" is 23% of the way to the
+ * CORNER and 23% of the way to the corner, measured sideways, is 7.9". Off by
+ * 4.8 inches, on a target 12 inches wide. Group size, mean radius, the plot and
+ * every trend that reads them were all wrong for any shot whose exact
+ * coordinates were not stored -- an older backup, a row pulled from the server,
+ * or a miss.
+ *
+ * Measured along a ray FROM THE TARGET ORIGIN rather than from the zone's own
+ * centre, so an offset zone (a head box above an A zone) is handled by the same
+ * arithmetic and the inverse is exact for every shape.
+ */
+function rayToEdge(shape, ux, uy) {
+  const cx = shape.cx || 0, cy = shape.cy || 0;
+
+  if (shape.kind === 'circle') {
+    /* |o + t·u − c| = r, with o at the origin. Standard quadratic; the far
+     * root is the exit, and the ray starting inside guarantees one. */
+    const r = shape.d / 2;
+    const b = -(ux * cx + uy * cy);              // u · (o − c)
+    const c = cx * cx + cy * cy - r * r;
+    const disc = b * b - c;
+    if (disc < 0) return 0;
+    return Math.max(0, -b + Math.sqrt(disc));
+  }
+
+  if (shape.kind === 'rect') {
+    /* Slab method: the exit is the nearest of the four half-plane crossings.
+     * The corner radius is deliberately ignored -- it moves the edge by at
+     * most rx·(√2−1) in the corner directions and modelling it would not
+     * round-trip any better, because the forward and inverse use the same
+     * function either way. */
+    const hw = shape.w / 2, hh = shape.h / 2;
+    let t = Infinity;
+    if (Math.abs(ux) > 1e-12) {
+      const tx = ((ux > 0 ? cx + hw : cx - hw)) / ux;
+      if (tx > 0) t = Math.min(t, tx);
+    }
+    if (Math.abs(uy) > 1e-12) {
+      const ty = ((uy > 0 ? cy + hh : cy - hh)) / uy;
+      if (ty > 0) t = Math.min(t, ty);
+    }
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  if (shape.kind === 'poly') {
+    /* Every edge the ray crosses; the FARTHEST is the exit for a convex
+     * outline and the outer boundary for a concave one, which is the more
+     * useful answer for a scoring zone. */
+    const pts = shape.pts;
+    let best = 0;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const ax = pts[j][0] + cx, ay = pts[j][1] + cy;
+      const bx = pts[i][0] + cx, by = pts[i][1] + cy;
+      const ex = bx - ax, ey = by - ay;
+      const den = ux * ey - uy * ex;
+      if (Math.abs(den) < 1e-12) continue;        // parallel
+      const t = (ax * ey - ay * ex) / den;        // along the ray
+      const s = (ax * uy - ay * ux) / den;        // along the edge
+      if (t > 0 && s >= 0 && s <= 1) best = Math.max(best, t);
+    }
+    return best;
+  }
+  return 0;
+}
+
+/* The zone-target twin of ringMidR: where a shot sits, given its score, how
+ * far through that zone it was, and which way it lies from centre. */
+function zoneMidR(target, score, pos, ux, uy) {
+  const zones = target.zones || [];
+  const z = zones.find(zn => zn.score === score);
+  const p = (pos !== undefined && pos !== null) ? pos : 0.5;
+  if (!z) {
+    /* A miss, placed just outside the outermost zone IN ITS OWN DIRECTION --
+     * not outside the bounding circle, which on a tall rectangle is half a
+     * target away from the edge the shot actually went past. */
+    const outer = zones[zones.length - 1];
+    const edge = outer ? rayToEdge(outer.shape, ux, uy) : 0;
+    return (edge || shapeBoundR(outer ? outer.shape : {})) * 1.15;
+  }
+  return rayToEdge(z.shape, ux, uy) * p;
+}
 // Same return contract as xyToRing so shot storage/chips/misses need no changes.
 function xyToZone(target, x, y) {
   let degFromTwelve = Math.atan2(x, y) * 180 / Math.PI;
@@ -289,8 +391,13 @@ function xyToZone(target, x, y) {
   if (hour === 0) hour = 12;
   const z = target.zones.find(zn => pointInShape(zn.shape, x, y));
   if (!z) return { ring: 'M', ringPos: 1, clockH: hour, clockM: minute };
-  const bR = shapeBoundR(z.shape) || 1;
-  return { ring: z.score, ringPos: Math.min(1, Math.hypot(x,y)/bR), clockH: hour, clockM: minute };
+  /* Fraction of the way to the edge ALONG THIS SHOT'S OWN BEARING, not to the
+   * bounding circle. On a rectangle those are different numbers -- see
+   * rayToEdge -- and only this one can be undone. */
+  const d = Math.hypot(x, y);
+  if (d < 1e-9) return { ring: z.score, ringPos: 0, clockH: hour, clockM: minute };
+  const edge = rayToEdge(z.shape, x / d, y / d) || shapeBoundR(z.shape) || 1;
+  return { ring: z.score, ringPos: Math.min(1, d / edge), clockH: hour, clockM: minute };
 }
 // Bounding-circle rings so ring-based consumers work unchanged. Sorted
 // ascending like real rings; duplicate scores collapse to the smallest.

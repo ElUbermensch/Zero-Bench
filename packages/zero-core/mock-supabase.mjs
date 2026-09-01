@@ -177,17 +177,41 @@ const CHECKS = {
     ['range_sessions_source_app_check',   oneOf('source_app', ['bench', 'zero'])],
     /* The face is a shape, not free text: {rings:[…]}. A client that sends the
      * target's NAME here, or an array, gets a 400 rather than a plot that
-     * renders as nothing. */
-    ['range_sessions_target_face_shape', (r) => r.target_face == null
-      || (typeof r.target_face === 'object' && !Array.isArray(r.target_face)
-          && Array.isArray(r.target_face.rings))],
+     * renders as nothing.
+     *
+     * A MISSING `rings` key is a different case, and the mock used to be
+     * stricter than the server about it. The SQL is
+     *   jsonb_typeof(target_face) = 'object' AND jsonb_typeof(target_face->'rings') = 'array'
+     * and when the key is absent, `->` yields SQL NULL, jsonb_typeof(NULL) is
+     * NULL, `true AND NULL` is NULL -- and a CHECK that evaluates to NULL
+     * PASSES. Postgres accepts `{"name":"SR"}`; this refused it.
+     *
+     * Which is the worse direction for an oracle to be wrong in: an over-
+     * permissive mock lets a bad row through to be dead-lettered in
+     * production, but an over-strict one makes the suite reject correct client
+     * behaviour, and the next person to add a blank backer or a steel plate
+     * would have spent an afternoon on it. Transcribed rather than
+     * paraphrased. */
+    ['range_sessions_target_face_shape', (r) => {
+      if (r.target_face == null) return true;
+      const isObj = typeof r.target_face === 'object' && !Array.isArray(r.target_face);
+      if (!isObj) return false;                       // false AND anything = false
+      const rings = r.target_face.rings;
+      if (rings === undefined) return true;           // NULL check = passes
+      return Array.isArray(rings);
+    }],
     ['range_sessions_velocity_n_check', gte('velocity_n', 0)],
   ],
   recipes: [
     /* A load that cites nobody and claims no workup of its own is not a
      * recipe, it is a rumour. */
+    /* `btrim()`, not JS `.trim()`. Postgres's btrim with no second argument
+     * strips SPACES only, while JS trims every whitespace character -- so a
+     * source_name of "\t" is accepted by the server and was refused here.
+     * Same class as the target_face case above: a paraphrase of the SQL rather
+     * than a transcription of it. */
     ['recipe_cites_a_source', (r) => r.self_developed === true
-      || (r.source_name != null && String(r.source_name).trim().length > 0)],
+      || (r.source_name != null && String(r.source_name).replace(/^ +| +$/g, '').length > 0)],
     ['recipes_charge_gr_check', gt('charge_gr', 0)],
     ['recipes_status_check',    oneOf('status', ['workup', 'proven', 'retired'])],
   ],

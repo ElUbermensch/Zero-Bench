@@ -691,6 +691,9 @@ const ZeroCore = (() => {
       enqueue(table, { id, deleted_at: new Date().toISOString() }, 'delete');
 
     const pendingCount = () => outbox.length;
+    /* How many refusals are kept. This is a retry queue now as well as a
+     * diagnostic, so the cap is what a user can still get back. */
+    const REJECTED_MAX = 500;
     const rejectedList = () => rejected.map(r => ({ table: r.table, id: r.row.id,
       status: r.status, error: r.error, rejectedAt: r.rejectedAt }));
     const clearRejected = () => { rejected = []; persistOutbox(); };
@@ -718,12 +721,32 @@ const ZeroCore = (() => {
       const back = rejected.filter(r => !want || want.has(r.row && r.row.id));
       if (!back.length) return 0;
       rejected = rejected.filter(r => back.indexOf(r) === -1);
+      let n = 0;
       for (const r of back) {
-        outbox.push({ id: uuid(), table: r.table, row: r.row,
-                      op: r.op || 'upsert', queuedAt: nowMs() });
+        /* One entry per row, exactly as `enqueue` guarantees -- and a QUEUED
+         * entry always wins over a retried one.
+         *
+         * A bare push broke both halves. The refused entry is a SNAPSHOT of the
+         * row as it was when it was refused, and the user has been using the
+         * app since: a batch refused at 50 rounds remaining, shot down to 12,
+         * then retried, put both in the queue. PostgREST refuses a bulk upsert
+         * carrying one id twice ("ON CONFLICT DO UPDATE command cannot affect
+         * row a second time"), so pushChunk bisects them into separate
+         * requests -- and whichever lands last wins. Measured: the server ended
+         * up holding 50 after the user had shot it down to 12.
+         *
+         * "A retry cannot leave things worse than not retrying" is true about
+         * duplication and was false about staleness. Skipping a row that
+         * already has a queued entry makes it true about both: the newer state
+         * is going up anyway, and it is the one the user can see. */
+        const queued = outbox.findIndex(e => e.table === r.table
+                                             && e.row && r.row && e.row.id === r.row.id);
+        if (queued >= 0) continue;
+        outbox.push({ table: r.table, row: r.row, op: r.op || 'upsert', queuedAt: nowMs() });
+        n++;
       }
       persistOutbox();
-      return back.length;
+      return n;
     };
     const pendingFor = (table) => outbox.filter(e => e.table === table).length;
 
@@ -972,7 +995,23 @@ const ZeroCore = (() => {
       rejected = rejected.concat(entries.map(e => ({
         table, row: e.row, op: e.op || 'upsert', status,
         error: String(error).slice(0, 400), rejectedAt: nowMs(),
-      }))).slice(-100);                        // bounded: a diagnostic, not a queue
+      })));
+      /* Bounded, but the bound is no longer free.
+       *
+       * "A diagnostic, not a queue" was true when the only thing that could be
+       * done with this list was read it and clear it. Now it is the ONLY route
+       * back for a refused row, so anything trimmed off the front is destroyed
+       * with no record it existed -- and 150 refusals from one bad reference is
+       * ordinary, because a batch whose recipe has not synced blocks every
+       * session on it. Raised, and the overflow is reported rather than silent:
+       * a count the user is invited to dismiss must not be quietly short. */
+      if (rejected.length > REJECTED_MAX) {
+        const lost = rejected.length - REJECTED_MAX;
+        rejected = rejected.slice(-REJECTED_MAX);
+        emit(EVENTS.SYNC_ERROR, { phase: 'dead-letter-overflow', table, error: {
+          message: `${lost} refused row${lost === 1 ? '' : 's'} dropped from the retry list `
+                 + `(it holds the most recent ${REJECTED_MAX})`, lost } });
+      }
       persistOutbox();
       emit(EVENTS.OUTBOX_REJECTED, { table, ids: [...ids], status, error });
       emit(EVENTS.SYNC_ERROR, { phase: 'push', table, error: { status, body: error } });
@@ -1150,7 +1189,20 @@ const ZeroCore = (() => {
            * customer has ever posted", downloaded to a phone and discarded. A
            * table with no inverse should not be fetched at all, rather than
            * fetched and thrown away. */
-          const wanted = Array.isArray(o.tables) && o.tables.length
+          /* An EMPTY array means pull nothing. It used to fall through to
+           * "pull everything", which is the opposite of what every caller in
+           * the tree means by it -- all of them pass `tables: []` for a
+           * push-only sync. Bench's derived-refresh did exactly that and
+           * fetched all sixteen tables including `leaderboard_entries`, which
+           * is world-readable by design: every score every customer has ever
+           * posted, downloaded to a phone over range cellular and discarded.
+           * And discarded really is forever-repeating, because no apply handler
+           * is passed on that call, so the cursor never commits and the next
+           * one starts from 1970 again.
+           *
+           * `undefined` still means "everything", which is the only reading
+           * that makes sense for a caller that did not say. */
+          const wanted = Array.isArray(o.tables)
             ? cfg.tables.filter(t => o.tables.includes(t))
             : cfg.tables;
           for (const t of wanted) {

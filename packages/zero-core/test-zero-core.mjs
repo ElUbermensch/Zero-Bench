@@ -1518,6 +1518,76 @@ section('a refused row can go back in the queue');
   await c2.sync({ trigger: 'test', tables: [] });
   const row = [...(mock.state.rows.get('batches')?.values() || [])].find(r => r.id === doomed);
   ok(row && row.deleted_at, 'and the delete lands on the retry');
+
+  /* ---- a retry must not overwrite work done since the refusal.
+   *
+   * A rejected entry is a SNAPSHOT of the row as it was when it was refused,
+   * and the user has been using the app since. Pushing it back with a bare
+   * `outbox.push` put the row in the queue TWICE -- the stale copy and the
+   * current one -- and because PostgREST refuses a bulk upsert carrying one id
+   * twice ("ON CONFLICT DO UPDATE command cannot affect row a second time"),
+   * pushChunk bisects them into separate requests and whichever lands LAST
+   * wins. Measured before the fix: a batch shot down from 50 rounds to 12 came
+   * back as 50.
+   *
+   * `enqueue` has always guaranteed one entry per row for exactly this reason.
+   * The retry now honours it, and the queued entry -- the newer one, the one
+   * the user can see -- wins. */
+  const orphanId = c.uuid();
+  c.upsert('batches', { id: orphanId, recipe_id: c.uuid(), serial: 'STALE',
+                        qty_loaded: 50, qty_remaining: 50 });
+  await c.sync({ trigger: 'test', tables: [] });
+  ok(c.rejectedList().length === 1, 'a row is refused and held');
+
+  // The shooter keeps using the batch, and the reason for the refusal is fixed.
+  c.upsert('batches', { id: orphanId, recipe_id: recipeId, serial: 'STALE',
+                        qty_loaded: 50, qty_remaining: 12 });
+  const putBack = c.retryRejected();
+  ok(c.pendingCount() === 1,
+     `the row is queued ONCE, not twice (${c.pendingCount()} pending, ${putBack} put back)`);
+
+  await c.sync({ trigger: 'test', tables: [] });
+  const landed = [...(mock.state.rows.get('batches')?.values() || [])].find(r => r.id === orphanId);
+  ok(landed && landed.qty_remaining === 12,
+     `and the server holds what the user last did, not the refused snapshot (${landed && landed.qty_remaining})`);
+}
+
+/* ================== an empty table list means pull NOTHING, not everything */
+/* `tables: []` fell through to "pull everything", which is the opposite of what
+ * every caller in this tree means by it -- all of them pass an empty array for
+ * a push-only sync. Bench's derived-refresh did exactly that and fetched all
+ * sixteen tables including `leaderboard_entries`, which is world-readable by
+ * design: every score every customer has ever posted, downloaded to a phone
+ * over range cellular and thrown away. And thrown away forever-repeatedly,
+ * because no apply handler is passed on that call, so the cursor never commits
+ * and the next one starts from 1970 again. */
+section('a push-only sync pulls nothing');
+{
+  const c = mkClient();
+  await c.signUp('pushonly@example.com', 'pw');
+  const uid = c.getUser().id;
+  mock.state.clock = 50_000_000;
+  mock.seed('firearms', { id: c.uuid(), user_id: uid, name: 'somewhere', cartridge: '.308' });
+  mock.seed('leaderboard_entries', { id: c.uuid(), user_id: uid, occurred_on: '2026-01-01',
+    target_name: 'SR', distance_yd: 200, shot_count: 10, score: 98 });
+
+  const before = { ...mock.state.hits.pull };
+  c.upsert('firearms', { name: 'a local write', cartridge: '6.5 CM' });
+  await c.sync({ trigger: 'test', tables: [] });
+  const touched = Object.keys(mock.state.hits.pull)
+    .filter(t => (mock.state.hits.pull[t] || 0) > (before[t] || 0));
+  ok(touched.length === 0,
+     `an empty table list pulls nothing at all (${touched.join(', ') || 'nothing'})`);
+  ok(c.pendingCount() === 0, '...while still pushing what was queued');
+
+  /* And the control, so this is not just "sync does nothing": omitting the
+   * option entirely still means everything. */
+  const before2 = { ...mock.state.hits.pull };
+  await c.sync({ trigger: 'test' });
+  const touched2 = Object.keys(mock.state.hits.pull)
+    .filter(t => (mock.state.hits.pull[t] || 0) > (before2[t] || 0));
+  ok(touched2.length > 1,
+     `omitting the option still pulls everything (${touched2.length} tables)`);
 }
 
 /* ============================================================ event coverage */

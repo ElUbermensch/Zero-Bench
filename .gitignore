@@ -7,6 +7,12 @@ node_modules/
 # `const SHARED_SUPABASE = {...}` into its index.html, and tools/config.mjs
 # blanking a secret key at build time does nothing about git history.
 dist*/
+# Agent scratchpads land here and are build output by another name -- 13 files
+# of shells, service workers, fonts and icons were committed under
+# apps/zero/tmp/.../zbuild/ one commit after the .gitignore fix that was meant
+# to end exactly this.
+tmp/
+apps/*/tmp/
 bundle.js
 # Scratch: *.tmp.mjs is the convention for a throwaway probe.
 *.tmp.mjs

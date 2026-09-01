@@ -100,37 +100,86 @@ function speedOfSound(tempF) {
  * the error in a confirmed zero read off a target, so including them would add
  * precision the inputs cannot support.
  *
- * The constant: drag deceleration is ρv²·Cd·πd²/8m, and BC = m/(d²·i) with
- * i = Cd/Cd_G7, so the projectile's own Cd and diameter cancel and what is
- * left is ρ·v²·Cd_G7·π/(8·BC). Converting BC from lb/in² to slug/ft² gives
- * 2.0839e-4 on paper.
+ * The constant, derived rather than fitted:
  *
- * On paper is not good enough, so it was CALIBRATED. Run against a published
- * trajectory for a load whose numbers are widely reproduced — Federal Gold
- * Medal 175gr Sierra MatchKing, G7 BC 0.243, 2600 fps, 100 yd zero, standard
- * atmosphere — the paper value came out 0.59 MOA RMS high across 200 to 1000
- * yards, reaching 1.12 MOA and 32 fps at the far end. Fitting the constant to
- * that reference gives 2.010e-4, which lands at 0.14 MOA RMS and never worse
- * than 0.19 MOA or 10 fps anywhere in the table.
+ *   drag deceleration  a = ρ·v²·Cd·πd²/(8m)
+ *   ballistic coeff.  BC = m/(d²·i),  i = Cd/Cd_G7
  *
- * The 3.5% is the accumulated slack in the standard-atmosphere density figure
- * and in exactly how a BC is defined; it is not worth chasing analytically
- * when one reference trajectory pins it. The suite re-runs that comparison, so
- * a future change to the drag curve or the integrator that quietly moves the
- * trajectory fails rather than being absorbed by the truing step.
+ * so the projectile's own Cd and diameter cancel and what is left is
  *
- * Truing would have absorbed a systematic error like that anyway, which is the
- * argument for not bothering — and is exactly why it was worth bothering.
- * Truing corrects for THIS RIFLE. Anything it spends correcting the solver's
- * own arithmetic is capacity it is not spending on the rifle, and it shows up
- * as a fitted muzzle velocity 90 fps from the chronograph's — a number the
- * shooter would reasonably read as their chronograph being wrong.
+ *   a = (ρ · π/8) · Cd_G7 · v² / BC
+ *
+ * with BC in the units it is universally quoted in, lb/in². Converting that to
+ * the slug/ft² the rest of the expression is in needs lb→slug (divide by
+ * g = 32.174 lbm/slug) and in²→ft² (divide by 144), i.e. BC[slug/ft²] =
+ * BC[lb/in²] · 144/32.174 — so the reciprocal, 32.174/144, multiplies through.
+ * g appears only as that units conversion and cancels no further:
+ *
+ *   K = ρ_std · (π/8) · (32.174/144)
+ *     = 0.00237689 slug/ft³ × 0.3926991 × 0.2234306
+ *     = 2.0855e-4
+ *
+ * This shipped for a while as 2.010e-4 — 3.6% low — because it had been FITTED
+ * to a published trajectory table (Federal Gold Medal 175gr SMK, G7 BC 0.243,
+ * 2600 fps) rather than derived. That was a mistake, and the tell was that
+ * fitting K to the same reference against drop gave 2.010e-4 while fitting it
+ * against retained velocity gave 2.027e-4. A single well-posed physical
+ * constant cannot be 0.85% apart depending on which column of one table you
+ * fit it to; the spread means the table's stated BC of 0.243 is not the BC the
+ * table was computed with, and the fit was absorbing the table's error into a
+ * constant named as if it were physics.
+ *
+ * It matters less than it looks: K, ρ and 1/BC are exactly degenerate in the
+ * expression above — integrate(bc=0.243, ρ=1.0) and integrate(bc=0.30375,
+ * ρ=1.25) return bit-identical drop — so on the TRUED path the bcScale simply
+ * absorbs it and nothing moves. It is the UNTRUED path, the shooter who has
+ * not yet confirmed a zero and is looking at box numbers, that was 1.26 MOA
+ * out at 1000. That shooter is the one least able to catch it.
+ *
+ * The reference table is still in the suite, but it is now used the only way a
+ * table of someone else's numbers legitimately can be: the solver is trued TO
+ * it, and the test asserts the recovered BC is close to the table's stated one.
+ * That checks the drag model has the right SHAPE, which is what the table can
+ * evidence, rather than asserting agreement with a number the table may itself
+ * have got wrong.
  */
-const K_DRAG = 2.010e-4;
+const K_DRAG = 2.0855e-4;
 
+/* ── Bounds on what will be integrated at all ─────────────────────────────
+ * A G7 BC below about 0.02 is not a bullet, it is a typo or a unit mix-up, and
+ * it is also where the integrator becomes pathological: the drag is so high
+ * the projectile never reaches the far end, the step guard runs to its limit
+ * on every one of the ~300 evaluations a fit makes, and the app freezes for
+ * half a minute on a phone. Measured before this bound existed: bc 0.01 took
+ * 25.2 s to true and bc 0.005 took 33.6 s. Both now return nothing, instantly.
+ *
+ * The flight-time cap is the other half of that. Any real trajectory inside
+ * this app's horizon is under three seconds; twenty is ten times the slack
+ * anything sane needs, and a fly that exceeds it is not converging on an
+ * answer, it is a bullet falling at terminal velocity while x barely moves. */
+const BC_MIN = 0.02, BC_MAX = 2.0;
+const MAX_FLIGHT_S = 20;
+
+/* Every guard below returns an EMPTY table rather than a plausible one. The
+ * failure this replaces was worse than a crash: an out-of-range zero distance
+ * meant the launch-angle search never found its target, fell back on
+ * multiplying the angle by 1.5 until it clamped, and returned an 11.5° launch
+ * as a solution — a full table of numbers, all of them nonsense, none of them
+ * flagged. A negative BC did the same by a different route, the bullet
+ * accelerating under negative drag to a perfectly plausible-looking 13 MOA. */
 function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, dt = 0.0005 }) {
+  const rho = (densityRatio === undefined || densityRatio === null) ? 1 : densityRatio;
+  if (!Number.isFinite(mv) || mv <= 0 || mv > 20000) return [];
+  if (!Number.isFinite(bc) || bc < BC_MIN || bc > BC_MAX) return [];
+  if (!Number.isFinite(rho) || rho <= 0 || rho > 3) return [];
+  if (!Number.isFinite(maxYd) || maxYd <= 0 || maxYd > 5000) return [];
+  if (!Number.isFinite(zeroYd) || zeroYd <= 0 || zeroYd > maxYd) return [];
+  if (!Number.isFinite(sightHeightIn) || sightHeightIn < 0 || sightHeightIn > 24) return [];
+  if (!Number.isFinite(dt) || dt <= 0 || dt > 0.01) return [];
+
   const cs = speedOfSound(tempF);
-  const rho = densityRatio;
+  const maxSteps = Math.ceil(MAX_FLIGHT_S / dt);
+  const zr = Math.round(zeroYd);
   const step = (state, launchAngle) => {
     let { x, y, vx, vy, t } = state;
     const v = Math.hypot(vx, vy);
@@ -140,7 +189,10 @@ function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, 
     return { x: x + vx * dt, y: y + vy * dt, vx: vx + ax * dt, vy: vy + ay * dt, t: t + dt, v };
   };
 
-  /* Fly it once at a given launch angle, sampling drop at each yard line. */
+  /* Fly it once at a given launch angle, sampling drop at each yard line.
+   * Bails rather than grinding: if the step guard trips, the trajectory is not
+   * one this model can usefully answer about, and spending the remaining
+   * hundreds of thousands of steps to say so is what froze the app. */
   const fly = (launchAngle) => {
     let s = { x: 0, y: -sightHeightIn / 12, t: 0,
               vx: mv * Math.cos(launchAngle), vy: mv * Math.sin(launchAngle) };
@@ -148,7 +200,9 @@ function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, 
     let nextYd = 1;
     const maxFt = maxYd * 3;
     let guard = 0;
-    while (s.x < maxFt && guard++ < 400000) {
+    let bailed = false;
+    while (s.x < maxFt) {
+      if (guard++ >= maxSteps) { bailed = true; break; }
       const prev = s;
       s = step(s, launchAngle);
       while (nextYd <= maxYd && s.x >= nextYd * 3) {
@@ -164,29 +218,45 @@ function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, 
       }
       if (s.vx <= 0) break;
     }
-    return out;
+    return { out, bailed };
   };
 
   /* Find the launch angle that puts the bullet on the aiming point at the
    * zero distance -- a secant search, which converges in a handful of passes
-   * because drop is monotonic in angle over any sane range. */
+   * because drop is monotonic in angle over any sane range.
+   *
+   * A fly that bails, or that never reaches the zero distance, returns null
+   * rather than a sentinel. The sentinel it replaces (-999 for "no row
+   * there") fed the secant search a constant, which made every difference
+   * zero, which sent it down the fallback branch and out to the angle clamp. */
   let a0 = 0, a1 = 0.002;
-  let f0 = null, f1 = null, table = null;
+  let f0 = null, f1 = null, table = null, bestErr = Infinity;
   const err = (a) => {
-    const tr = fly(a);
-    const at = tr[Math.round(zeroYd)];
-    return { e: at ? at.dropFt : -999, tr };
+    const { out, bailed } = fly(a);
+    const at = out[zr];
+    if (bailed || !at) return null;
+    return { e: at.dropFt, tr: out };
   };
-  ({ e: f0 } = err(a0));
+  const r0 = err(a0);
+  if (!r0) return [];
+  f0 = r0.e;
   for (let i = 0; i < 30; i++) {
     const r = err(a1);
-    f1 = r.e; table = r.tr;
+    if (!r) break;
+    f1 = r.e;
+    if (Math.abs(f1) < bestErr) { bestErr = Math.abs(f1); table = r.tr; }
     if (Math.abs(f1) < 1e-5) break;
     const denom = (f1 - f0);
-    const a2 = Math.abs(denom) < 1e-12 ? a1 * 1.5 : a1 - f1 * (a1 - a0) / denom;
+    if (Math.abs(denom) < 1e-12) break;
+    const a2 = a1 - f1 * (a1 - a0) / denom;
+    if (!Number.isFinite(a2)) break;
     a0 = a1; f0 = f1; a1 = Math.max(-0.05, Math.min(0.2, a2));
   }
-  return table || [];
+  /* And the search has to have actually converged. 1e-3 ft at the zero
+   * distance is 0.004 MOA at 100 yd -- far below anything a shooter can hold
+   * -- and a table that did not get there is not a zeroed rifle, so it is
+   * nothing rather than a table of numbers about some other rifle. */
+  return (table && bestErr < 1e-3) ? table : [];
 }
 
 /* Drop at a distance, expressed as the come-up in MOA from the zero. */
@@ -211,14 +281,77 @@ function dropToMoa(dropFt, yd) {
  * where a single anchor makes the two parameters trade off against each other
  * exactly.
  */
+/* The declared search space, and it is declared because it has to MEAN
+ * something. It used to be ±8% on velocity and ±25% on BC, and the refinement
+ * sweeps re-centred on the winner without clamping, so the effective box was
+ * wider than the stated one by an amount nobody could name — and there was no
+ * check on where the winner landed, so a fit that had run out of room reported
+ * success like any other.
+ *
+ * That is not a hypothetical. A rifle truly doing 2450 fps against a box that
+ * said 2800 — a 350 fps box error, which is ordinary in a short barrel with
+ * factory ammunition — pinned against the old lower bound and predicted 3.45
+ * MOA wrong at 1000 yd, shown with a ±1.84 interval and an RMS of 0.150 that
+ * reads as an excellent fit. Wrong by 1.9× its own error bar, and nothing in
+ * the output said so.
+ *
+ * So: ±20%/+15% on velocity, which is 2240–3220 fps against a 2800 box and
+ * contains every real centrefire rifle mismatched against every plausible box
+ * number, and 0.60–1.60 on BC, which covers a G1→G7 conversion being wrong, a
+ * bullet that is not what the box says, and a barrel that is not the maker's
+ * test barrel. The refinement sweeps are clamped inside it.
+ */
+const SEARCH_BOX = { mvLo: 0.80, mvHi: 1.15, bcLo: 0.60, bcHi: 1.60 };
+
+/* A fit to a shooter's OWN confirmed zeros cannot physically be much worse
+ * than a couple of tenths of a minute: the anchors came off this rifle, and a
+ * two-parameter curve through three points from one rifle either passes close
+ * to them or the points are not what they claim to be. Half a minute is
+ * generous — it is roughly the read error of a confirmed zero off a target
+ * plus the model's own slack — and anything past it is data, not physics.
+ *
+ * What that catches in practice is typing. A 600 yd zero of 14.15 entered as
+ * 1.415 fitted silently, reported trued with an RMS of 4.767, and predicted
+ * 21.74 ± 4.84 against a true 34.04: a 12.3 MOA under-dial, about 128 inches
+ * low at 1000 yards, from one misplaced decimal point.
+ *
+ * BE CLEAR ABOUT WHAT IT DOES NOT CATCH. Three anchors against two free
+ * parameters is not over-determined, so a MODERATE error on one of them is
+ * absorbed by the fit rather than left in the residuals: an anchor a single
+ * minute out fits to 0.023 MOA RMS and moves the 1000 yd answer 6.7 MOA. No
+ * residual threshold can see that, because there is nothing left over to see.
+ * A fourth anchor is what defends against it, and the interval is what covers
+ * it in the meantime. This gate is for gross errors — decimal points, ×10
+ * slips, an anchor pasted from a different rifle — and it is worth having for
+ * those alone, because those are the ones that move the answer by ten minutes
+ * rather than by one. */
+const RMS_GATE_MOA = 0.5;
+
 function trueToDope(anchors, base) {
+  /* Yardages are rounded once, here, because the trajectory table is indexed
+   * per whole yard and reading row 1000 while dividing by 1000.4 is a
+   * different number than reading row 1000 and dividing by 1000. */
   const pts = (anchors || [])
     .filter(a => a && Number.isFinite(a.yd) && a.yd > 0 && Number.isFinite(a.moa))
+    .map(a => ({
+      ...a,
+      yd: Math.round(a.yd),
+      /* Each anchor's OWN air. An anchor with no recorded atmosphere is
+       * assumed to have been confirmed in standard conditions — which is the
+       * assumption the shooter is already making when they dial that number,
+       * so it is not a new one, but it is one the UI should say out loud. */
+      densityRatio: Number.isFinite(a.densityRatio) ? a.densityRatio : 1,
+      tempF: Number.isFinite(a.tempF) ? a.tempF : STD_TEMP_F,
+      atmoRecorded: Number.isFinite(a.densityRatio),
+    }))
     .sort((a, b) => a.yd - b.yd);
   if (!pts.length) return null;
 
   const near = pts[0], far = pts[pts.length - 1];
   const spread = far.yd - near.yd;
+  const baseDR = Number.isFinite(base.densityRatio) ? base.densityRatio : 1;
+  const baseTemp = Number.isFinite(base.tempF) ? base.tempF : STD_TEMP_F;
+  const anchorsHaveAtmosphere = pts.every(p => p.atmoRecorded);
 
   /* One anchor, or several all at one distance, cannot separate velocity from
    * drag: raise one and lower the other and the curve passes through the same
@@ -226,84 +359,197 @@ function trueToDope(anchors, base) {
    * reporting it as trued would be a fabrication. */
   const canTrue = pts.length >= 2 && spread >= 100;
 
-  const evaluate = (mvScale, bcScale) => {
-    const table = integrate({
-      mv: base.mv * mvScale, bc: base.bc * bcScale,
-      sightHeightIn: base.sightHeightIn, zeroYd: base.zeroYd,
-      maxYd: Math.max(far.yd, base.zeroYd) + 50,
-      densityRatio: base.densityRatio, tempF: base.tempF,
-    });
-    let sse = 0, n = 0;
-    for (const p of pts) {
-      const row = table[Math.round(p.yd)];
-      if (!row) return { sse: Infinity, table: null };
-      const predicted = dropToMoa(row.dropFt, p.yd);
-      sse += (predicted - p.moa) ** 2; n++;
-    }
-    return { sse: n ? sse / n : Infinity, table };
-  };
-
-  if (!canTrue) {
-    const r = evaluate(1, 1);
-    // Same horizon rule as the trued path: an untrued answer is still an answer.
-    const horizon = Math.max(base.horizonYd || 1200, far.yd + 200);
-    const table = integrate({
-      mv: base.mv, bc: base.bc, sightHeightIn: base.sightHeightIn,
-      zeroYd: base.zeroYd, maxYd: horizon,
-      densityRatio: base.densityRatio, tempF: base.tempF,
-    });
-    return {
-      trued: false,
-      reason: pts.length < 2
-        ? 'one confirmed zero — velocity and drag cannot be separated from a single point'
-        : 'all the confirmed zeros are within 100 yards of each other, which cannot separate velocity from drag',
-      mvScale: 1, bcScale: 1, mv: base.mv, bc: base.bc,
-      table, tempF: base.tempF, rmsMoa: Math.sqrt(r.sse), anchors: pts,
-    };
+  /* ── Fitting the anchors in the air they were shot in ───────────────────
+   * This is the difference between an atmosphere input that does something
+   * and one that is decoration. Drag deceleration is ρ·Cd·v²/BC, so ρ and
+   * 1/BC enter as a single product — and bcScale is a free fitting parameter.
+   * Integrating every anchor in TODAY's air therefore lets the fit produce a
+   * bcScale that exactly cancels whatever density is handed in: the shooter
+   * types 5,000 ft and 95°F correctly and the prediction does not move.
+   *
+   * Measured, before this was fixed: DOPE confirmed at sea level, match day
+   * entered at 5,000 ft, prediction 34.08 MOA against a physical truth of
+   * 30.27 — 3.8 MOA high, about 40 inches at 1000 yards, in the direction of
+   * dialling far too much. Temperature was equally inert: 0°F to 110°F moved
+   * the prediction from 34.1 to 33.9 while the truth ran 36.58 to 32.38.
+   *
+   * The degeneracy breaks the moment each anchor is integrated in its OWN
+   * density. Then bcScale has to explain the anchors given their air, and the
+   * density handed in for today is left free to move the answer. */
+  const groups = new Map();
+  for (const p of pts) {
+    const k = `${p.densityRatio}|${p.tempF}`;
+    if (!groups.has(k)) groups.set(k, { densityRatio: p.densityRatio, tempF: p.tempF, pts: [] });
+    groups.get(k).pts.push(p);
   }
+  const fitMaxYd = Math.max(far.yd, base.zeroYd || 0) + 50;
 
-  /* Coarse then fine. ±8% on velocity is wider than a chronograph's error and
-   * narrower than a typo; ±25% on BC covers the G1→G7 conversion being off,
-   * a bullet that is not what the box says, and a barrel that is not what the
-   * maker's test barrel was. */
-  let best = { sse: Infinity, mvScale: 1, bcScale: 1, table: null };
-  const sweep = (mvLo, mvHi, bcLo, bcHi, steps) => {
-    for (let i = 0; i <= steps; i++) {
-      for (let j = 0; j <= steps; j++) {
-        const ms = mvLo + (mvHi - mvLo) * i / steps;
-        const bs = bcLo + (bcHi - bcLo) * j / steps;
-        const r = evaluate(ms, bs);
-        if (r.sse < best.sse) best = { sse: r.sse, mvScale: ms, bcScale: bs, table: r.table };
+  const evaluate = (mvScale, bcScale) => {
+    let sse = 0, n = 0;
+    const resid = [];
+    for (const g of groups.values()) {
+      const table = integrate({
+        mv: base.mv * mvScale, bc: base.bc * bcScale,
+        sightHeightIn: base.sightHeightIn, zeroYd: base.zeroYd,
+        maxYd: fitMaxYd, densityRatio: g.densityRatio, tempF: g.tempF,
+      });
+      for (const p of g.pts) {
+        const row = table[p.yd];
+        if (!row) return { sse: Infinity, resid: null };
+        const predicted = dropToMoa(row.dropFt, p.yd);
+        const d = predicted - p.moa;
+        sse += d * d; n++;
+        resid.push({ yd: p.yd, moa: p.moa, predicted, residual: d });
       }
     }
+    return { sse: n ? sse / n : Infinity, resid };
   };
-  sweep(0.92, 1.08, 0.75, 1.25, 8);
-  const m = best.mvScale, b = best.bcScale;
-  sweep(m - 0.02, m + 0.02, b - 0.06, b + 0.06, 8);
-  const m2 = best.mvScale, b2 = best.bcScale;
-  sweep(m2 - 0.005, m2 + 0.005, b2 - 0.015, b2 + 0.015, 8);
 
   /* The fitting tables only reach the furthest anchor, because that is all the
    * objective needs. The table that is KEPT has to reach past them -- the whole
-   * point is the distances the shooter has not fired -- so the winning
-   * parameters are flown once more, out to the horizon. Missing this made
-   * every prediction beyond the last confirmed zero return nothing, which is
-   * every prediction anyone would ask for. */
+   * point is the distances the shooter has not fired -- and it is flown in
+   * TODAY's air, because that is the air the shooter is about to dial in. */
   const horizon = Math.max(base.horizonYd || 1200, far.yd + 200);
-  const final = integrate({
-    mv: base.mv * best.mvScale, bc: base.bc * best.bcScale,
+  const flyToday = (mvScale, bcScale) => integrate({
+    mv: base.mv * mvScale, bc: base.bc * bcScale,
     sightHeightIn: base.sightHeightIn, zeroYd: base.zeroYd, maxYd: horizon,
-    densityRatio: base.densityRatio, tempF: base.tempF,
+    densityRatio: baseDR, tempF: baseTemp,
   });
 
+  /* Every refusal returns the same shape as a success, carrying the UNTRUED
+   * box numbers: an untrued answer is still an answer, and predict() widens
+   * its interval for one. What a refusal must never do is return the fitted
+   * numbers, because the whole reason for refusing is that they are not
+   * trustworthy. */
+  const refuse = (reason, extra = {}) => {
+    const r = evaluate(1, 1);
+    return {
+      trued: false, pinned: false, reason,
+      mvScale: 1, bcScale: 1, mv: base.mv, bc: base.bc,
+      table: flyToday(1, 1), tempF: baseTemp,
+      rmsMoa: Number.isFinite(r.sse) ? Math.sqrt(r.sse) : null,
+      anchors: pts, anchorsHaveAtmosphere, ...extra,
+    };
+  };
+
+  if (!canTrue) {
+    return refuse(pts.length < 2
+      ? 'one confirmed zero — velocity and drag cannot be separated from a single point'
+      : 'all the confirmed zeros are within 100 yards of each other, which cannot separate velocity from drag');
+  }
+
+  let best = { sse: Infinity, mvScale: 1, bcScale: 1, resid: null };
+  const B = SEARCH_BOX;
+  /* Clamped to the declared box, so that "the search space is 0.80 to 1.15"
+   * is a fact about the code rather than a description of the first sweep. */
+  const sweep = (mvLo, mvHi, bcLo, bcHi, steps) => {
+    const m0 = Math.max(B.mvLo, mvLo), m1 = Math.min(B.mvHi, mvHi);
+    const b0 = Math.max(B.bcLo, bcLo), b1 = Math.min(B.bcHi, bcHi);
+    for (let i = 0; i <= steps; i++) {
+      for (let j = 0; j <= steps; j++) {
+        const ms = m0 + (m1 - m0) * i / steps;
+        const bs = b0 + (b1 - b0) * j / steps;
+        const r = evaluate(ms, bs);
+        if (r.sse < best.sse) best = { sse: r.sse, mvScale: ms, bcScale: bs, resid: r.resid };
+      }
+    }
+  };
+  const mStep = (B.mvHi - B.mvLo) / 10, bStep = (B.bcHi - B.bcLo) / 10;
+  sweep(B.mvLo, B.mvHi, B.bcLo, B.bcHi, 10);
+  /* Each refinement spans one step of the sweep before it, in eight, so the
+   * next grid is four times finer and the window is guaranteed to contain the
+   * previous winner's neighbourhood. */
+  const mStep2 = mStep / 4, bStep2 = bStep / 4;
+  sweep(best.mvScale - mStep, best.mvScale + mStep, best.bcScale - bStep, best.bcScale + bStep, 8);
+  const mStep3 = mStep2 / 4, bStep3 = bStep2 / 4;
+  sweep(best.mvScale - mStep2, best.mvScale + mStep2, best.bcScale - bStep2, best.bcScale + bStep2, 8);
+
+  /* Every candidate failed to integrate. The old code initialised the winner
+   * to {sse: Infinity, mvScale: 1, bcScale: 1} and tested `r.sse < best.sse`,
+   * which is never true when every evaluation returns Infinity — so the
+   * untouched initial value fell through to the success return and reported
+   * `trued: true` with `rmsMoa: Infinity`. */
+  if (!best.resid || !Number.isFinite(best.sse)) {
+    return refuse('the load could not be integrated at any velocity or drag in the search range — check the muzzle velocity, the BC and the zero distance');
+  }
+
+  const rms = Math.sqrt(best.sse);
+  const worst = best.resid.reduce((a, b) => Math.abs(b.residual) > Math.abs(a.residual) ? b : a);
+
+  /* Where did the winner land? At a bound, or within one step of the finest
+   * sweep of one, means the fit wanted to leave the search space, and a fit
+   * that wanted to leave the search space is not telling you about the rifle,
+   * it is telling you the inputs are not what the shooter thinks they are —
+   * usually a velocity or a BC entered for a different load.
+   *
+   * Refused rather than returned with a wider interval. The choice matters:
+   * the interval is calibrated (see predict) on fits that landed INSIDE the
+   * box, and a pinned fit is outside the population it was measured over, so
+   * widening it would be inventing a number to cover a case it was never
+   * measured against. "I cannot answer this, and here is which input to look
+   * at" is worth more than a number with an error bar of unknown meaning. */
+  const pins = [];
+  if (best.mvScale <= B.mvLo + mStep3)
+    pins.push(`the fit ran to the bottom of the velocity range (${Math.round(base.mv * B.mvLo)} fps) and wanted to go lower`);
+  if (best.mvScale >= B.mvHi - mStep3)
+    pins.push(`the fit ran to the top of the velocity range (${Math.round(base.mv * B.mvHi)} fps) and wanted to go higher`);
+  if (best.bcScale <= B.bcLo + bStep3)
+    pins.push(`the fit ran to the bottom of the BC range (${(base.bc * B.bcLo).toFixed(3)}) and wanted to go lower`);
+  if (best.bcScale >= B.bcHi - bStep3)
+    pins.push(`the fit ran to the top of the BC range (${(base.bc * B.bcHi).toFixed(3)}) and wanted to go higher`);
+
+  const pinnedInfo = pins.length
+    ? { pinned: true, pinnedAt: { mvScale: best.mvScale, bcScale: best.bcScale } }
+    : { pinned: false };
+
+  /* The RMS gate is checked BEFORE the boundary, and the order was chosen from
+   * the numbers rather than from taste. A mistyped anchor drags the fit to a
+   * bound too, so both gates fire on it — but its residual is enormous (4.1
+   * MOA for the decimal slip, 63.8 for the ×10) while a rifle that is merely
+   * outside the search box still fits its own anchors well (0.41 and 0.12 MOA
+   * in the two cases measured). The residual therefore separates the two
+   * cleanly, and it is the one that can name the line of the log to go and
+   * look at. Naming it is the whole value of this gate: "the 600 yd zero does
+   * not agree with the other two" sends the shooter somewhere; "fit failed"
+   * sends them nowhere. */
+  if (rms > RMS_GATE_MOA) {
+    const others = pts.length - 1;
+    return refuse(
+      `the ${worst.yd} yd zero of ${worst.moa.toFixed(2)} MOA does not agree with the other ` +
+      `${others === 1 ? 'one' : others} — the physics that fits the rest puts it at ` +
+      `${worst.predicted.toFixed(2)} MOA, ${Math.abs(worst.residual).toFixed(2)} MOA away. ` +
+      `Check that entry before trusting anything built on it.`,
+      { ...pinnedInfo,
+        worstAnchor: { yd: worst.yd, moa: worst.moa, predicted: worst.predicted, residual: worst.residual },
+        fitRmsMoa: rms });
+  }
+
+  if (pins.length) {
+    return refuse(`${pins.join('; and ')} — the muzzle velocity or the BC this was started from is probably for a different load`,
+                  { ...pinnedInfo, fitRmsMoa: rms });
+  }
+
+  const final = flyToday(best.mvScale, best.bcScale);
+  if (!final.length) {
+    return refuse('the trued numbers could not be flown out to the prediction horizon');
+  }
+
   return {
-    trued: true,
+    trued: true, pinned: false,
     mvScale: best.mvScale, bcScale: best.bcScale,
     mv: base.mv * best.mvScale, bc: base.bc * best.bcScale,
     table: final,
-    tempF: base.tempF,
-    rmsMoa: Math.sqrt(best.sse),
+    tempF: baseTemp,
+    rmsMoa: rms,
     anchors: pts,
+    /* False means the atmospheric correction is ASSUMED: the anchors carried
+     * no recorded conditions, so they were fitted as if confirmed in standard
+     * air. The correction from there to today's air is still applied and is
+     * still better than none, but it rests on that assumption and the UI
+     * should say so rather than presenting it as measured. */
+    anchorsHaveAtmosphere,
+    residuals: best.resid,
+    worstResidualMoa: Math.abs(worst.residual),
   };
 }
 
@@ -323,19 +569,41 @@ function trueToDope(anchors, base) {
  * The interval is deliberately wide rather than flattering. A shooter who
  * dials a predicted 33.9 and finds it was 34.6 is served by having been told
  * ±1.8 beforehand.
+ *
+ * BE CLEAR ABOUT WHAT THIS IS. The quadrature is principled; the CONSTANTS —
+ * the 0.15 floor, the 0.06 untrued term, the 0.035·(stretch−1)·stretch growth
+ * — are empirical, chosen by measurement rather than derived. What was
+ * measured: 200 synthetic rifles, each given a true velocity and BC, trued
+ * from three anchors and checked against their own truth out to 1200 yards.
+ * 97.5% of predictions fell inside the interval and the worst error was 1.25×
+ * its interval, which makes this behave roughly like a 2σ bound for rifles
+ * that fit INSIDE the search box.
+ *
+ * That qualifier is the whole caveat, and it is why trueToDope refuses two
+ * cases rather than handing them here. Both of the failures the coverage run
+ * did not cover — a fit pinned against the edge of the search box, and a fit
+ * to a mistyped anchor — produced errors of 3.45 and 12.3 MOA against
+ * intervals of 1.84 and 4.84. An interval only means something over the
+ * population it was measured on, so the answer is to keep those cases out of
+ * that population, not to inflate the number until it covers them.
  */
 const FLOOR_MOA = 0.15;
 
 function predict(trued, yd) {
-  if (!trued || !trued.table) return null;
-  const row = trued.table[Math.round(yd)];
+  if (!trued || !trued.table || !Number.isFinite(yd)) return null;
+  /* One yardage, used for both halves. Reading row 1000 and then dividing the
+   * drop by 1000.4 yards is arithmetic about a shot nobody took: predict(t,
+   * 1000.4) returned 33.898 and predict(t, 1000.6) returned 33.987 off the
+   * same row. The table is per whole yard, so the answer is per whole yard. */
+  const y = Math.round(yd);
+  const row = trued.table[y];
   if (!row) return null;
-  const moa = dropToMoa(row.dropFt, yd);
+  const moa = dropToMoa(row.dropFt, y);
 
   const far = trued.anchors[trued.anchors.length - 1].yd;
   const near = trued.anchors[0].yd;
-  const inside = yd <= far && yd >= near;
-  const stretch = yd > far ? yd / far : (yd < near ? near / Math.max(1, yd) : 1);
+  const inside = y <= far && y >= near;
+  const stretch = y > far ? y / far : (y < near ? near / Math.max(1, y) : 1);
 
   let ci = Math.hypot(trued.rmsMoa, FLOOR_MOA);
   if (!trued.trued) ci = Math.hypot(ci, moa * 0.06);        // untrued: the box numbers
@@ -346,7 +614,7 @@ function predict(trued, yd) {
     ci = Math.hypot(ci, moa * 0.035 * (stretch - 1) * stretch);
   }
   return {
-    yd, moa, velocity: row.v, timeOfFlight: row.t,
+    yd: y, moa, velocity: row.v, timeOfFlight: row.t,
     inside, stretch,
     ci,
     /* Transonic is where a G7 curve is least reliable and where a real bullet
@@ -379,15 +647,42 @@ function positionOffsets(cells) {
   }
   const pairs = new Map();
   for (const group of byKey.values()) {
-    for (let i = 0; i < group.length; i++) {
-      for (let j = 0; j < group.length; j++) {
+    /* Deduplicate before pairing. n counts pairings, so the same observation
+     * present twice does not add evidence, it MANUFACTURES it: two identical
+     * Prone entries and one Standing at the same distance reported n: 2,
+     * elevMoa: 0.5, elevSd: 0 — two independent observations in perfect
+     * agreement, which is the most confidence-inspiring thing this function
+     * can say, from one observation logged twice.
+     *
+     * Identity is the session if the cell carries one, and otherwise the full
+     * tuple: same rifle, same place, same distance, same position, same date,
+     * same dialled elevation and windage is one shooting of one string, however
+     * many rows of it reached here. */
+    const seen = new Set();
+    const obs = [];
+    for (const c of group) {
+      const id = c.sessionId != null ? `s:${c.sessionId}`
+               : c.id != null ? `i:${c.id}`
+               : `t:${c.position}|${c.date || ''}|${c.elev}|${c.wind}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      obs.push(c);
+    }
+    for (let i = 0; i < obs.length; i++) {
+      for (let j = 0; j < obs.length; j++) {
         if (i === j) continue;
-        const a = group[i], b = group[j];
+        const a = obs[i], b = obs[j];
         if (!a.position || !b.position || a.position === b.position) continue;
+        /* A missing number is not a zero. `(b.elev || 0) - (a.elev || 0)` on a
+         * cell with no elevation recorded reported the OTHER cell's elevation
+         * as the offset between the positions — a 14 MOA position offset,
+         * presented as an observation, out of one absent field. NaN was worse:
+         * NaN || 0 is 0, so it fabricated with no NaN left to give it away. */
+        if (![a.elev, b.elev, a.wind, b.wind].every(Number.isFinite)) continue;
         const k = `${a.position}→${b.position}`;
         if (!pairs.has(k)) pairs.set(k, { from: a.position, to: b.position, elev: [], wind: [] });
-        pairs.get(k).elev.push((b.elev || 0) - (a.elev || 0));
-        pairs.get(k).wind.push((b.wind || 0) - (a.wind || 0));
+        pairs.get(k).elev.push(b.elev - a.elev);
+        pairs.get(k).wind.push(b.wind - a.wind);
       }
     }
   }
@@ -412,4 +707,5 @@ function positionOffsets(cells) {
 const G1_TO_G7 = 0.512;
 
 export { cdG7, airDensityRatio, speedOfSound, integrate, dropToMoa,
-         trueToDope, predict, positionOffsets, G1_TO_G7, K_DRAG };
+         trueToDope, predict, positionOffsets, G1_TO_G7, K_DRAG,
+         SEARCH_BOX, RMS_GATE_MOA, BC_MIN, BC_MAX };

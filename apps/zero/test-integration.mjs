@@ -46,6 +46,32 @@ const BASE = `http://127.0.0.1:${server.address().port}/`;
 let pass = 0, fail = 0;
 const ok = (c, l) => { if (c) { pass++; console.log('  PASS  ' + l); } else { fail++; console.log('  FAIL  ' + l); } };
 
+/* A few facts about this app are facts about its SOURCE rather than about
+ * anything on screen -- "the fit does not depend on the keystroke" is true or
+ * false in a dependency array, and a browser cannot see the difference between
+ * a debounced solve and a fast one. Those are asserted by reading the function
+ * out of Zero.jsx by name, the same way test-geometry.mjs does. Deliberately
+ * brittle: a rename fails loudly here rather than silently testing nothing.
+ *
+ * `grabComponent` rather than a plain brace match from the first `{`, because
+ * for `function C({ a, b })` the first brace is the parameter list. */
+const ZERO_SRC = fs.readFileSync(new URL('./Zero.jsx', import.meta.url), 'utf8');
+const grabComponent = (name) => {
+  const i = ZERO_SRC.indexOf(`function ${name}(`);
+  if (i < 0) throw new Error(`test-integration: Zero.jsx has no function ${name} — renamed?`);
+  let k = ZERO_SRC.indexOf('(', i), par = 0;
+  for (; k < ZERO_SRC.length; k++) {
+    if (ZERO_SRC[k] === '(') par++;
+    else if (ZERO_SRC[k] === ')') { par--; if (!par) break; }
+  }
+  let depth = 0;
+  for (let j = ZERO_SRC.indexOf('{', k); j < ZERO_SRC.length; j++) {
+    if (ZERO_SRC[j] === '{') depth++;
+    else if (ZERO_SRC[j] === '}') { depth--; if (!depth) return ZERO_SRC.slice(i, j + 1); }
+  }
+  throw new Error(`test-integration: could not read the body of ${name}`);
+};
+
 const BATCH_ID = '11111111-2222-3333-4444-555555555555';
 
 const browser = await chromium.launch(LAUNCH_OPTS);
@@ -77,6 +103,14 @@ await page.waitForTimeout(700);
  * still had nowhere to put sync, backup or the Bench importer -- they were
  * stacked under the session list. Four tabs and a menu of submenus is the
  * shape Bench already uses. */
+/* The same, for a suite that runs in its own context rather than on the shared
+ * page — several below deliberately start from a device with nothing on it. */
+const openMorePage = async (pg, title) => {
+  await pg.click('.tabbar button:has-text("More")');
+  await pg.waitForTimeout(250);
+  await pg.click(`button:has-text("${title}")`);
+  await pg.waitForTimeout(500);
+};
 const openMore = async (title) => {
   await page.click('.tabbar button:has-text("More")');
   await page.waitForTimeout(250);
@@ -643,6 +677,234 @@ console.log('\nthe trajectory solver');
   await c.close();
 }
 
+/* ======================= the solver solves for ONE rifle, load, position, place */
+/* Every anchor on a fitted curve has to be a point on the SAME curve, and four
+ * things decide which curve a confirmed zero belongs to: the rifle, the load,
+ * the position and the place. The solver filtered on the rifle and on nothing
+ * else, so a .223 zero, an offhand zero and a zero from a range three thousand
+ * feet higher were fitted together with the .308 prone ones — under a green
+ * "trued to your rifle" banner and a confidence interval that knew nothing
+ * about any of it. */
+console.log('\nthe solver picks the zeros that belong to one curve');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+
+  /* The decoys are the point. Three prone .308 zeros at the home range, and
+     three more that must NOT reach the fit: an offhand zero, a zero from a
+     mountain range, and a zero shot with the .223. The .223 is listed FIRST in
+     ammo, which is what `ammo.filter(a => a.batch)[0]` used to pick. */
+  await p.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: 'r1', name: 'Palma rifle', caliber: '.308', sightHeight: 1.9, zeroRange: 100, ts: 1 }]));
+    localStorage.setItem('ammo_v1', JSON.stringify([
+      { id: 'am223', name: '.223 practice', rifleId: 'r2', ts: 1,
+        batch: { velocityAvgFps: 3240, bulletBcG7: 0.121 } },
+      { id: 'am308', name: 'Palma 155', rifleId: 'r1', ts: 2,
+        batch: { velocityAvgFps: 2950, bulletBcG7: 0.237 } },
+    ]));
+    const sess = (id, yd, clicks, o = {}) => ({
+      id, name: `${yd} ${o.position || 'Prone'}`, date: '2026-08-01', type: 'Score',
+      position: o.position || 'Prone', targetId: 'any', rangeYards: yd,
+      rangeLocation: o.location || 'home range', rifleId: 'r1',
+      ammoId: o.ammoId === undefined ? 'am308' : o.ammoId,
+      temp: o.temp === undefined ? '59' : o.temp, ts: yd, matchId: null,
+      shots: [
+        { id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: clicks, wind: 0 },
+        { id: id + 'b', ring: '10', clockH: 3, clockM: 0, xy: { x: 0.3, y: 0 }, elev: clicks, wind: 0 },
+      ],
+    });
+    localStorage.setItem('sessions_v1', JSON.stringify([
+      sess('s200', 200, 8,  { temp: '59' }),
+      sess('s300', 300, 18, { temp: '44' }),
+      sess('s600', 600, 58, { temp: '86' }),
+      sess('sOff', 500, 40, { position: 'Standing' }),          // wrong hold
+      sess('sMtn', 800, 80, { location: 'mountain range' }),    // wrong air
+      sess('s223', 900, 92, { ammoId: 'am223' }),               // wrong cartridge
+    ]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+
+  await p.click('.tabbar button:has-text("More")');
+  await p.waitForTimeout(250);
+  await p.click('button:has-text("Trajectory")');
+  await p.waitForTimeout(1800);
+
+  let body = await p.textContent('body');
+  ok(/Anchors · 3 · Prone/.test(body),
+     'three anchors reach the fit, not six — and the screen says which position they are');
+  const anchorLines = await p.$$eval('div', ds => ds.map(d => d.textContent)
+    .filter(t => /^\d+ yd · /.test(t.trim())).map(t => t.trim()));
+  ok(anchorLines.length === 3 && anchorLines.every(l => /^(200|300|600) yd/.test(l)),
+     `...the prone .308 zeros from one range (${anchorLines.map(l => l.split(' ')[0]).join(', ')})`);
+  ok(!/^500 yd/m.test(anchorLines.join('\n')), '...and the offhand 500 is not one of them');
+  ok(!/^800 yd/m.test(anchorLines.join('\n')), '...nor the 800 from the mountain range');
+  ok(!/^900 yd/m.test(anchorLines.join('\n')), '...nor the 900 shot with the other load');
+
+  /* Fix 1, the one that put a wrong number in front of a shooter: the base
+     load was `ammo[0]`, so a .223 entered before a .308 supplied {3240, 0.121}
+     to a .308 fit — 15 MOA of error at 1000 under a green banner. */
+  ok(/Palma 155/.test(body), 'the base load is the one these zeros were shot with');
+  ok(!/\.223 practice/.test(body), '...not whichever load happens to be first in the list');
+  ok(/the load these zeros were shot with/.test(body),
+     '...and the screen says where that link came from');
+  ok(/shot with a different load/.test(body),
+     'the zero shot with the other load is reported as left out, not silently blended');
+
+  /* Fix 4: each anchor's own air. anchorsHaveAtmosphere can only be true if
+     every anchor reached the solver carrying a densityRatio. */
+  ok(/86°F/.test(body) && /44°F/.test(body),
+     'each anchor carries the temperature it was confirmed at');
+  ok(/measured rather than\s+assumed/.test(body.replace(/\s+/g, ' ')),
+     '...and the fit says the atmospheric correction is measured, not assumed');
+  ok(/trued to your rifle/.test(body), 'and three anchors over four hundred yards still true');
+
+  const readRows = async () => p.$$eval('table.rt tbody tr', trs => trs.map(tr =>
+    [...tr.children].map(td => td.textContent.trim())));
+  const at1000 = (rows) => parseFloat((rows.find(r => r[0].startsWith('1000')) || [])[1]);
+  const withAir = at1000(await readRows());
+  ok(Number.isFinite(withAir), `a come-up at 1000 with the anchors' own air (${withAir} MOA)`);
+
+  /* Fix 6: the fit ran synchronously in a useMemo keyed on the raw input
+     strings, so typing "29.92" was five full solves — measured at 333 ms each
+     at two anchors — on the main thread, on a phone, on the line. */
+  const tempBox = p.locator('input.inp[type="number"]').first();
+  const t0 = Date.now();
+  await tempBox.type('29.92', { delay: 0 });
+  const typingMs = Date.now() - t0;
+  await p.waitForTimeout(1600);
+  /* The timing above is a smoke test and nothing more: this box solves three
+     anchors in about a tenth of a second, so five wasted solves still finish
+     inside any threshold worth asserting. What the fix actually is, is that
+     the solve no longer depends on the raw keystroke — asserted on the source,
+     which is where that fact lives. `grab` cannot read a component with a
+     destructured parameter list, so this skips the parameter list first. */
+  const solverSrc = grabComponent('SolverTab');
+  ok(/const t = setTimeout\(\(\) => setCommitted\(/.test(solverSrc),
+     `the atmospheric inputs are committed on a timer, not on every keystroke (${typingMs} ms to type five characters)`);
+  ok(/\}, \[anchors, load, rifle, atmo\]\);/.test(solverSrc),
+     '...and the fit depends on the committed value, never on the input string');
+  ok(/onBlur=\{commitNow\}/.test(solverSrc),
+     '...with a blur committing at once, for the shooter who types and taps straight to the table');
+
+  /* Fix 5: 1013 is what a weather app shows, in hectopascals. In the inHg
+     field it produced trued:true with rmsMoa Infinity, the literal string
+     "Infinity" on screen under a green tick, and a table whose every row
+     rendered null — an empty body with nothing said. */
+  await tempBox.fill('');
+  const pressBox = p.locator('input.inp[type="number"]').nth(1);
+  await pressBox.fill('1013');
+  await p.waitForTimeout(1600);
+  body = await p.textContent('body');
+  ok(/outside 15 to 33 inHg/.test(body),
+     'a pressure in hectopascals is refused by name and by range');
+  ok(/hectopascals/.test(body), '...and told what the number probably is');
+  ok(!/trued to your rifle/.test(body), '...with no green tick over it');
+  ok(!/Infinity/.test(body), '...and no "Infinity" printed as a come-up');
+  /* Counted, not read: with the field refused there is no come-up table at
+     all. Asserting that its BODY is empty would have passed either way -- the
+     solver's own integration gate empties it too -- and an empty table with a
+     header on it is exactly the thing the shooter was left staring at. */
+  ok(await p.locator('table.rt').count() === 0,
+     '...and the come-up table is gone rather than standing there empty');
+
+  await pressBox.fill('29.92');
+  await p.waitForTimeout(1600);
+  ok(/trued to your rifle/.test(await p.textContent('body')),
+     'and a pressure back in range solves again');
+
+  /* Fix 2 and 3 have to be visible AND changeable: a benchrest shooter has no
+     prone zeros at all, and "which position is this number for" must never be
+     a question the screen cannot answer. */
+  const selects = await p.$$eval('select.inp', ss => ss.map(s =>
+    [...s.options].map(o => o.textContent.trim())));
+  const posSel = selects.find(o => o.some(t => /^Standing/.test(t)));
+  const locSel = selects.find(o => o.some(t => /^mountain range/.test(t)));
+  ok(!!posSel, `a position picker listing the other holds (${(posSel || []).join(' | ')})`);
+  ok(!!locSel, `and a range picker listing the other places (${(locSel || []).join(' | ')})`);
+  await p.selectOption('select.inp:below(:text("Position"))', { label: posSel[1] })
+    .catch(async () => { /* fall back to index-based selection */
+      const handles = await p.$$('select.inp');
+      for (const h of handles) {
+        const opts = await h.$$eval('option', os => os.map(o => o.textContent.trim()));
+        if (opts.some(t => /^Standing/.test(t))) await h.selectOption({ label: opts.find(t => /^Standing/.test(t)) });
+      }
+    });
+  await p.waitForTimeout(1400);
+  body = await p.textContent('body');
+  ok(/Anchors · 1 · Standing/.test(body),
+     'switching to the offhand zeros solves for those instead, and says so');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
+/* ============ the anchor with no timestamp, and the rifle that is not a rifle */
+console.log('\nthe solver, at the edges of its own data');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+
+  /* Two zeros at 400, neither carrying a timestamp, the OLDER one first in the
+     array. Most-recent-wins is the documented rule; `c.ts > prev.ts` with
+     `ts: s.ts || 0` compared 0 > 0 and kept whichever localStorage happened to
+     hold first, which is not a rule at all. */
+  await p.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: 'r1', name: 'Palma rifle', sightHeight: 1.9, zeroRange: 100, ts: 1 }]));
+    const sess = (id, yd, clicks, o = {}) => ({
+      id, name: id, date: o.date || '2026-08-01', type: 'Score', position: 'Prone',
+      targetId: 'any', rangeYards: yd, rangeLocation: 'home range',
+      rifleId: o.rifleId === undefined ? 'r1' : o.rifleId, ammoId: '', matchId: null,
+      ...(o.ts === undefined ? {} : { ts: o.ts }),
+      shots: [{ id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 },
+                elev: clicks, wind: 0 }],
+    });
+    localStorage.setItem('sessions_v1', JSON.stringify([
+      sess('r1-200', 200, 8, { ts: 1 }),
+      sess('old400', 400, 20, { date: '2026-01-01' }),   // no ts, older, FIRST
+      sess('new400', 400, 24, { date: '2026-07-01' }),   // no ts, newer, second
+      sess('none-300', 300, 40, { rifleId: '' }),        // no firearm at all
+      sess('none-600', 600, 90, { rifleId: '' }),
+    ]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  await p.click('.tabbar button:has-text("More")');
+  await p.waitForTimeout(250);
+  await p.click('button:has-text("Trajectory")');
+  await p.waitForTimeout(1600);
+
+  const anchorAt = async (yd) => (await p.$$eval('div', ds => ds.map(d => d.textContent.trim())
+    .filter(t => /^\d+ yd · /.test(t)))).find(t => t.startsWith(yd + ' yd'));
+  ok(/\+6\.00 MOA$/.test(await anchorAt(400) || ''),
+     `two zeros at one distance with no timestamp resolve by date, not by array order (${await anchorAt(400)})`);
+
+  /* "Unspecified firearm" is a real row in that picker — every session logged
+     without a firearm shares it — and `rifleId || rifles[0].id` made it
+     impossible to select, because choosing it set '' and '' is falsy. */
+  const rifleSel = p.locator('select.inp').first();
+  const labels = await rifleSel.locator('option').allTextContents();
+  ok(labels.some(t => /Unspecified firearm/.test(t)), 'the picker offers the unspecified firearm');
+  await rifleSel.selectOption({ label: labels.find(t => /Unspecified firearm/.test(t)) });
+  await p.waitForTimeout(1600);
+  const stuck = await rifleSel.inputValue();
+  const body = await p.textContent('body');
+  ok(stuck === '', `...and selecting it sticks rather than snapping back (value "${stuck}")`);
+  ok(/Anchors · 2 · Prone/.test(body),
+     '...showing the two zeros logged without a firearm, which had been unreachable');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
 /* ============================ forty targets, and the three you actually shoot */
 /* The library is the right size and the wrong list to scroll at a firing point.
  * Pinning is what makes it usable: the handful this shooter uses sit at the top
@@ -710,6 +972,226 @@ console.log('\nthe target library');
      `...and the other disciplines behind them (A-23 at ${at('A-23')}, B-8 at ${at('B-8')})`);
   await p.click('button.bback');
   await p.waitForTimeout(300);
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
+/* ================================= a pin that survives the phone it was made on */
+/* The header on the suite above says pinning "rides the backup", and the
+ * assertions under it only ever checked that pinning wrote to localStorage and
+ * reached a picker. It rode nothing. `savePinnedTargets` wrote one
+ * localStorage key and every carrier out of this device missed it: the export
+ * wrote `pinned_targets_v1` that the parser had no alias for and the restore
+ * therefore never applied (write-only); the cloud snapshot wrote
+ * `data.pinnedTargets`, which was not a field of `localData`, so the value was
+ * `undefined` and JSON.stringify dropped the key; the IndexedDB mirror and the
+ * crash rescue both omitted it. Pin three targets, back up, restore on the new
+ * phone, get the defaults, and nothing anywhere said so.
+ *
+ * The assertion that was missing is the round trip, so that is the assertion. */
+console.log('\na pin that survives the device');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+  await p.evaluate(() => {
+    localStorage.clear();
+    /* A deliberate pin set that is NOT the default, and one custom target, so
+       "the defaults came back" cannot be mistaken for "the pins crossed". */
+    localStorage.setItem('pinned_targets_v1', JSON.stringify(['a23', 'mine1', 'b8']));
+    localStorage.setItem('custom_targets_v1', JSON.stringify([{
+      id: 'mine1', name: 'My steel plate', desc: 'a plate',
+      rings: [{ score: '10', diam: 8 }, { score: '9', diam: 12 }] }]));
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'sx', name: 'a day out', date: '2026-08-13', type: 'Score', targetId: 'a23',
+      rangeYards: 50, rifleId: '', ammoId: '', ts: 1, matchId: null,
+      shots: [{ id: 'q1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 }] }]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+
+  /* Capture what the exporter actually writes, by taking the blob it hands to
+     the download rather than by reading the state it was built from. */
+  await p.evaluate(() => {
+    window.__blob = null;
+    const real = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (b) => { window.__blob = b; return real(b); };
+    HTMLAnchorElement.prototype.click = function () { if (!this.download) return; };
+  });
+  await openMorePage(p, 'Backup & data');
+  await p.click('button:has-text("⤓ Export")');
+  await p.waitForTimeout(600);
+  const exported = await p.evaluate(() => window.__blob ? window.__blob.text() : null);
+  ok(!!exported && /pinned_targets_v1/.test(exported), 'the exported file carries the pins');
+  await c.close();
+
+  /* The new phone. Nothing on it, and the file goes in through the restore
+     button a user would actually press. */
+  const c2 = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p2 = await c2.newPage();
+  p2.on('pageerror', e => boom.push(e.message));
+  await p2.goto(BASE);
+  await p2.evaluate(() => localStorage.clear());
+  await p2.reload(); await p2.waitForTimeout(800);
+  p2.on('dialog', d => d.accept());
+  await openMorePage(p2, 'Backup & data');
+  await p2.setInputFiles('input[type="file"]',
+    { name: 'zero-backup.json', mimeType: 'application/json', buffer: Buffer.from(exported) });
+  await p2.waitForTimeout(900);
+
+  const landed = await p2.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1') || 'null'));
+  ok(Array.isArray(landed) && landed.join() === 'a23,mine1,b8',
+     `the restore applies them on the other device (${JSON.stringify(landed)})`);
+
+  await p2.reload(); await p2.waitForTimeout(900);
+  await openMorePage(p2, 'Targets');
+  const yours = await p2.evaluate(() => {
+    const g = [...document.querySelectorAll('div')].find(d =>
+      d.firstElementChild && d.firstElementChild.textContent.trim() === 'Yours');
+    return g ? [...g.querySelectorAll('.tcn')].map(n => n.textContent.trim()) : null;
+  });
+  ok(!!yours && yours.length === 3 && /A-23/.test(yours[0]) && /My steel plate/.test(yours[1]),
+     `...and they are the shooter's own targets at the top after a relaunch (${(yours || []).join(' | ')})`);
+
+  /* The other three carriers, asserted where the fact lives: two of them are
+     the shape of an object literal and the third is a list of storage keys
+     read from a component tree that has already crashed. */
+  const appSrc = grabComponent('App');
+  ok(/const localData = \{[^}]*\bpinnedTargets\b/.test(appSrc),
+     'the cloud snapshot is built from a model that has the pins in it');
+  ok(/pinnedTargets: keep\('pinnedTargets', pinnedTargets\)/.test(appSrc),
+     '...the IndexedDB safety mirror carries them, which bootFailed already pretended it did');
+  ok(/'deleted_builtins_v1', 'pinned_targets_v1'/.test(ZERO_SRC),
+     '...and the crash rescue writes them out of a dead app');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c2.close();
+}
+
+/* ===================== a pin whose target is gone, and a fallback that moved */
+console.log('\nthe pins that could not be removed, and the target that stood in');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+  await p.evaluate(() => {
+    localStorage.clear();
+    /* Duplicated, and one id that names nothing. A duplicate is two React
+       children with the same key; a dead id is a row the picker drops with
+       `.filter(Boolean)` and a pin button that therefore never renders, so
+       nothing in the app can ever take it off again. */
+    localStorage.setItem('pinned_targets_v1', JSON.stringify(['a23', 'a23', 'ghost-id', 'mine1', 'mr1']));
+    localStorage.setItem('custom_targets_v1', JSON.stringify([{
+      id: 'mine1', name: 'My steel plate', desc: 'a plate',
+      rings: [{ score: '10', diam: 8 }, { score: '9', diam: 12 }] }]));
+    /* A session whose target is gone. getTarget fell back to `allTargets[0]`,
+       and allTargets is pinned-first, so this was scored and plotted against
+       whatever the shooter pinned most recently — a 6-inch smallbore face
+       instead of a 37-inch SR. The card names the target it resolved to. */
+    localStorage.setItem('sessions_v1', JSON.stringify([{
+      id: 'gone', date: '2026-08-13', type: 'Score', targetId: 'no-such-target',
+      rangeYards: 200, rifleId: '', ammoId: '', ts: 1, matchId: null,
+      shots: [{ id: 'g1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 }, elev: 0, wind: 0 }] }]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+
+  const card = await p.textContent('.cname');
+  ok(/^SR · 200yd/.test((card || '').trim()),
+     `a session whose target is gone falls back to the SR, not to what was pinned (${card})`);
+
+  await openMorePage(p, 'Targets');
+  const countYours = async () => p.evaluate(() => {
+    const g = [...document.querySelectorAll('div')].find(d =>
+      d.firstElementChild && d.firstElementChild.textContent.trim() === 'Yours');
+    return g ? [...g.querySelectorAll('.tcn')].map(n => n.textContent.trim()) : [];
+  });
+  const yours = await countYours();
+  ok(yours.length === 3, `a duplicated pin is one row, not two (${yours.join(' | ')})`);
+  ok(!/ghost/.test(yours.join(' ')), '...and a pin that names nothing is dropped on load');
+  const stored = await p.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1')));
+  ok(stored.join() === 'a23,a23,ghost-id,mine1,mr1',
+     '...without rewriting the stored list behind the shooter (it is cleaned on read)');
+
+  /* Fix 8: removing a target has to take its pin with it. */
+  const a23 = p.locator('.tcard', { hasText: 'A-23' }).first();
+  await a23.locator('button:has-text("remove")').click();
+  await p.waitForTimeout(200);
+  await a23.locator('button:has-text("yes")').click();
+  await p.waitForTimeout(500);
+  const afterDelete = await p.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1')));
+  ok(Array.isArray(afterDelete) && !afterDelete.includes('a23'),
+     `deleting a target unpins it, instead of leaving a pin nothing can reach (${JSON.stringify(afterDelete)})`);
+  ok(afterDelete.includes('mr1'), '...and leaves every other pin alone');
+  const yoursAfter = await countYours();
+  ok(yoursAfter.length === 2 && /MR-1/.test(yoursAfter[1]),
+     `...so the "Yours" group is what is actually pinned (${yoursAfter.join(' | ')})`);
+
+  /* The same for a CUSTOM target, which is deleted down a different path --
+     saveCustomTargets, not onDeleteBuiltin. This one matters twice over: `uid()`
+     is eight characters of Math.random, so a leaked id can be minted again onto
+     a target the shooter never pinned. */
+  const mine = p.locator('.tcard', { hasText: 'My steel plate' }).first();
+  await mine.locator('button:has-text("remove")').click();
+  await p.waitForTimeout(200);
+  await mine.locator('button:has-text("yes")').click();
+  await p.waitForTimeout(500);
+  const afterCustom = await p.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1')));
+  ok(Array.isArray(afterCustom) && !afterCustom.includes('mine1') && afterCustom.includes('mr1'),
+     `deleting a custom target takes its pin too, and only its own (${JSON.stringify(afterCustom)})`);
+
+  /* And restoring it does not bring the pin back with it — which is what put a
+     hidden target back at the top of every picker when a match template
+     un-hid SR, SR-3 and MR-1 to score a National Match Course. */
+  await p.click('button:has-text("restore")');
+  await p.waitForTimeout(500);
+  const afterRestore = await p.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1')));
+  ok(!afterRestore.includes('a23'),
+     'and bringing the target back does not resurrect the pin with it');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
+/* ============================== the A-50 has no X ring, and the rule book says so */
+/* NRA Smallbore Rule 14.3(f): "targets without X-ring (A-7, A-17, A-32, A-33,
+ * A-50, and A-51)". Their innermost ring is a centre shot, counted as centres
+ * for a tiebreak, and an app that reports "398-21X" off an A-50 is filling in
+ * a column that does not exist. Display only: the diameters and the points are
+ * right and are not touched. */
+console.log('\nthe ring the NRA does not call an X');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+  await p.evaluate(() => localStorage.clear());
+  await p.reload(); await p.waitForTimeout(800);
+  await openMorePage(p, 'Targets');
+
+  const ringsOf = async (name) => {
+    const cardEl = p.locator('.tcard', { hasText: name }).first();
+    await cardEl.locator('.tch').click();
+    await p.waitForTimeout(250);
+    const rows = await cardEl.locator('table.rt tbody tr').evaluateAll(trs =>
+      trs.map(tr => [...tr.children].map(td => td.textContent.trim())));
+    await cardEl.locator('.tch').click();
+    await p.waitForTimeout(150);
+    return rows;
+  };
+  const a50 = await ringsOf('A-50');
+  ok(a50.length && a50[0][0] === 'C',
+     `the A-50's innermost ring is a centre, not an X (${a50[0] && a50[0][0]})`);
+  ok(a50.length && a50[0][2] === '0.197"',
+     `...with the diameter untouched (${a50[0] && a50[0][2]})`);
+  const a51 = await ringsOf('A-51');
+  ok(a51.length && a51[0][0] === 'C', 'and so is the A-51\'s');
+  const sr = await ringsOf('SR-1');
+  ok(sr.length && sr[0][0] === 'X', 'while a High Power face still has an X ring, because it has one');
 
   ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
   await c.close();

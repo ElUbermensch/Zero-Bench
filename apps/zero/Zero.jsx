@@ -650,6 +650,72 @@ for (const t of BUILTIN_TARGETS) {
  * because it is a fact about the person rather than about the data. */
 const DEFAULT_PINNED = ['sr', 'sr3', 'mr1'];
 
+/* The target a session falls back to when its own targetId resolves to
+ * nothing -- a custom target that was deleted, a built-in that was hidden, a
+ * row that arrived from an older build.
+ *
+ * By ID, and never by array position. `allTargets[0]` was the fallback, and
+ * `allTargets` is now sorted with the PINNED targets first, so the fallback
+ * became "whatever this shooter pinned most recently": a session whose target
+ * had gone was scored and plotted against a 6-inch smallbore face instead of a
+ * 37-inch SR, and the ring diameters are the scale every measurement in the
+ * app is taken against. `BUILTIN_TARGETS[0]` was no better -- it silently
+ * changed from SR to SR-1 when the library was expanded, which is the same bug
+ * one indirection further away.
+ *
+ * The SR is the right constant: it is the paper the app's own defaults, its
+ * match templates and its 200 yd stages are built around. Looked up even when
+ * the shooter has hidden it, because a hidden target is hidden from the
+ * pickers, not deleted from the library, and a wrong scale is worse than a
+ * target the shooter did not ask to see. */
+/* What the innermost ring is CALLED on this paper.
+ *
+ * NRA Smallbore Rule 14.3(f) is explicit about it: "targets without X-ring
+ * (A-7, A-17, A-32, A-33, A-50, and A-51)". On those faces the innermost ring
+ * is the decimal-scoring inner ten and it is a CENTER SHOT -- a tiebreaker
+ * counted as centres, not as Xs -- so a scorecard reading "398-21X" off an
+ * A-50 is reporting a statistic the rule book does not recognise, and a
+ * shooter who copies it onto an entry card is filling in the wrong column.
+ *
+ * DISPLAY ONLY. The ring's stored `score` stays "X" and is still worth ten,
+ * the diameters are untouched, and every string already logged keeps scoring
+ * exactly as it did -- the numbers were right, the word was wrong. Four of the
+ * six named in the rule already have no innermost X ring in this library; the
+ * A-50 and A-51 did, and they are the ones this changes. */
+const NO_X_RING_TARGETS = new Set(['a7', 'a17', 'a32', 'a33', 'a50', 'a51']);
+function innerRingLabel(target) {
+  if (!target || !NO_X_RING_TARGETS.has(target.id)) return 'X';
+  /* Only where there is an innermost ring stored as "X" to relabel. Four of
+   * the six named in the rule have no such ring at all, and calling their
+   * (always zero) X count a centre count would be inventing a statistic in the
+   * other direction. */
+  return (target.rings || []).some(r => r && r.score === 'X') ? 'C' : 'X';
+}
+
+const DEFAULT_TARGET_ID = 'sr';
+function defaultTarget() {
+  return BUILTIN_TARGETS.find(t => t.id === DEFAULT_TARGET_ID) || BUILTIN_TARGETS[0];
+}
+
+/* The stored pinned list, made safe to render and to trust.
+ *
+ * Strings only (which it already did), then DEDUPED -- a duplicated id is two
+ * React children with the same key in the Targets tab -- then dropped if it
+ * names a target that no longer exists. An id that resolves to nothing is not
+ * merely useless: the picker filters it out with `.filter(Boolean)` so the row
+ * vanishes, and the pin button only renders on a visible card, so nothing in
+ * the UI can ever remove it again. */
+function cleanPinnedIds(list, customTargets) {
+  const live = new Set([...BUILTIN_TARGETS.map(t => t.id),
+                        ...(customTargets || []).map(t => t && t.id).filter(Boolean)]);
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).filter(id => {
+    if (typeof id !== 'string' || seen.has(id) || !live.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 function uid() { return Math.random().toString(36).slice(2,10); }
 
 /* The next ordinal for a string. A shot's number is minted ONCE and kept, like
@@ -1548,6 +1614,11 @@ const BACKUP_KEY_ALIASES = {
   matches:         ['matches_v1', 'matches'],
   customTargets:   ['custom_targets_v1', 'customTargets', 'custom_targets'],
   deletedBuiltins: ['deleted_builtins_v1', 'deletedBuiltins', 'deleted_builtins'],
+  /* The pins were WRITTEN by the exporter and had no alias here, so the parser
+   * never surfaced them and the restore never applied them: a write-only key
+   * in a file that claimed to be a backup. Pin three targets, back up, restore
+   * on the new phone, and the defaults came back with nothing said. */
+  pinnedTargets:   ['pinned_targets_v1', 'pinnedTargets', 'pinned_targets'],
   ammo:            ['ammo_v1', 'ammo', 'ammoLoads', 'ammo_loads'],
 };
 function parseBackupText(text) {
@@ -1589,6 +1660,11 @@ function parseBackupText(text) {
    * loses nothing that was ever reachable. */
   for (const k of ['matches', 'firearms', 'ammo', 'customTargets']) {
     if (data[k]) data[k] = data[k].filter(r => r && typeof r === 'object' && r.id);
+  }
+  /* Not records but lists of ids. Same reasoning, one type down: anything that
+   * is not a string cannot name a target and can only break a render. */
+  for (const k of ['deletedBuiltins', 'pinnedTargets']) {
+    if (data[k]) data[k] = data[k].filter(x => typeof x === 'string');
   }
   // Counted AFTER the filter, or the dialog reports rows it is about to drop.
   const counts = `${(data.sessions||[]).length} sessions · ${(data.firearms||[]).length} firearms · ${(data.matches||[]).length} matches · ${(data.customTargets||[]).length} custom targets`;
@@ -1675,6 +1751,15 @@ function mergeBackupData(local, incoming) {
   if (Array.isArray(incoming.deletedBuiltins)) {
     out.deletedBuiltins = [...new Set([...(local.deletedBuiltins || []),
                                        ...incoming.deletedBuiltins])];
+  }
+  /* Pinned on either device means pinned, for the same reason: a pin is a
+   * preference, an extra one is a row at the top of a picker, and a lost one
+   * is the shooter re-finding their target in a list of forty. Local order
+   * first, so the pins this device already had keep the order they were made
+   * in and the other device's arrive behind them. */
+  if (Array.isArray(incoming.pinnedTargets)) {
+    out.pinnedTargets = [...new Set([...(local.pinnedTargets || []),
+                                     ...incoming.pinnedTargets])];
   }
   return { data: out, stats };
 }
@@ -5688,14 +5773,20 @@ function App() {
        * to by anything, so dropping it loses nothing that was reachable. */
       const cleanRows = (v) => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object' && x.id) : []);
       try { const r = await window.storage.get('matches_v1'); if (r) setMatches(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.matches = true; }
-      try { const r = await window.storage.get('custom_targets_v1'); if (r) setCustomTargets(usableTargets(JSON.parse(r.value))); } catch { bootFailed.current.customTargets = true; }
+      /* Kept in a local as well as in state: the pinned list read a few lines
+       * below has to be checked against the targets that actually exist, and
+       * `customTargets` the state variable is still [] at this point. */
+      let loadedCustom = [];
+      try { const r = await window.storage.get('custom_targets_v1');
+             if (r) { loadedCustom = usableTargets(JSON.parse(r.value)); setCustomTargets(loadedCustom); } }
+      catch { bootFailed.current.customTargets = true; }
       try { const r = await window.storage.get('deleted_builtins_v1'); const v = r ? JSON.parse(r.value) : null;
              if (r) setDeletedBuiltins(Array.isArray(v) ? v.filter(x => typeof x === 'string') : []); } catch { bootFailed.current.deletedBuiltins = true; }
       /* Absent means "never chosen", which is not the same as "chose none" --
          a new shooter gets the three conventional High Power targets pinned so
          the picker is useful before they have told it anything. */
       try { const r = await window.storage.get('pinned_targets_v1'); const v = r ? JSON.parse(r.value) : null;
-             if (r) setPinnedTargets(Array.isArray(v) ? v.filter(x => typeof x === 'string') : []); } catch { bootFailed.current.pinnedTargets = true; }
+             if (r) setPinnedTargets(cleanPinnedIds(v, loadedCustom)); } catch { bootFailed.current.pinnedTargets = true; }
       try { const r = await window.storage.get('rifles_v1'); if (r) setFirearms(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.firearms = true; }
       try { const r = await window.storage.get('ammo_v1'); if (r) setAmmo(cleanRows(JSON.parse(r.value))); } catch { bootFailed.current.ammo = true; }
       try { const r = await window.storage.get('backup_meta_v1'); if (r) setBackupMeta(JSON.parse(r.value)); } catch {}
@@ -5731,6 +5822,10 @@ function App() {
         if (Array.isArray(snap.deletedBuiltins)) saveDeletedBuiltins(snap.deletedBuiltins);
         if (Array.isArray(snap.firearms)) saveFirearms(snap.firearms);
         if (Array.isArray(snap.ammo)) saveAmmo(snap.ammo);
+        /* Last, because saveCustomTargets prunes pins that name a target the
+         * incoming list does not have, and the pins from the snapshot are the
+         * ones that should survive that. */
+        if (Array.isArray(snap.pinnedTargets)) savePinnedTargets(snap.pinnedTargets);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5763,12 +5858,16 @@ function App() {
         matches: keep('matches', matches),
         customTargets: keep('customTargets', customTargets),
         deletedBuiltins: keep('deletedBuiltins', deletedBuiltins),
+        /* bootFailed.current.pinnedTargets was being set at boot and read by
+         * nothing, because the mirror never carried the pins at all -- dead
+         * code that read as protection. */
+        pinnedTargets: keep('pinnedTargets', pinnedTargets),
         firearms: keep('firearms', firearms),
         ammo: keep('ammo', ammo),
       });
     }, 1500);
     return () => clearTimeout(t);
-  }, [ready, sessions, matches, customTargets, deletedBuiltins, firearms, ammo]);
+  }, [ready, sessions, matches, customTargets, deletedBuiltins, pinnedTargets, firearms, ammo]);
 
   const visibleBuiltins = BUILTIN_TARGETS.filter(t => !deletedBuiltins.includes(t.id));
   /* Pinned first, in the order they were pinned; then everything else grouped
@@ -5806,14 +5905,34 @@ function App() {
     setMatches(data);
     try { await window.storage.set('matches_v1', JSON.stringify(data)); } catch {}
   };
+  const savePinnedTargets = async data => {
+    setPinnedTargets(data);
+    try { await window.storage.set('pinned_targets_v1', JSON.stringify(data)); } catch {}
+  };
+  /* Deleting a target has to take its pin with it.
+   *
+   * It did not, and the pin then had nowhere to go: the picker drops an id
+   * that resolves to nothing (`.filter(Boolean)`), so no row appears, and the
+   * unpin button only renders on a card that IS showing. The id stayed on disk
+   * forever. Two ways that bit: `uid()` is eight characters of Math.random and
+   * can recycle, so a leaked custom id can be re-minted onto a target the
+   * shooter never pinned; and starting a National Match Course un-hides SR,
+   * SR-3 and MR-1 on purpose, which brought a deleted built-in back pinned to
+   * the top of every picker.
+   *
+   * Pruned against the whole library rather than against the list being
+   * saved -- otherwise saving the custom targets would drop every built-in
+   * pin, which is the same bug with the sign flipped. */
+  const dropDeadPins = (nextCustom) => {
+    const live = new Set([...BUILTIN_TARGETS.map(t => t.id), ...nextCustom.map(t => t.id)]);
+    const keep = pinnedTargets.filter(id => live.has(id));
+    if (keep.length !== pinnedTargets.length) savePinnedTargets(keep);
+  };
   const saveCustomTargets = async data => {
     const clean = usableTargets(data);
     setCustomTargets(clean);
     try { await window.storage.set('custom_targets_v1', JSON.stringify(clean)); } catch {}
-  };
-  const savePinnedTargets = async data => {
-    setPinnedTargets(data);
-    try { await window.storage.set('pinned_targets_v1', JSON.stringify(data)); } catch {}
+    dropDeadPins(clean);
   };
   const saveDeletedBuiltins = async data => {
     setDeletedBuiltins(data);
@@ -6045,6 +6164,9 @@ function App() {
       if (d.deletedBuiltins) saveDeletedBuiltins(d.deletedBuiltins);
       if (d.firearms) saveFirearms(d.firearms);
       if (d.ammo) saveAmmo(d.ammo);
+      // After the targets, so the file's pins survive the prune that follows a
+      // custom-target write rather than being measured against the old library.
+      if (d.pinnedTargets) savePinnedTargets(cleanPinnedIds(d.pinnedTargets, d.customTargets || customTargets));
       window.alert(`Backup restored: ${res.counts}.`);
     };
     reader.onerror = () => window.alert('Import failed: could not read file.');
@@ -6090,7 +6212,11 @@ function App() {
     return null;
   })();
 
-  const localData = { sessions, matches, customTargets, deletedBuiltins, firearms, ammo };
+  /* `pinnedTargets` was missing from here, which is why the cloud snapshot
+   * line `pinned_targets_v1: data.pinnedTargets` wrote `undefined` -- and
+   * JSON.stringify drops an undefined value, so the key was not in the file.
+   * The line read as working and did nothing. */
+  const localData = { sessions, matches, customTargets, deletedBuiltins, pinnedTargets, firearms, ammo };
   const applyRestored = (d) => {
     if (d.sessions) saveSessions(d.sessions);
     if (d.matches) saveMatches(d.matches);
@@ -6098,12 +6224,10 @@ function App() {
     if (d.deletedBuiltins) saveDeletedBuiltins(d.deletedBuiltins);
     if (d.firearms) saveFirearms(d.firearms);
     if (d.ammo) saveAmmo(d.ammo);
+    if (d.pinnedTargets) savePinnedTargets(cleanPinnedIds(d.pinnedTargets, d.customTargets || customTargets));
   };
 
-  const getTarget = id => {
-    if (!allTargets.length) return BUILTIN_TARGETS[0]; // ultimate fallback
-    return allTargets.find(t=>t.id===id) || allTargets[0];
-  };
+  const getTarget = id => allTargets.find(t => t.id === id) || defaultTarget();
 
   const linkedLoadCount = ammo.filter(a => a.batchId).length;
   const moreItems = [
@@ -6398,7 +6522,11 @@ function App() {
             <>
               {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
               {more==='solver' && <SolverTab sessions={sessions} firearms={firearms} ammo={ammo} />}
-              {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins} onDeleteBuiltin={id=>saveDeletedBuiltins([...deletedBuiltins,id])} onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))}
+              {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins}
+                onDeleteBuiltin={id=>{ saveDeletedBuiltins([...deletedBuiltins,id]);
+                                       /* and the pin with it — see dropDeadPins */
+                                       if (pinnedTargets.includes(id)) savePinnedTargets(pinnedTargets.filter(p=>p!==id)); }}
+                onRestoreBuiltin={id=>saveDeletedBuiltins(deletedBuiltins.filter(d=>d!==id))}
                 pinned={pinnedTargets}
                 onTogglePin={id=>savePinnedTargets(pinnedTargets.includes(id) ? pinnedTargets.filter(p=>p!==id) : [...pinnedTargets, id])} />}
               {more==='bench' && <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />}
@@ -6673,9 +6801,9 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch,
                 {a && a.n >= 2 ? <>
                   <div><div className="sv">{a.esMoa.toFixed(2)}</div><div className="sl">ES MOA</div></div>
                   <div><div className="sv">{a.mrMoa.toFixed(2)}</div><div className="sl">MR MOA</div></div>
-                  <div><div className="sv">{a.score}–{a.xs}X</div><div className="sl">Score</div></div>
+                  <div><div className="sv">{a.score}–{a.xs}{innerRingLabel(tgt)}</div><div className="sl">Score</div></div>
                 </> : a && a.score > 0 ? <>
-                  <div><div className="sv">{a.score}–{a.xs}X</div><div className="sl">Score</div></div>
+                  <div><div className="sv">{a.score}–{a.xs}{innerRingLabel(tgt)}</div><div className="sl">Score</div></div>
                   <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>need 2+ record shots for group stats</div>
                 </> : <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>no shots logged</div>}
               </div>
@@ -6782,12 +6910,12 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch,
                         {a && a.n >= 2 && (
                           <div className="msub-stats">
                             <div><div className="msub-sv">{a.esMoa.toFixed(2)}</div><div className="msub-sl">ES MOA</div></div>
-                            <div><div className="msub-sv">{a.score}–{a.xs}X</div><div className="msub-sl">Score</div></div>
+                            <div><div className="msub-sv">{a.score}–{a.xs}{innerRingLabel(tgt)}</div><div className="msub-sl">Score</div></div>
                           </div>
                         )}
                         {a && a.n < 2 && a.score > 0 && (
                           <div className="msub-stats">
-                            <div><div className="msub-sv">{a.score}–{a.xs}X</div><div className="msub-sl">Score</div></div>
+                            <div><div className="msub-sv">{a.score}–{a.xs}{innerRingLabel(tgt)}</div><div className="msub-sl">Score</div></div>
                           </div>
                         )}
                       </div>
@@ -6841,7 +6969,7 @@ function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave
     });
     return out;
   })();
-  const [f,setF] = useState({name:'',date:today,type:'Score',position:'',fireMode:'',targetId:targets[0]?.id||BUILTIN_TARGETS[0].id,rangeYards:200,rangeLocation:'',rifleId:(firearms&&firearms[0]?.id)||'',ammoId:'',wSpeed:'',wDir:6,temp:'',lighting:'Clear',ammoLot:'',ammoDesc:'',equipment:''});
+  const [f,setF] = useState({name:'',date:today,type:'Score',position:'',fireMode:'',targetId:targets[0]?.id||DEFAULT_TARGET_ID,rangeYards:200,rangeLocation:'',rifleId:(firearms&&firearms[0]?.id)||'',ammoId:'',wSpeed:'',wDir:6,temp:'',lighting:'Clear',ammoLot:'',ammoDesc:'',equipment:''});
   const [matchMode, setMatchMode] = useState('none');
   const [selectedMatchId, setSelectedMatchId] = useState(matches[0]?.id||'');
   const [newMatchName, setNewMatchName] = useState('');
@@ -7163,7 +7291,7 @@ function buildExportText(session, target, a, firearm, wa) {
   lines.push('');
 
   if (a && a.esMoa > 0) {
-    lines.push(`Score:  ${a.score}–${a.xs}X  (${a.n} record shots)`);
+    lines.push(`Score:  ${a.score}–${a.xs}${innerRingLabel(target)}  (${a.n} record shots)`);
     lines.push(`ES:     ${a.esMoa.toFixed(2)} MOA  (${a.esIn.toFixed(3)}")`);
     lines.push(`MR:     ${a.mrMoa.toFixed(2)} MOA  (${a.mrIn.toFixed(3)}")`);
     lines.push('');
@@ -7670,7 +7798,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
               <div className="acell"><div className="av">{a.esMoa.toFixed(2)}</div><div className="au">MOA</div><div className="al">Extreme spread</div></div>
               <div className="acell"><div className="av">{a.mrMoa.toFixed(2)}</div><div className="au">MOA</div><div className="al">Mean radius</div></div>
               <div className="acell"><div className="av">{a.esIn.toFixed(2)}"</div><div className="au">inches</div><div className="al">ES physical</div></div>
-              <div className="acell"><div className="av">{a.score}–{a.xs}X</div><div className="au"> </div><div className="al">Score</div></div>
+              <div className="acell"><div className="av">{a.score}–{a.xs}{innerRingLabel(target)}</div><div className="au"> </div><div className="al">Score</div></div>
             </div>
             {a.mrLoIn != null && session.rangeYards > 0 && (
               <div style={{margin:'6px 13px 0',fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',lineHeight:1.5}}>
@@ -7684,7 +7812,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
           </>}
           {a && a.score > 0 && a.n < 2 && (
             <div className="agrid" style={{marginTop:8}}>
-              <div className="acell"><div className="av">{a.score}–{a.xs}X</div><div className="au"> </div><div className="al">Score</div></div>
+              <div className="acell"><div className="av">{a.score}–{a.xs}{innerRingLabel(target)}</div><div className="au"> </div><div className="al">Score</div></div>
               <div className="acell" style={{display:'flex',alignItems:'center'}}><div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>2+ record shots needed for group stats</div></div>
             </div>
           )}
@@ -9436,15 +9564,125 @@ function findConfirmedZero(sessions, { rifleId, location, yards, position }, exc
  * maintain the same fact in two places, and the second copy is the one that
  * goes stale.
  */
+/* ── What a range day can physically be ──────────────────────────────────
+ * `airDensityRatio` guards values that are not numbers. It does not guard
+ * numbers that are impossible, and the impossible number a shooter is most
+ * likely to type is not a slip, it is a UNIT: nearly every weather app reports
+ * pressure in hectopascals, so 1013 is the figure to hand. Typed into "Station
+ * pressure inHg" that gave a density ratio of 33.9, an integration that bailed
+ * on every candidate, `trued: true` with `rmsMoa: Infinity` printed as the
+ * literal string "Infinity", and a come-up table whose every row rendered
+ * null — a green tick over an empty table, which is the one outcome a solver
+ * must never produce.
+ *
+ * The bounds below are the envelope of SHOOTING, not of the atmosphere:
+ *
+ *   temperature   −60 to 140 °F. Colder and hotter air exists (−128.6 °F at
+ *     Vostok, 134 °F in Death Valley); nobody is standing on a firing point
+ *     in it, and a number outside this is a typo or a unit, not a range day.
+ *   station pressure  15 to 33 inHg. 33 is above the highest sea-level
+ *     pressure ever recorded (32.01 inHg, Agata, Siberia, 1968) and station
+ *     pressure can only be lower than that; 15 inHg is about 18,000 ft, well
+ *     above the highest range on earth. 1013 hPa, 760 mmHg and 29.92 typed as
+ *     2992 all fall outside it, which is the entire point.
+ *
+ * Out of range is refused by name rather than clamped. Clamping would answer a
+ * question the shooter did not ask, in the voice of one they did. */
+const ATMO_LIMITS = {
+  tempF:    { min: -60, max: 140, unit: '°F', label: 'Temperature',
+              hint: 'nobody shoots in that — check the units, and that a minus sign has not gone missing' },
+  pressure: { min: 15,  max: 33,  unit: 'inHg', label: 'Station pressure',
+              hint: '1013 is hectopascals and 760 is millimetres of mercury — in inches of mercury a firing point is between 15 and 33' },
+};
+function readAtmoField(raw, kind) {
+  const spec = ATMO_LIMITS[kind];
+  if (raw === '' || raw == null) return { value: undefined, error: null };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { value: undefined, error: `${spec.label}: “${raw}” is not a number.` };
+  if (n < spec.min || n > spec.max)
+    return { value: undefined,
+             error: `${spec.label} ${n} ${spec.unit} is outside ${spec.min} to ${spec.max} ${spec.unit} — ${spec.hint}.` };
+  return { value: n, error: null };
+}
+
+/* Which of two confirmed zeros at the same distance is the one to keep.
+ *
+ * Most recent wins, which is right: an older zero was shot with a different
+ * lot in different air. But `c.ts > prev.ts` with `ts: s.ts || 0` decided
+ * NOTHING between two sessions that both lack a timestamp — 0 > 0 is false, so
+ * whichever came first in the array survived, and array order is the order
+ * localStorage happened to hold. The date string is the next real fact (ISO,
+ * so it compares as text), and the session id after it is arbitrary but
+ * STABLE, which is the property that was missing. */
+function newerAnchor(a, b) {
+  if ((a.ts || 0) !== (b.ts || 0)) return (a.ts || 0) > (b.ts || 0);
+  if ((a.date || '') !== (b.date || '')) return (a.date || '') > (b.date || '');
+  return String(a.sessionId || '') > String(b.sessionId || '');
+}
+
+/* Rank the distinct values of one field across a set of confirmed zeros, by
+ * how many ANCHORS each would contribute — distinct distances, not sessions,
+ * because ten prone sessions at one distance still cannot true a trajectory
+ * and two at different distances can. */
+function tallyAnchors(cells, keyOf, rank) {
+  const m = new Map();
+  for (const c of cells) {
+    const k = keyOf(c);
+    if (!m.has(k)) m.set(k, { key: k, yds: new Set(), n: 0 });
+    const e = m.get(k); e.yds.add(c.yards); e.n++;
+  }
+  return [...m.values()].map(e => ({ key: e.key, anchors: e.yds.size, n: e.n }))
+    .sort((a, b) => b.anchors - a.anchors || b.n - a.n
+                 || (rank ? rank(a.key) - rank(b.key) : 0)
+                 || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
 function SolverTab({ sessions, firearms, ammo }) {
-  const [rifleId, setRifleId] = useState('');
+  /* null is "not chosen yet", and it is not the empty string. The empty string
+   * is a REAL rifle id here — the one every session with no firearm shares —
+   * and `rifleId || rifles[0].id` made "Unspecified firearm" impossible to
+   * select: choosing it set '', which is falsy, so the next render snapped the
+   * picker back to the first rifle. Same for position and location, which
+   * additionally have to survive a change of rifle that does not have them. */
+  const [rifleId, setRifleId] = useState(null);
+  const [position, setPosition] = useState(null);
+  const [location, setLocation] = useState(null);
   const [tempF, setTempF] = useState('');
   const [pressure, setPressure] = useState('');
+  const [zeroPressure, setZeroPressure] = useState('');
+
+  /* The atmospheric fields, committed rather than read live.
+   *
+   * The fit is a few hundred trajectory integrations: measured on a fast
+   * server, 333 ms at two anchors, 595 ms at four, 1208 ms for one anchor out
+   * at 1760 yd — and the search box was widened since. Typing "29.92" is five
+   * keystrokes, so it was five full solves, every one of them thrown away, on
+   * the main thread, on a phone, at the firing point. The solve now runs on a
+   * value that has stopped changing (or on blur, for the shooter who types the
+   * number and taps straight to the table). */
+  const [committed, setCommitted] = useState({ tempF: '', pressure: '', zeroPressure: '' });
+  const commitNow = () => setCommitted({ tempF, pressure, zeroPressure });
+  useEffect(() => {
+    const t = setTimeout(() => setCommitted({ tempF, pressure, zeroPressure }), 400);
+    return () => clearTimeout(t);
+  }, [tempF, pressure, zeroPressure]);
+
+  const atmo = useMemo(() => {
+    const t = readAtmoField(committed.tempF, 'tempF');
+    const p = readAtmoField(committed.pressure, 'pressure');
+    const z = readAtmoField(committed.zeroPressure, 'pressure');
+    return {
+      tempF: t.value, pressureInHg: p.value, zeroPressureInHg: z.value,
+      errors: [t.error, p.error && `${p.error} (today's)`,
+               z.error && `${z.error} (when your zeros were shot)`].filter(Boolean),
+    };
+  }, [committed]);
 
   /* Confirmed zeros, the same way the DOPE tab reads them: the last shot's
-   * dialled elevation in a session that has shots, keyed by distance. Prone
-   * only -- mixing positions into one curve fits a line through two different
-   * rifles' worth of hold. */
+   * dialled elevation in a session that has shots. Everything that makes one
+   * zero a different zero comes with it — the position, the place, the load
+   * and the temperature — because every one of those is a filter below, and a
+   * field this reducer drops is a field the solver cannot honour. */
   const cells = useMemo(() => sessions
     .filter(s => (s.shots?.length || 0) >= 1)
     .map(s => {
@@ -9453,8 +9691,11 @@ function SolverTab({ sessions, firearms, ammo }) {
       const last = pool[pool.length - 1] || {};
       const elevs = pool.map(sh => sh.elev || 0), winds = pool.map(sh => sh.wind || 0);
       return {
+        sessionId: s.id,
         rifleId: s.rifleId || '', location: (s.rangeLocation || '').trim() || 'Unspecified location',
         position: (s.position || '').trim() || 'Unspecified',
+        ammoId: s.ammoId || '',
+        temp: s.temp === '' || s.temp == null ? null : Number(s.temp),
         yards: Number(s.rangeYards) || 0, date: s.date || '', ts: s.ts || 0,
         elev: clicksToMoa(last.elev || 0), wind: clicksToMoa(last.wind || 0),
         noDope: elevs.every(v => v === 0) && winds.every(v => v === 0),
@@ -9467,55 +9708,151 @@ function SolverTab({ sessions, firearms, ammo }) {
       || (id ? 'Unknown firearm' : 'Unspecified firearm') }));
   }, [cells, firearms]);
 
-  const rid = rifleId || (rifles[0]?.id ?? '');
+  const rid = rifleId != null && rifles.some(r => r.id === rifleId)
+    ? rifleId : (rifles[0]?.id ?? '');
   const rifle = firearms.find(f => f.id === rid) || null;
 
-  /* One anchor per distance: the most recent confirmed zero at that distance,
-   * because an old one was shot with a different lot in different air. */
-  const anchors = useMemo(() => {
-    const byYd = new Map();
-    for (const c of cells) {
-      if (c.rifleId !== rid || c.noDope || !c.yards) continue;
-      const prev = byYd.get(c.yards);
-      if (!prev || c.ts > prev.ts) byYd.set(c.yards, c);
-    }
-    return [...byYd.values()].sort((a, b) => a.yards - b.yards)
-      .map(c => ({ yd: c.yards, moa: c.elev, date: c.date, position: c.position }));
-  }, [cells, rid]);
+  const forRifle = useMemo(() =>
+    cells.filter(c => c.rifleId === rid && !c.noDope && c.yards), [cells, rid]);
 
-  /* The load, from whatever the shooter has already told the app. A Bench
-   * batch carries a measured velocity; the bullet's BC comes with it. */
+  /* ── One place, one position, one load ─────────────────────────────────
+   * A trajectory is fitted to a curve of drop against distance, and every
+   * anchor on that curve has to be a point on the SAME curve. Three things
+   * make it a different curve, and all three were being mixed:
+   *
+   *   the place — density is what drag scales with, and a 300 yd zero from a
+   *     sea-level range and a 600 yd zero from a mountain one are two curves
+   *     fitted as one under a single density ratio. Filtered rather than
+   *     corrected, because sessions record temperature and NOT pressure, so
+   *     the air at a range we are not standing at cannot be reconstructed.
+   *   the position — this component's own comment said "Prone only", and then
+   *     read every position; it computes learned position offsets thirty lines
+   *     below BECAUSE positions differ by minutes of elevation.
+   *   the load — a .223 zero and a .308 zero on one curve describe a cartridge
+   *     that does not exist.
+   *
+   * Each defaults to whichever value carries the most anchors and each is a
+   * picker, because a shooter with three positions at a range has three
+   * different right answers and the app cannot know which one they are about
+   * to shoot. */
+  const locations = useMemo(() => tallyAnchors(forRifle, c => c.location), [forRifle]);
+  const loc = location != null && locations.some(l => l.key === location)
+    ? location : (locations[0]?.key ?? '');
+  const atLoc = useMemo(() => forRifle.filter(c => c.location === loc), [forRifle, loc]);
+
+  const positions = useMemo(() => tallyAnchors(atLoc, c => c.position, posRank), [atLoc]);
+  const pos = position != null && positions.some(p => p.key === position)
+    ? position : (positions[0]?.key ?? '');
+  const atPos = useMemo(() => atLoc.filter(c => c.position === pos), [atLoc, pos]);
+
+  /* The load, from whatever the shooter has already told the app — but the
+   * load THESE zeros were shot with.
+   *
+   * This was `ammo.filter(a => a.batch)[0]`: the first linked load in the
+   * list, with no reference to the rifle being solved for and none to the
+   * sessions the anchors came from. A shooter whose .223 was entered before
+   * their .308 solved their .308 against {mv: 3240, bc: 0.121} — 15.56 MOA of
+   * error at 1000 yards, under a green "trued to your rifle" banner, with a
+   * ±3.41 interval wrong by a factor of four.
+   *
+   * The anchors' own ammoId is the strongest link and is used first; the
+   * rifle's own loads next; a single unambiguous linked load after that; and
+   * the generic defaults only when nothing links at all, which is the one case
+   * where "assumed" is the honest word. */
+  const loadPick = useMemo(() => {
+    const list = (ammo || []).filter(a => a && a.id);
+    const withBatch = list.filter(a => a.batch);
+    const counts = new Map();
+    for (const c of atPos) if (c.ammoId) counts.set(c.ammoId, (counts.get(c.ammoId) || 0) + 1);
+    const ranked = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    for (const [id] of ranked) {
+      const a = list.find(x => x.id === id);
+      if (a) return { load: a, from: 'anchors', spans: counts.size, wanted: id };
+    }
+    const mine = withBatch.filter(a => rid && a.rifleId === rid);
+    if (mine.length) return { load: mine[0], from: 'rifle', spans: counts.size, wanted: null };
+    /* A load with no rifle on it belongs to any rifle — but only while there
+     * is one of them. Two and the app cannot tell which, and guessing is what
+     * this whole fix exists to stop. */
+    if (withBatch.length === 1 && !withBatch[0].rifleId)
+      return { load: withBatch[0], from: 'only', spans: counts.size, wanted: null };
+    return { load: null, from: null, spans: counts.size, wanted: null };
+  }, [ammo, atPos, rid]);
+
   const load = useMemo(() => {
-    const linked = (ammo || []).filter(a => a.batch);
-    const b = linked.length ? linked[0].batch : null;
+    const a = loadPick.load;
+    const b = a && a.batch;
     const g7 = b && Number(b.bulletBcG7);
     const g1 = b && Number(b.bulletBcG1);
+    const linkWord = { anchors: 'the load these zeros were shot with',
+                       rifle: 'this rifle’s linked load',
+                       only: 'your only linked load' }[loadPick.from] || null;
     return {
       mv: (b && Number(b.velocityAvgFps)) || 2700,
       bc: (g7 && g7 > 0) ? g7 : ((g1 && g1 > 0) ? g1 * G1_TO_G7 : 0.243),
       bcSource: (g7 && g7 > 0) ? 'G7, from the batch'
               : ((g1 && g1 > 0) ? 'converted from the batch’s G1' : 'assumed'),
       mvSource: (b && Number(b.velocityAvgFps)) ? 'chronographed on the batch' : 'assumed',
-      name: linked.length ? (linked[0].name || 'linked load') : null,
+      name: a ? (a.name || 'linked load') : null,
+      link: linkWord,
     };
-  }, [ammo]);
+  }, [loadPick]);
+
+  /* One anchor per distance: the most recent confirmed zero at that distance,
+   * because an old one was shot with a different lot in different air.
+   *
+   * Each anchor carries the air it was shot in, which is what lets the solver
+   * fit it in its OWN density rather than in today's — see trueToDope. Only
+   * the temperature is recorded on a session, so only the temperature is
+   * asserted: the pressure comes from the shooter (blank means "assumed
+   * standard", and the UI says which). A zero with no temperature gets NO
+   * densityRatio rather than 1.0, so `anchorsHaveAtmosphere` comes back false
+   * and the claim made on screen shrinks to fit. */
+  const anchorInfo = useMemo(() => {
+    const wanted = loadPick.from === 'anchors' ? loadPick.wanted : null;
+    const byYd = new Map();
+    let otherLoad = 0, noLoad = 0;
+    for (const c of atPos) {
+      if (wanted && c.ammoId && c.ammoId !== wanted) { otherLoad++; continue; }
+      if (wanted && !c.ammoId) noLoad++;
+      const prev = byYd.get(c.yards);
+      if (!prev || newerAnchor(c, prev)) byYd.set(c.yards, c);
+    }
+    const list = [...byYd.values()].sort((a, b) => a.yards - b.yards).map(c => {
+      const a = { yd: c.yards, moa: c.elev, date: c.date, position: c.position,
+                  location: c.location, ammoId: c.ammoId, sessionId: c.sessionId };
+      const t = readAtmoField(c.temp == null ? '' : c.temp, 'tempF').value;
+      if (t !== undefined) {
+        a.tempF = t;
+        a.densityRatio = airDensityRatio({ tempF: t, pressureInHg: atmo.zeroPressureInHg });
+      }
+      return a;
+    });
+    return { list, otherLoad, noLoad,
+             withTemp: list.filter(a => a.densityRatio !== undefined).length };
+  }, [atPos, loadPick, atmo.zeroPressureInHg]);
+  const anchors = anchorInfo.list;
 
   const solved = useMemo(() => {
     if (anchors.length === 0) return null;
+    /* An impossible atmosphere is not solved with the bad field quietly
+     * dropped: the number on screen would then be an answer to a question the
+     * shooter did not ask, and it would carry a green tick. */
+    if (atmo.errors.length) return null;
     return trueToDope(anchors, {
       mv: load.mv, bc: load.bc,
       sightHeightIn: (rifle && Number(rifle.sightHeight)) || 1.75,
       zeroYd: (rifle && Number(rifle.zeroRange)) || anchors[0].yd,
-      densityRatio: airDensityRatio({
-        tempF: tempF === '' ? undefined : Number(tempF),
-        pressureInHg: pressure === '' ? undefined : Number(pressure),
-      }),
-      tempF: tempF === '' ? 59 : Number(tempF),
+      densityRatio: airDensityRatio({ tempF: atmo.tempF, pressureInHg: atmo.pressureInHg }),
+      tempF: atmo.tempF === undefined ? 59 : atmo.tempF,
       horizonYd: 1200,
     });
-  }, [anchors, load, rifle, tempF, pressure]);
+  }, [anchors, load, rifle, atmo]);
 
-  const offsets = useMemo(() => positionOffsets(cells.filter(c => c.rifleId === rid)), [cells, rid]);
+  const offsets = useMemo(
+    () => positionOffsets(cells.filter(c => c.rifleId === rid && c.location === loc)),
+    [cells, rid, loc]);
 
   const note = { fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)', lineHeight: 1.6 };
   const card = { margin: '8px 13px 0', background: 'var(--surf)', border: '1px solid var(--bdr)',
@@ -9549,43 +9886,114 @@ function SolverTab({ sessions, firearms, ammo }) {
           </select>
         )}
 
+        {/* Which zeros this is solving from. Always stated, whether or not
+            there is anything to choose between, because a come-up is a come-up
+            for ONE position at ONE place and a number with neither on it is
+            ambiguous. */}
+        <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+          <div style={{ flex: 1 }}>
+            <div className="lbl">Position</div>
+            {positions.length > 1
+              ? <select className="inp" value={pos} onChange={e => setPosition(e.target.value)}>
+                  {positions.map(p => <option key={p.key} value={p.key}>
+                    {p.key} · {p.anchors} {p.anchors === 1 ? 'distance' : 'distances'}</option>)}
+                </select>
+              : <div className="inp" style={{ color: 'var(--ink)' }}>{pos || '—'}</div>}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div className="lbl">Range</div>
+            {locations.length > 1
+              ? <select className="inp" value={loc} onChange={e => setLocation(e.target.value)}>
+                  {locations.map(l => <option key={l.key} value={l.key}>
+                    {l.key} · {l.anchors} {l.anchors === 1 ? 'distance' : 'distances'}</option>)}
+                </select>
+              : <div className="inp" style={{ color: 'var(--ink)' }}>{loc || '—'}</div>}
+          </div>
+        </div>
+        <div style={{ ...note, marginTop: 5 }}>
+          One position and one place. An offhand zero and a prone zero are two different
+          holds, and two ranges are two different densities — fitted to one curve they
+          describe a rifle nobody owns.
+          {positions.length > 1 && <> Your other {positions.length - 1 === 1 ? 'position is'
+            : `${positions.length - 1} positions are`} in the picker.</>}
+        </div>
+
         <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
           <div style={{ flex: 1 }}>
             <div className="lbl">Temp °F</div>
             <input className="inp" type="number" value={tempF} placeholder="59"
-                   onChange={e => setTempF(e.target.value)} />
+                   onChange={e => setTempF(e.target.value)} onBlur={commitNow} />
           </div>
           <div style={{ flex: 1 }}>
             <div className="lbl">Station pressure inHg</div>
             <input className="inp" type="number" step="0.01" value={pressure} placeholder="29.92"
-                   onChange={e => setPressure(e.target.value)} />
+                   onChange={e => setPressure(e.target.value)} onBlur={commitNow} />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 7, marginTop: 7 }}>
+          <div style={{ flex: 1 }}>
+            <div className="lbl">Pressure when your zeros were shot</div>
+            <input className="inp" type="number" step="0.01" value={zeroPressure} placeholder="assumed 29.92"
+                   onChange={e => setZeroPressure(e.target.value)} onBlur={commitNow} />
           </div>
         </div>
         <div style={{ ...note, marginTop: 5 }}>
           Station pressure, not the sea-level figure a weather app reports — they differ by
           about an inch per thousand feet of elevation, which is real at a mountain range.
+          A session records its temperature but not its pressure, so the third field is how
+          the fit learns what air your zeros were confirmed in; left blank it assumes 29.92,
+          and says so below.
         </div>
+
+        {/* Refused by name. A number outside the physical range is not
+            clamped and not ignored — either would answer a question the
+            shooter did not ask, and the old behaviour answered it under a
+            green tick with an empty table beneath. */}
+        {atmo.errors.map((e, i) => (
+          <div key={i} style={{ marginTop: 7, background: 'var(--surf2)',
+                                border: '1px solid var(--red)', borderRadius: 6, padding: '7px 9px',
+                                fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--red)', lineHeight: 1.6 }}>
+            {e} Nothing below is solved until it is fixed.
+          </div>
+        ))}
       </div>
 
       {/* What it was given */}
       <div style={card}>
         <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)',
                       letterSpacing: '.14em', textTransform: 'uppercase', marginBottom: 6 }}>
-          Anchors · {anchors.length}
+          Anchors · {anchors.length} · {pos}
         </div>
         {anchors.length === 0
-          ? <div style={note}>No confirmed zeros for this rifle yet.</div>
+          ? <div style={note}>No confirmed zeros for this rifle, {pos.toLowerCase()}, at {loc}.</div>
           : anchors.map(a => (
             <div key={a.yd} style={{ display: 'flex', justifyContent: 'space-between',
                                      fontFamily: 'var(--fm)', fontSize: 10, padding: '3px 0' }}>
-              <span>{a.yd} yd<span style={{ color: 'var(--dim)' }}> · {a.position}</span></span>
+              <span>{a.yd} yd<span style={{ color: 'var(--dim)' }}> · {a.position}
+                {a.tempF !== undefined ? ` · ${a.tempF}°F` : ''}</span></span>
               <span style={{ color: 'var(--acc)', fontWeight: 700 }}>{fmtMoaSigned(a.moa / MOA_PER_CLICK)} MOA</span>
             </div>
           ))}
         <div style={{ ...note, marginTop: 6 }}>
-          {load.name ? <>Load: {load.name} — </> : null}
+          {load.name ? <>Load: {load.name} ({load.link}) — </> : null}
           {load.mv} fps ({load.mvSource}), BC {load.bc.toFixed(3)} ({load.bcSource}).
+          {!load.name && <> No load could be linked to this rifle or to these zeros, so the numbers
+            above are generic and only the shape of the curve is yours. Link a Bench batch to the
+            load you shoot and the fit starts from what it actually chronographed.</>}
         </div>
+        {anchorInfo.otherLoad > 0 && (
+          <div style={{ ...note, marginTop: 4, color: 'var(--acc)' }}>
+            {anchorInfo.otherLoad} confirmed {anchorInfo.otherLoad === 1 ? 'zero was' : 'zeros were'} shot
+            with a different load and {anchorInfo.otherLoad === 1 ? 'is' : 'are'} left out — one curve
+            is one load.
+          </div>
+        )}
+        {anchorInfo.noLoad > 0 && (
+          <div style={{ ...note, marginTop: 4 }}>
+            {anchorInfo.noLoad} of them {anchorInfo.noLoad === 1 ? 'records' : 'record'} no load at all
+            and {anchorInfo.noLoad === 1 ? 'is' : 'are'} taken to be this one.
+          </div>
+        )}
       </div>
 
       {/* What it made of them */}
@@ -9616,6 +10024,29 @@ function SolverTab({ sessions, firearms, ammo }) {
               </div>
             </>
           )}
+
+          {/* Whether the atmospheric correction is measured or assumed.
+              The solver fits each anchor in its own air; an anchor that
+              recorded none is fitted as if it were confirmed in standard
+              conditions, which is a real assumption and not a neutral one. A
+              prediction corrected for conditions the zeros never recorded is a
+              weaker claim than one corrected for conditions they did, and the
+              shooter is entitled to know which they are reading. */}
+          <div style={{ ...note, marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--bdr)' }}>
+            {solved.anchorsHaveAtmosphere ? (
+              <>Air: every one of your zeros carries the temperature it was confirmed at, so each
+                was fitted in its own density and the correction to today's is measured rather than
+                assumed.{atmo.zeroPressureInHg === undefined
+                  ? ' Their pressure was not recorded and is taken as 29.92 inHg — if that range sits at altitude, put its station pressure in the third field.'
+                  : ` Their pressure is the ${atmo.zeroPressureInHg} inHg you entered.`}</>
+            ) : (
+              <>Air: {anchorInfo.withTemp === 0 ? 'none' : `only ${anchorInfo.withTemp}`} of
+                your {anchors.length} {anchors.length === 1 ? 'zero records' : 'zeros record'} the
+                temperature {anchors.length === 1 ? 'it was' : 'they were'} confirmed at, so the
+                rest are fitted as if shot in standard air. The correction below is partly an
+                assumption. Log the temperature with a session and it stops being one.</>
+            )}
+          </div>
         </div>
       )}
 
@@ -10883,7 +11314,7 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
                     <tr key={r.score}>
                       <td style={{fontFamily:'var(--fh)',fontWeight:700,fontSize:14,
                         color: isLightColor(col) ? col : 'var(--ink)'
-                      }}>{r.score}</td>
+                      }}>{r.score === 'X' ? innerRingLabel(t) : r.score}</td>
                       <td>
                         <div style={{width:16,height:16,borderRadius:3,background:col,border:'1px solid var(--bdr)',display:'inline-block',verticalAlign:'middle'}}/>
                       </td>
@@ -12102,7 +12533,7 @@ class Boundary extends Component {
     try {
       const data = {};
       for (const k of ['sessions_v1', 'matches_v1', 'custom_targets_v1',
-                       'deleted_builtins_v1', 'rifles_v1', 'ammo_v1']) {
+                       'deleted_builtins_v1', 'pinned_targets_v1', 'rifles_v1', 'ammo_v1']) {
         const raw = localStorage.getItem(k);
         if (raw) data[k] = JSON.parse(raw);
       }

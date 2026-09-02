@@ -771,25 +771,76 @@ console.log('\nthe solver picks the zeros that belong to one curve');
 
   /* Fix 6: the fit ran synchronously in a useMemo keyed on the raw input
      strings, so typing "29.92" was five full solves — measured at 333 ms each
-     at two anchors — on the main thread, on a phone, on the line. */
+     at two anchors — on the main thread, on a phone, on the line.
+
+     COUNTED, not pattern-matched. The three assertions here used to be
+     regexes over the source: they failed if the debounce was deleted, but a
+     literal string is not the property, and the property they stood for was
+     false in two ways while all three passed. `setCommitted` always built a
+     new object and both memos are keyed on identity, so the 400 ms timer
+     firing on mount with three unchanged empty strings triggered a second full
+     solve, and `commitNow` on blur did not cancel the pending timer, so
+     type-then-blur committed twice. A solve here is one to two and a half
+     seconds.
+
+     What can be counted directly is `nextCommitted`, which is the whole of the
+     decision: it returns the previous object when nothing moved, React bails
+     out on that, and neither memo re-runs. The timer around it is modelled —
+     the effect arms one per change, the last one wins, and a blur cancels it —
+     and the wiring the model assumes is asserted on the source below, because
+     "the fit does not depend on the keystroke" is a fact about a dependency
+     array and a browser cannot see it. */
   const tempBox = p.locator('input.inp[type="number"]').first();
   const t0 = Date.now();
   await tempBox.type('29.92', { delay: 0 });
   const typingMs = Date.now() - t0;
   await p.waitForTimeout(1600);
-  /* The timing above is a smoke test and nothing more: this box solves three
-     anchors in about a tenth of a second, so five wasted solves still finish
-     inside any threshold worth asserting. What the fix actually is, is that
-     the solve no longer depends on the raw keystroke — asserted on the source,
-     which is where that fact lives. `grab` cannot read a component with a
-     destructured parameter list, so this skips the parameter list first. */
+
+  const nextCommitted = new Function(grabComponent('nextCommitted')
+    + '\nreturn nextCommitted;')();
+  /* A commit is a change of IDENTITY, because that is what the memos see. */
+  const commitsFor = (script) => {
+    let committed = { tempF: '', pressure: '', zeroPressure: '' }, commits = 0;
+    const field = { tempF: '', pressure: '', zeroPressure: '' };
+    let pending = false;
+    const commit = () => {
+      const next = nextCommitted(committed, field.tempF, field.pressure, field.zeroPressure);
+      if (next !== committed) { committed = next; commits++; }
+    };
+    for (const step of script) {
+      if (step === 'mount' || Array.isArray(step)) {
+        if (Array.isArray(step)) field[step[0]] = step[1];
+        pending = true;                       // the effect arms a fresh timer
+      } else if (step === 'blur') {
+        pending = false; commit();            // commitNow: cancel, then commit
+      } else if (step === 'tick') {
+        if (pending) { pending = false; commit(); }
+      }
+    }
+    return commits;
+  };
+  ok(commitsFor(['mount', 'tick']) === 0,
+     `mounting the tab and touching nothing commits nothing (${commitsFor(['mount', 'tick'])} solves, was 1)`);
+  ok(commitsFor(['mount', 'tick', ['tempF', '2'], ['tempF', '29'], ['tempF', '29.9'],
+                 ['tempF', '29.92'], 'tick']) === 1,
+     'typing five characters and stopping commits once, on the value that stopped changing');
+  ok(commitsFor(['mount', 'tick', ['tempF', '29.92'], 'blur', 'tick']) === 1,
+     `typing and tapping straight to the table commits once, not twice`
+     + ` (${commitsFor(['mount', 'tick', ['tempF', '29.92'], 'blur', 'tick'])} solves, was 2)`);
+  ok(commitsFor(['mount', 'tick', ['tempF', '59'], 'tick', ['tempF', ''], 'tick']) === 2,
+     '...and a value that really does change still commits, both ways');
+
   const solverSrc = grabComponent('SolverTab');
-  ok(/const t = setTimeout\(\(\) => setCommitted\(/.test(solverSrc),
-     `the atmospheric inputs are committed on a timer, not on every keystroke (${typingMs} ms to type five characters)`);
+  ok(/setCommitted\(prev => nextCommitted\(prev, tempF, pressure, zeroPressure\)\)/.test(solverSrc)
+     && /commitTimer\.current = setTimeout\(/.test(solverSrc),
+     `the atmospheric inputs are committed on a timer, through the function counted above`
+     + ` (${typingMs} ms to type five characters)`);
+  ok(/clearTimeout\(commitTimer\.current\)[\s\S]{0,120}setCommitted\(prev => nextCommitted/.test(solverSrc),
+     '...and a blur cancels the pending one rather than committing alongside it');
   ok(/\}, \[anchors, load, rifle, atmo\]\);/.test(solverSrc),
-     '...and the fit depends on the committed value, never on the input string');
+     '...with the fit depending on the committed value, never on the input string');
   ok(/onBlur=\{commitNow\}/.test(solverSrc),
-     '...with a blur committing at once, for the shooter who types and taps straight to the table');
+     '...and every atmospheric field wired to that blur');
 
   /* Fix 5: 1013 is what a weather app shows, in hectopascals. In the inHg
      field it produced trued:true with rmsMoa Infinity, the literal string
@@ -838,6 +889,159 @@ console.log('\nthe solver picks the zeros that belong to one curve');
   body = await p.textContent('body');
   ok(/Anchors · 1 · Standing/.test(body),
      'switching to the offhand zeros solves for those instead, and says so');
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
+/* ================================ one range, typed three ways, is one range */
+/* `rangeLocation` is free text with a datalist behind it, and a datalist is a
+ * suggestion. The same range gets entered as "Camp Perry", "Camp perry" and
+ * "camp  perry" across a season -- a phone capitalises the first letter about
+ * half the time, and a paste brings a second space with it. Grouped on the
+ * trimmed string, those were three ranges: the picker showed three entries of
+ * one distance each, the fit dropped to whichever group won a tie, and the
+ * screen said "one confirmed zero — velocity and drag cannot be separated from
+ * a single point" with nothing connecting the refusal to a letter case. Before
+ * the place was a filter at all, every one of them fitted. */
+console.log('\nthe same range, typed three ways');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+
+  await p.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: 'r1', name: 'Palma rifle', sightHeight: 1.9, zeroRange: 100, ts: 1 }]));
+    const sess = (id, yd, clicks, where) => ({
+      id, name: `${yd} prone`, date: '2026-08-01', type: 'Score', position: 'Prone',
+      targetId: 'any', rangeYards: yd, rangeLocation: where, rifleId: 'r1',
+      ammoId: '', temp: '59', ts: yd, matchId: null,
+      shots: [{ id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 },
+                elev: clicks, wind: 0 }],
+    });
+    /* Two of them spelled the same way, so the name on screen is decided by
+       which spelling the shooter used MOST and not by which sorts first --
+       "Camp Perry" is the alphabetically earlier of the two. */
+    localStorage.setItem('sessions_v1', JSON.stringify([
+      sess('s200', 200, 8,  'Camp perry'),
+      sess('s300', 300, 18, 'Camp Perry'),
+      sess('s600', 600, 58, 'camp  perry'),
+      sess('s800', 800, 92, ' Camp perry '),
+    ]));
+  });
+  await p.reload(); await p.waitForTimeout(900);
+  await p.click('.tabbar button:has-text("More")');
+  await p.waitForTimeout(250);
+  await p.click('button:has-text("Trajectory")');
+  await p.waitForTimeout(1800);
+
+  const body = await p.textContent('body');
+  ok(/Anchors · 4/.test(body),
+     `all four zeros are at one range, whatever the shift key was doing (${(body.match(/Anchors · \d+/) || ['none'])[0]})`);
+  ok(/trued to your rifle/.test(body) && !/one confirmed zero/.test(body),
+     '...so the fit has four anchors to separate velocity from drag, not one');
+
+  /* With one range there is nothing to pick between, so the Range field is a
+     label rather than a select. Three ranges would have made it a select. */
+  const selects = await p.$$eval('select.inp', ss => ss.map(sel =>
+    [...sel.options].map(o => o.textContent.trim())));
+  ok(selects.length === 0,
+     `the range picker offers nothing to choose, because there is one range`
+     + ` (${selects.length ? selects.map(o => o.join(' | ')).join(' // ') : 'no picker'})`);
+
+  const labels = await p.$$eval('div.inp', ds => ds.map(d => d.textContent.trim()));
+  ok(labels.includes('Camp perry'),
+     `and it is named the way the shooter names it, not folded to lower case (${labels.join(' | ')})`);
+
+  /* The DOPE tab groups on the same key, and the two must not disagree: its
+     own comment says the pre-fill and the table share a grouping key. */
+  await p.click('.tabbar button:has-text("DOPE")');
+  await p.waitForTimeout(700);
+  const dope = await p.textContent('body');
+  const headings = (dope.match(/[Cc]amp\s+[Pp]erry/g) || []);
+  ok(headings.length === 1 && headings[0] === 'Camp perry',
+     `the DOPE table puts them under one heading too (${headings.join(' | ') || 'none'})`);
+
+  ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
+  await c.close();
+}
+
+/* ============ the pressure the shooter typed, honoured for every anchor */
+/* "Pressure when your zeros were shot" is a statement about all of those
+ * zeros. The UI computed a density ratio only for the anchors whose session
+ * recorded a temperature and sent nothing for the rest, so an untagged anchor
+ * fell through to the solver's standard sea level: a shooter at 5,000 ft who
+ * correctly entered 24.9 inHg had it honoured for two anchors out of three and
+ * thrown away for the third — a 17% density error in one point of a
+ * three-point fit, reported at an RMS that reads as an excellent one. */
+console.log('\nthe zero-conditions the shooter stated, for every anchor');
+{
+  const c = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  const p = await c.newPage();
+  const boom = [];
+  p.on('pageerror', e => boom.push(e.message));
+  await p.goto(BASE);
+
+  const install = async (temps) => {
+    await p.evaluate(({ temps }) => {
+      localStorage.clear();
+      localStorage.setItem('rifles_v1', JSON.stringify([{
+        id: 'r1', name: 'Palma rifle', sightHeight: 1.9, zeroRange: 100, ts: 1 }]));
+      const sess = (id, yd, clicks, temp) => ({
+        id, name: `${yd} prone`, date: '2026-08-01', type: 'Score', position: 'Prone',
+        targetId: 'any', rangeYards: yd, rangeLocation: 'home range', rifleId: 'r1',
+        ammoId: '', temp, ts: yd, matchId: null,
+        shots: [{ id: id + 'a', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 },
+                  elev: clicks, wind: 0 }],
+      });
+      localStorage.setItem('sessions_v1', JSON.stringify([
+        sess('s200', 200, 8,  temps[0]),
+        sess('s300', 300, 18, temps[1]),
+        sess('s600', 600, 58, temps[2]),
+      ]));
+    }, { temps });
+    await p.reload(); await p.waitForTimeout(900);
+    await p.click('.tabbar button:has-text("More")');
+    await p.waitForTimeout(250);
+    await p.click('button:has-text("Trajectory")');
+    await p.waitForTimeout(1500);
+    /* The third atmospheric field: the station pressure the zeros were
+       confirmed at. 24.9 inHg is about five thousand feet. */
+    await p.locator('input.inp[type="number"]').nth(2).fill('24.9');
+    await p.waitForTimeout(2200);
+    const rows = await p.$$eval('table.rt tbody tr', trs => trs.map(tr =>
+      [...tr.children].map(td => td.textContent.trim())));
+    const r = rows.find(x => x[0].startsWith('1000')) || [];
+    return { moa: parseFloat(r[1]), body: await p.textContent('body') };
+  };
+
+  const tagged = await install(['59', '44', '86']);
+  ok(Number.isFinite(tagged.moa), `three tagged zeros at 24.9 inHg predict 1000 (${tagged.moa} MOA)`);
+  ok(/Their pressure is the 24\.9 inHg you entered/.test(tagged.body),
+     '...and the screen says the pressure it used is the one that was typed');
+
+  const untagged = await install(['59', '', '86']);
+  ok(Number.isFinite(untagged.moa),
+     `and with the 300 recording no temperature it still predicts (${untagged.moa} MOA)`);
+  /* The whole finding, as a number: the untagged anchor is fitted in the air
+     the shooter described, so losing one session's thermometer moves the
+     thousand-yard answer by a fraction of a minute rather than by one and a
+     half of them. It cannot be zero — the fit no longer knows that anchor was
+     confirmed at 44°F and says so — but it is a temperature away from the
+     truth now, not a mile of altitude. */
+  const gap = Math.abs(untagged.moa - tagged.moa);
+  ok(gap < 0.5,
+     `losing one session's temperature moves 1000 yd by ${gap.toFixed(2)} MOA, not by 1.43:`
+     + ` the pressure the shooter stated is used for that anchor too`);
+  ok(/inHg you entered for your zeros/.test(untagged.body)
+     && /59°F/.test(untagged.body),
+     '...and the screen names the air that anchor was actually fitted in');
+  ok(!/fitted as if shot in standard air/.test(untagged.body),
+     '...rather than claiming standard air the fit did not use');
 
   ok(boom.length === 0, `no JavaScript errors${boom.length ? ' — ' + boom[0] : ''}`);
   await c.close();
@@ -1027,14 +1231,35 @@ console.log('\na pin that survives the device');
   ok(!!exported && /pinned_targets_v1/.test(exported), 'the exported file carries the pins');
   await c.close();
 
-  /* The new phone. Nothing on it, and the file goes in through the restore
-     button a user would actually press. */
+  /* The other phone, and it is NOT a blank one.
+   *
+   * This restored onto a context that had just run localStorage.clear(), so
+   * the pinned list was the all-builtin default, the prune that follows a
+   * custom-target write found nothing to remove, and it never ran. That is the
+   * single condition under which the defect below cannot fire, and the
+   * assertion constructed it.
+   *
+   * A device that has been used has a pin on a target of its own. The incoming
+   * library does not contain that target, so the prune has something to do --
+   * and it was doing it from a microtask that resumed AFTER the restored pins
+   * had been written, against the pin list this render closed over. The pins in
+   * the file were dropped and the local pin that happened to survive the prune
+   * was kept: on disk afterwards, ["sr"]. */
   const c2 = await browser.newContext({ viewport: { width: 430, height: 900 } });
   const p2 = await c2.newPage();
   p2.on('pageerror', e => boom.push(e.message));
   await p2.goto(BASE);
-  await p2.evaluate(() => localStorage.clear());
+  await p2.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('custom_targets_v1', JSON.stringify([{
+      id: 'ct-local', name: 'The gong at home', desc: 'a gong',
+      rings: [{ score: '1', diam: 10 }] }]));
+    localStorage.setItem('pinned_targets_v1', JSON.stringify(['sr', 'ct-local']));
+  });
   await p2.reload(); await p2.waitForTimeout(800);
+  const before = await p2.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1') || 'null'));
+  ok(Array.isArray(before) && before.join() === 'sr,ct-local',
+     `the receiving device already has a pinned custom target of its own (${JSON.stringify(before)})`);
   p2.on('dialog', d => d.accept());
   await openMorePage(p2, 'Backup & data');
   await p2.setInputFiles('input[type="file"]',
@@ -1043,7 +1268,9 @@ console.log('\na pin that survives the device');
 
   const landed = await p2.evaluate(() => JSON.parse(localStorage.getItem('pinned_targets_v1') || 'null'));
   ok(Array.isArray(landed) && landed.join() === 'a23,mine1,b8',
-     `the restore applies them on the other device (${JSON.stringify(landed)})`);
+     `the restore applies them on the other device, over its own pins (${JSON.stringify(landed)})`);
+  ok(Array.isArray(landed) && !landed.includes('ct-local'),
+     `...and the local pin whose target the file does not have goes with it (${JSON.stringify(landed)})`);
 
   await p2.reload(); await p2.waitForTimeout(900);
   await openMorePage(p2, 'Targets');

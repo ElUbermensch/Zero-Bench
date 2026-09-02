@@ -963,7 +963,8 @@ function shapeBoundR(shape) {
   return 0;
 }
 
-/* How far it is from the target's centre to a zone's EDGE, in one direction.
+/* Where a ray from the target's centre ENTERS and LEAVES a zone, in one
+ * direction. `{ enter: 0, exit: 0 }` is "this bearing does not reach it".
  *
  * This is what a rectangle needs and a circle does not. A circle's boundary is
  * the same distance away whichever way you look; a 12"×24" rectangle's is 6"
@@ -984,24 +985,30 @@ function shapeBoundR(shape) {
  * centre, so an offset zone (a head box above an A zone) is handled by the same
  * arithmetic and the inverse is exact for every shape.
  */
-function rayToEdge(shape, ux, uy) {
+function rayHit(shape, ux, uy) {
   const cx = shape.cx || 0, cy = shape.cy || 0;
   /* A bearing that is not a number cannot name a direction. Without this the
    * three branches disagree about what to do with one -- the circle returns
    * NaN, the rect returned 0, the poly returns 0 -- so one corrupt record
    * produced two different kinds of wrong on the same target depending on
-   * which zone it claimed. Falsy, so every caller's fallback runs. */
-  if (!Number.isFinite(ux) || !Number.isFinite(uy)) return 0;
+   * which zone it claimed. A zero exit is falsy, so every caller's fallback
+   * still runs. */
+  if (!Number.isFinite(ux) || !Number.isFinite(uy)) return { enter: 0, exit: 0 };
 
   if (shape.kind === 'circle') {
     /* |o + t·u − c| = r, with o at the origin. Standard quadratic; the far
-     * root is the exit, and the ray starting inside guarantees one. */
+     * root is the exit, the near root the entry. A ray starting inside the
+     * circle has a negative near root, which clamps to 0 -- the entry point
+     * of a shape that already encloses the origin IS the origin. */
     const r = shape.d / 2;
     const b = -(ux * cx + uy * cy);              // u · (o − c)
     const c = cx * cx + cy * cy - r * r;
     const disc = b * b - c;
-    if (disc < 0) return 0;
-    return Math.max(0, -b + Math.sqrt(disc));
+    if (disc < 0) return { enter: 0, exit: 0 };
+    const root = Math.sqrt(disc);
+    const exit = -b + root;
+    if (!(exit > 0)) return { enter: 0, exit: 0 };
+    return { enter: Math.max(0, -b - root), exit };
   }
 
   if (shape.kind === 'rect') {
@@ -1025,17 +1032,20 @@ function rayToEdge(shape, ux, uy) {
       tEnter = Math.max(tEnter, Math.min(t1, t2));
       tExit  = Math.min(tExit,  Math.max(t1, t2));
     } else if (0 < cx - hw || 0 > cx + hw) {
-      return 0;                       // parallel to the slab and outside it
+      return { enter: 0, exit: 0 };   // parallel to the slab and outside it
     }
     if (Math.abs(uy) > 1e-12) {
       const t1 = (cy - hh) / uy, t2 = (cy + hh) / uy;
       tEnter = Math.max(tEnter, Math.min(t1, t2));
       tExit  = Math.min(tExit,  Math.max(t1, t2));
     } else if (0 < cy - hh || 0 > cy + hh) {
-      return 0;
+      return { enter: 0, exit: 0 };
     }
-    if (!(tExit >= tEnter) || !(tExit > 0) || !Number.isFinite(tExit)) return 0;
-    return tExit;
+    if (!(tExit >= tEnter) || !(tExit > 0) || !Number.isFinite(tExit)) return { enter: 0, exit: 0 };
+    /* tEnter was computed and thrown away. It is the ray's ENTRY into the box,
+     * which for an offset zone is where that zone starts -- see zoneInnerR.
+     * Negative for a box that already contains the origin, which clamps to 0. */
+    return { enter: Math.max(0, tEnter), exit: tExit };
   }
 
   if (shape.kind === 'poly') {
@@ -1043,7 +1053,7 @@ function rayToEdge(shape, ux, uy) {
      * outline and the outer boundary for a concave one, which is the more
      * useful answer for a scoring zone. */
     const pts = shape.pts;
-    let best = 0;
+    let best = 0, first = Infinity;
     for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
       const ax = pts[j][0] + cx, ay = pts[j][1] + cy;
       const bx = pts[i][0] + cx, by = pts[i][1] + cy;
@@ -1052,12 +1062,22 @@ function rayToEdge(shape, ux, uy) {
       if (Math.abs(den) < 1e-12) continue;        // parallel
       const t = (ax * ey - ay * ex) / den;        // along the ray
       const s = (ax * uy - ay * ux) / den;        // along the edge
-      if (t > 0 && s >= 0 && s <= 1) best = Math.max(best, t);
+      if (t > 0 && s >= 0 && s <= 1) { best = Math.max(best, t); first = Math.min(first, t); }
     }
-    return best;
+    if (!(best > 0)) return { enter: 0, exit: 0 };
+    /* The NEAREST crossing is the entry, and it is only meaningful for an
+     * outline that does not already contain the origin -- inside a convex one
+     * there is a single crossing and it is the exit, and inside a concave one
+     * the nearest crossing is a re-entry. zoneInnerR is the only caller and it
+     * asks the hit test first. */
+    return { enter: Number.isFinite(first) ? first : 0, exit: best };
   }
-  return 0;
+  return { enter: 0, exit: 0 };
 }
+
+/* The exit alone, which is what every caller but zoneInnerR wants: how far it
+ * is to the zone's outer edge along this bearing. */
+function rayToEdge(shape, ux, uy) { return rayHit(shape, ux, uy).exit; }
 
 /* A zone's INNER boundary along one bearing: how far out the better-scoring
  * zones reach in this direction. The zone list runs best score first and the
@@ -1077,6 +1097,31 @@ function zoneInnerR(zones, idx, ux, uy) {
     const s = zones[i] && zones[i].shape;
     if (!s || !pointInShape(s, 0, 0)) continue;
     const e = rayToEdge(s, ux, uy);
+    if (e > inner) inner = e;
+  }
+  /* A zone that does not enclose the origin has an inner boundary of its OWN,
+   * and it is the only thing that supplies one: the ray travels out from
+   * centre, crosses ground that scores something else, and only then enters
+   * this zone. Nothing nearer than that entry point is in the zone at all.
+   *
+   * Without it the fraction was interpolated across [0, exit] and the whole
+   * lower half of the range landed outside the zone it names. On a 6"x4" head
+   * box 9" above centre, the default 0.5 came back at 5.50" -- four inches
+   * below the box, scoring the body zone -- and 40 of 44 sampled fractions
+   * across four bearings reconstructed into the wrong zone. The forward path
+   * never produced those values (it measures a real hole, which is always past
+   * the entry), so only externally-supplied fractions strayed: a default, an
+   * edited row, a synced record. Both directions call this, so the round trip
+   * closes either way; what changes is where an arbitrary fraction lands.
+   *
+   * `rayHit` computed this entry parameter for its own miss test and threw it
+   * away. The hit test comes first because "enter" only means entry for a
+   * shape the origin is outside: inside a convex outline the near root is
+   * behind the origin, and inside a concave one the nearest crossing is a
+   * re-entry, not a start. */
+  const own = zones[idx] && zones[idx].shape;
+  if (own && !pointInShape(own, 0, 0)) {
+    const e = rayHit(own, ux, uy).enter;
     if (e > inner) inner = e;
   }
   return inner;
@@ -5822,9 +5867,10 @@ function App() {
         if (Array.isArray(snap.deletedBuiltins)) saveDeletedBuiltins(snap.deletedBuiltins);
         if (Array.isArray(snap.firearms)) saveFirearms(snap.firearms);
         if (Array.isArray(snap.ammo)) saveAmmo(snap.ammo);
-        /* Last, because saveCustomTargets prunes pins that name a target the
-         * incoming list does not have, and the pins from the snapshot are the
-         * ones that should survive that. */
+        /* The snapshot's pins, applied whatever order this runs in:
+         * saveCustomTargets prunes pins against the list it is given, and it
+         * prunes the list that has actually been written rather than the one
+         * this render closed over -- see dropDeadPins. */
         if (Array.isArray(snap.pinnedTargets)) savePinnedTargets(snap.pinnedTargets);
       }
     })();
@@ -5905,7 +5951,18 @@ function App() {
     setMatches(data);
     try { await window.storage.set('matches_v1', JSON.stringify(data)); } catch {}
   };
+  /* The pinned list as of the last WRITE, not as of this render.
+   *
+   * `dropDeadPins` below needs to prune the pins that exist now, and
+   * `pinnedTargets` the state variable is the value this render closed over --
+   * which a caller that has already called `savePinnedTargets` in the same
+   * tick has superseded. React has not re-rendered yet and never will before
+   * the prune runs, so the closure is a stale answer to the only question the
+   * prune asks. This ref is updated synchronously by every write, so it is the
+   * current list whatever order the callers ran in. */
+  const pinnedRef = useRef(pinnedTargets);
   const savePinnedTargets = async data => {
+    pinnedRef.current = data;
     setPinnedTargets(data);
     try { await window.storage.set('pinned_targets_v1', JSON.stringify(data)); } catch {}
   };
@@ -5923,16 +5980,34 @@ function App() {
    * Pruned against the whole library rather than against the list being
    * saved -- otherwise saving the custom targets would drop every built-in
    * pin, which is the same bug with the sign flipped. */
-  const dropDeadPins = (nextCustom) => {
+  const dropDeadPins = (nextCustom, pins = pinnedRef.current) => {
     const live = new Set([...BUILTIN_TARGETS.map(t => t.id), ...nextCustom.map(t => t.id)]);
-    const keep = pinnedTargets.filter(id => live.has(id));
-    if (keep.length !== pinnedTargets.length) savePinnedTargets(keep);
+    const keep = pins.filter(id => live.has(id));
+    if (keep.length !== pins.length) savePinnedTargets(keep);
   };
+  /* The prune runs BEFORE the write, and on the list the ref holds rather than
+   * the one this render closed over.
+   *
+   * It used to run after `await window.storage.set(...)`, reading
+   * `pinnedTargets` out of the closure -- and every restore path calls
+   * `saveCustomTargets(incoming)` and then `savePinnedTargets(incoming)`
+   * synchronously, so the prune resumed in a microtask AFTER the restored pins
+   * had been written and pruned the list it was meant to protect. Restoring a
+   * backup onto a device that had any pinned custom target of its own threw
+   * away every pin in the file and kept the local ones that happened to
+   * survive: file pins ["mr1","ct2"], local ["sr","ct1"], on disk afterwards
+   * ["sr"]. That is the exact bug the "Last, because saveCustomTargets prunes
+   * pins" ordering was written to prevent, inverted by the await.
+   *
+   * Neither half of the fix depends on the other's timing any more: the
+   * argument (defaulting to the ref) means the prune cannot read a superseded
+   * list whenever it runs, and running it before the await means it cannot be
+   * reordered against a caller's next statement. */
   const saveCustomTargets = async data => {
     const clean = usableTargets(data);
     setCustomTargets(clean);
-    try { await window.storage.set('custom_targets_v1', JSON.stringify(clean)); } catch {}
     dropDeadPins(clean);
+    try { await window.storage.set('custom_targets_v1', JSON.stringify(clean)); } catch {}
   };
   const saveDeletedBuiltins = async data => {
     setDeletedBuiltins(data);
@@ -6164,8 +6239,9 @@ function App() {
       if (d.deletedBuiltins) saveDeletedBuiltins(d.deletedBuiltins);
       if (d.firearms) saveFirearms(d.firearms);
       if (d.ammo) saveAmmo(d.ammo);
-      // After the targets, so the file's pins survive the prune that follows a
-      // custom-target write rather than being measured against the old library.
+      // Measured against the library the FILE carries, not the one on this
+      // device -- and the prune inside saveCustomTargets can no longer undo it
+      // from a microtask afterwards. See dropDeadPins.
       if (d.pinnedTargets) savePinnedTargets(cleanPinnedIds(d.pinnedTargets, d.customTargets || customTargets));
       window.alert(`Backup restored: ${res.counts}.`);
     };
@@ -6589,8 +6665,13 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch,
     const seen = new Set();
     const out = [];
     [...sessions].sort((a,b)=>(b.ts||0)-(a.ts||0)).forEach(s => {
+      /* Folded the same way the grouping folds -- case AND internal whitespace
+         -- so the filter offers one entry per range rather than one per way it
+         was typed. Most recent spelling shown, because that is the one the
+         shooter is currently using. */
       const v = (s.rangeLocation || '').trim();
-      if (v && !seen.has(v.toLowerCase())) { seen.add(v.toLowerCase()); out.push(v); }
+      const k = locationKey(v);
+      if (v && !seen.has(k)) { seen.add(k); out.push(v); }
     });
     return out;
   })();
@@ -6623,7 +6704,10 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch,
   const matchesFilter = (s) => {
     if (filterTarget && s.targetId !== filterTarget) return false;
     if (filterPosition && s.position !== filterPosition) return false;
-    if (filterLocation && (s.rangeLocation || '').toLowerCase() !== filterLocation.toLowerCase()) return false;
+    /* The same folding as the grouping and the list this value came from: it
+       was case-insensitive already but not whitespace-insensitive, so a
+       location entered with a trailing space filtered to nothing. */
+    if (filterLocation && locationKey(s.rangeLocation) !== locationKey(filterLocation)) return false;
     if (search) {
       const q = search.toLowerCase();
       const tgt = getTarget(s.targetId);
@@ -6962,8 +7046,9 @@ function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave
     const out = [];
     [...sessions].sort((a,b)=>(b.ts||0)-(a.ts||0)).forEach(s => {
       const loc = (s.rangeLocation || '').trim();
-      if (loc && !seen.has(loc.toLowerCase())) {
-        seen.add(loc.toLowerCase());
+      const k = locationKey(loc);              // see distinctLocations
+      if (loc && !seen.has(k)) {
+        seen.add(k);
         out.push(loc);
       }
     });
@@ -9510,6 +9595,43 @@ function positionColor(p) { return POSITION_COLORS[p] || '#7a7f96'; }
 const POSITION_ORDER = ['Prone','Sitting','Kneeling','Standing','Two-hand','Strong-hand','Weak-hand','Bench','Unsupported','Unspecified'];
 function posRank(p) { const i = POSITION_ORDER.indexOf(p); return i === -1 ? POSITION_ORDER.length : i; }
 
+/* One range, however it was typed.
+ *
+ * `rangeLocation` is free text with a datalist behind it, and a datalist is a
+ * suggestion, not a constraint: the same range gets entered as "Camp Perry",
+ * "Camp perry" and "camp perry" across a season, and on a phone the first
+ * letter is capitalised for you about half the time. Grouped on the trimmed
+ * string, those are three ranges.
+ *
+ * That is not cosmetic where the solver is concerned. Zeros at 200, 300 and
+ * 600 with one capital differing on one of them become a range picker with
+ * three entries of one distance each, and the fit falls to "one confirmed
+ * zero — velocity and drag cannot be separated from a single point" with
+ * nothing on screen connecting the refusal to a letter case. Before the place
+ * was a filter at all, all three fitted.
+ *
+ * Case AND internal whitespace, because "camp  perry" pasted with two spaces
+ * is the same range too. The app already matches locations this way in the
+ * sessions search filter; this makes the grouping agree with it.
+ *
+ * The KEY is folded and the LABEL is not: a shooter who writes "Camp Perry"
+ * should not be shown "camp perry" because the app tidied something. Whichever
+ * spelling they used most often is the one displayed -- see tallyAnchors. */
+const UNSPECIFIED_LOCATION = 'Unspecified location';
+function locationLabel(v) {
+  return String(v == null ? '' : v).trim().replace(/\s+/g, ' ') || UNSPECIFIED_LOCATION;
+}
+function locationKey(v) { return locationLabel(v).toLowerCase(); }
+/* The spelling to show for a folded key: the one used most, ties broken
+ * alphabetically so the header does not move about between renders. */
+function commonestLabel(counts) {
+  let best = null, bestN = -1;
+  for (const [label, n] of counts) {
+    if (n > bestN || (n === bestN && String(label) < String(best))) { best = label; bestN = n; }
+  }
+  return best;
+}
+
 /* Look up the confirmed zero (last record shot's elev/wind) for a given
  * firearm × range location × distance × position, across all sessions. Uses
  * the exact same grouping key as the DOPE tab so "what DOPE tab shows for
@@ -9521,12 +9643,12 @@ function posRank(p) { const i = POSITION_ORDER.indexOf(p); return i === -1 ? POS
  * (all-zero elev/wind — "no dope logged") worth carrying forward.
  */
 function findConfirmedZero(sessions, { rifleId, location, yards, position }, excludeSessionId) {
-  const loc = (location||'').trim() || 'Unspecified location';
+  const loc = locationKey(location);
   const pos = (position||'').trim() || 'Unspecified';
   const matches = (sessions||[])
     .filter(s => s.id !== excludeSessionId)
     .filter(s => (s.rifleId||'') === (rifleId||''))
-    .filter(s => ((s.rangeLocation||'').trim() || 'Unspecified location') === loc)
+    .filter(s => locationKey(s.rangeLocation) === loc)
     .filter(s => (Number(s.rangeYards)||0) === (Number(yards)||0))
     .filter(s => ((s.position||'').trim() || 'Unspecified') === pos)
     .filter(s => (s.shots?.length||0) >= 1)
@@ -9624,17 +9746,36 @@ function newerAnchor(a, b) {
  * how many ANCHORS each would contribute — distinct distances, not sessions,
  * because ten prone sessions at one distance still cannot true a trajectory
  * and two at different distances can. */
-function tallyAnchors(cells, keyOf, rank) {
+function tallyAnchors(cells, keyOf, rank, labelOf) {
   const m = new Map();
   for (const c of cells) {
     const k = keyOf(c);
-    if (!m.has(k)) m.set(k, { key: k, yds: new Set(), n: 0 });
+    if (!m.has(k)) m.set(k, { key: k, yds: new Set(), n: 0, labels: new Map() });
     const e = m.get(k); e.yds.add(c.yards); e.n++;
+    if (labelOf) { const l = labelOf(c); e.labels.set(l, (e.labels.get(l) || 0) + 1); }
   }
-  return [...m.values()].map(e => ({ key: e.key, anchors: e.yds.size, n: e.n }))
+  /* `label` is what the picker shows and `key` is what it filters on. They are
+     the same string for everything with a fixed vocabulary -- a position comes
+     off a list -- and different for a free-text field that has been folded to
+     group it, where the label is the spelling the shooter used most. */
+  return [...m.values()].map(e => ({ key: e.key, anchors: e.yds.size, n: e.n,
+                                     label: (labelOf && commonestLabel(e.labels)) || e.key }))
     .sort((a, b) => b.anchors - a.anchors || b.n - a.n
                  || (rank ? rank(a.key) - rank(b.key) : 0)
                  || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/* The atmospheric fields as committed to the fit. One object, compared by
+ * value, so that "the shooter has not changed anything" is representable --
+ * see the debounce in SolverTab. Kept out of the component so it can be
+ * exercised directly: how many commits a sequence of edits produces is a fact
+ * about this function, and a browser cannot count solves. */
+const EMPTY_ATMO_COMMIT = { tempF: '', pressure: '', zeroPressure: '' };
+function nextCommitted(prev, tempF, pressure, zeroPressure) {
+  return (prev && prev.tempF === tempF && prev.pressure === pressure
+          && prev.zeroPressure === zeroPressure)
+    ? prev
+    : { tempF, pressure, zeroPressure };
 }
 
 function SolverTab({ sessions, firearms, ammo }) {
@@ -9660,11 +9801,36 @@ function SolverTab({ sessions, firearms, ammo }) {
    * the main thread, on a phone, at the firing point. The solve now runs on a
    * value that has stopped changing (or on blur, for the shooter who types the
    * number and taps straight to the table). */
-  const [committed, setCommitted] = useState({ tempF: '', pressure: '', zeroPressure: '' });
-  const commitNow = () => setCommitted({ tempF, pressure, zeroPressure });
+  const [committed, setCommitted] = useState(EMPTY_ATMO_COMMIT);
+  /* A commit that changes nothing must not BE a commit.
+   *
+   * `atmo` is keyed on `committed` by identity and `solved` on `atmo`, so a
+   * fresh object holding the same three strings re-runs the entire fit. Two
+   * ways that happened, both of them free work on the main thread at the
+   * firing point, and a solve here is one to two and a half seconds:
+   *
+   *   on MOUNT the 400 ms timer fires once with the fields still empty and
+   *     unchanged, and the anchors are solved a second time;
+   *   on BLUR after typing, commitNow committed and left the pending timer
+   *     running, so the same values were committed again 400 ms later.
+   *
+   * `nextCommitted` returns the previous object when nothing moved, which is
+   * what stops both: React bails out, `committed` keeps its identity, and
+   * neither memo re-runs. The pending timer is cancelled by commitNow as well,
+   * so the redundant fire does not even get that far. */
+  const commitTimer = useRef(null);
+  const commitNow = () => {
+    if (commitTimer.current) { clearTimeout(commitTimer.current); commitTimer.current = null; }
+    setCommitted(prev => nextCommitted(prev, tempF, pressure, zeroPressure));
+  };
   useEffect(() => {
-    const t = setTimeout(() => setCommitted({ tempF, pressure, zeroPressure }), 400);
-    return () => clearTimeout(t);
+    commitTimer.current = setTimeout(() => {
+      commitTimer.current = null;
+      setCommitted(prev => nextCommitted(prev, tempF, pressure, zeroPressure));
+    }, 400);
+    return () => {
+      if (commitTimer.current) { clearTimeout(commitTimer.current); commitTimer.current = null; }
+    };
   }, [tempF, pressure, zeroPressure]);
 
   const atmo = useMemo(() => {
@@ -9692,7 +9858,9 @@ function SolverTab({ sessions, firearms, ammo }) {
       const elevs = pool.map(sh => sh.elev || 0), winds = pool.map(sh => sh.wind || 0);
       return {
         sessionId: s.id,
-        rifleId: s.rifleId || '', location: (s.rangeLocation || '').trim() || 'Unspecified location',
+        rifleId: s.rifleId || '',
+        /* Grouped on the folded key, shown with the shooter's own spelling. */
+        location: locationLabel(s.rangeLocation), locKey: locationKey(s.rangeLocation),
         position: (s.position || '').trim() || 'Unspecified',
         ammoId: s.ammoId || '',
         temp: s.temp === '' || s.temp == null ? null : Number(s.temp),
@@ -9735,10 +9903,15 @@ function SolverTab({ sessions, firearms, ammo }) {
    * picker, because a shooter with three positions at a range has three
    * different right answers and the app cannot know which one they are about
    * to shoot. */
-  const locations = useMemo(() => tallyAnchors(forRifle, c => c.location), [forRifle]);
+  const locations = useMemo(
+    () => tallyAnchors(forRifle, c => c.locKey, null, c => c.location), [forRifle]);
   const loc = location != null && locations.some(l => l.key === location)
     ? location : (locations[0]?.key ?? '');
-  const atLoc = useMemo(() => forRifle.filter(c => c.location === loc), [forRifle, loc]);
+  /* The name to put on screen for the selected key. Never `loc` itself: that
+     is case-folded, and showing a shooter "camp perry" because the app tidied
+     their entry is the app editing them. */
+  const locName = locations.find(l => l.key === loc)?.label || '';
+  const atLoc = useMemo(() => forRifle.filter(c => c.locKey === loc), [forRifle, loc]);
 
   const positions = useMemo(() => tallyAnchors(atLoc, c => c.position, posRank), [atLoc]);
   const pos = position != null && positions.some(p => p.key === position)
@@ -9846,12 +10019,38 @@ function SolverTab({ sessions, firearms, ammo }) {
       zeroYd: (rifle && Number(rifle.zeroRange)) || anchors[0].yd,
       densityRatio: airDensityRatio({ tempF: atmo.tempF, pressureInHg: atmo.pressureInHg }),
       tempF: atmo.tempF === undefined ? 59 : atmo.tempF,
+      /* The conditions the shooter says their zeros were confirmed in, for the
+       * anchors that carry none of their own.
+       *
+       * "Pressure when your zeros were shot" is a statement about ALL of those
+       * zeros, not only the ones whose session happens to record a
+       * temperature. It was reaching the solver on the tagged anchors alone --
+       * they get a densityRatio computed from it above -- and every untagged
+       * anchor fell through to the solver's standard sea level. A shooter at
+       * 5,000 ft who correctly entered 24.9 inHg had it honoured for two
+       * anchors out of three and replaced with 29.92 for the third: a 17%
+       * density error in one point of a three-point fit, which came out as
+       * 32.06 MOA at 1000 against a truth of 30.63 -- outside its own
+       * interval, under a green banner.
+       *
+       * No temperature is passed with it. Sessions record temperature and the
+       * screen does not ask for one, so there is nothing to send; the solver
+       * assumes the standard 59°F and the note below says so, which is honest
+       * in a way that averaging the other anchors' temperatures would not be. */
+      zeroPressureInHg: atmo.zeroPressureInHg,
       horizonYd: 1200,
     });
   }, [anchors, load, rifle, atmo]);
 
+  /* What the solver ACTUALLY assumed for an anchor that recorded nothing --
+     its own answer, not this component's guess at it. Defaulted only for a
+     solver that does not report one, so the note below can never describe air
+     the fit did not use. */
+  const assumedAir = (solved && solved.assumedAnchorAtmosphere)
+    || { densityRatio: 1, tempF: 59, pressureInHg: null };
+
   const offsets = useMemo(
-    () => positionOffsets(cells.filter(c => c.rifleId === rid && c.location === loc)),
+    () => positionOffsets(cells.filter(c => c.rifleId === rid && c.locKey === loc)),
     [cells, rid, loc]);
 
   const note = { fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)', lineHeight: 1.6 };
@@ -9905,9 +10104,9 @@ function SolverTab({ sessions, firearms, ammo }) {
             {locations.length > 1
               ? <select className="inp" value={loc} onChange={e => setLocation(e.target.value)}>
                   {locations.map(l => <option key={l.key} value={l.key}>
-                    {l.key} · {l.anchors} {l.anchors === 1 ? 'distance' : 'distances'}</option>)}
+                    {l.label} · {l.anchors} {l.anchors === 1 ? 'distance' : 'distances'}</option>)}
                 </select>
-              : <div className="inp" style={{ color: 'var(--ink)' }}>{loc || '—'}</div>}
+              : <div className="inp" style={{ color: 'var(--ink)' }}>{locName || '—'}</div>}
           </div>
         </div>
         <div style={{ ...note, marginTop: 5 }}>
@@ -9965,7 +10164,7 @@ function SolverTab({ sessions, firearms, ammo }) {
           Anchors · {anchors.length} · {pos}
         </div>
         {anchors.length === 0
-          ? <div style={note}>No confirmed zeros for this rifle, {pos.toLowerCase()}, at {loc}.</div>
+          ? <div style={note}>No confirmed zeros for this rifle, {pos.toLowerCase()}, at {locName}.</div>
           : anchors.map(a => (
             <div key={a.yd} style={{ display: 'flex', justifyContent: 'space-between',
                                      fontFamily: 'var(--fm)', fontSize: 10, padding: '3px 0' }}>
@@ -10027,11 +10226,15 @@ function SolverTab({ sessions, firearms, ammo }) {
 
           {/* Whether the atmospheric correction is measured or assumed.
               The solver fits each anchor in its own air; an anchor that
-              recorded none is fitted as if it were confirmed in standard
-              conditions, which is a real assumption and not a neutral one. A
+              recorded none is fitted in the conditions the shooter stated for
+              their zeros, falling back to standard only for what they did not
+              state. That is still an assumption and not a neutral one, and a
               prediction corrected for conditions the zeros never recorded is a
-              weaker claim than one corrected for conditions they did, and the
-              shooter is entitled to know which they are reading. */}
+              weaker claim than one corrected for conditions they did — so the
+              screen names the assumption rather than describing the correction
+              as measured. What it must never do is describe air the fit did
+              NOT use: the wording here is read off the solver's own
+              `assumedAnchorAtmosphere` rather than restated from the field. */}
           <div style={{ ...note, marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--bdr)' }}>
             {solved.anchorsHaveAtmosphere ? (
               <>Air: every one of your zeros carries the temperature it was confirmed at, so each
@@ -10042,9 +10245,15 @@ function SolverTab({ sessions, firearms, ammo }) {
             ) : (
               <>Air: {anchorInfo.withTemp === 0 ? 'none' : `only ${anchorInfo.withTemp}`} of
                 your {anchors.length} {anchors.length === 1 ? 'zero records' : 'zeros record'} the
-                temperature {anchors.length === 1 ? 'it was' : 'they were'} confirmed at, so the
-                rest are fitted as if shot in standard air. The correction below is partly an
-                assumption. Log the temperature with a session and it stops being one.</>
+                temperature {anchors.length === 1 ? 'it was' : 'they were'} confirmed at.
+                {' '}{anchors.length - anchorInfo.withTemp === 1 ? 'The one' : `The other ${anchors.length - anchorInfo.withTemp}`}
+                {' '}{anchors.length - anchorInfo.withTemp === 1 ? 'is' : 'are'} fitted
+                {' '}{assumedAir.pressureInHg != null
+                  ? `at the ${assumedAir.pressureInHg} inHg you entered for your zeros`
+                  : 'at standard sea-level pressure (29.92 inHg)'} and {assumedAir.tempF}°F,
+                which is the standard temperature — nothing recorded theirs, and inventing one
+                would be worse than saying which one was assumed. So the correction below is
+                partly an assumption; log the temperature with a session and it stops being one.</>
             )}
           </div>
         </div>
@@ -10147,7 +10356,11 @@ function DopeTab({ sessions, firearms, getTarget }) {
       const a = (rec.length>=2) ? analytics(s.shots, tgt, s.rangeYards) : null;
       const ammo = (s.ammoDesc||'').trim() || (s.ammoLot ? `lot ${s.ammoLot}` : '');
       return {
-        sid: s.id, rifleId: s.rifleId||'', location: (s.rangeLocation||'').trim() || 'Unspecified location',
+        sid: s.id, rifleId: s.rifleId||'',
+        /* Same folding as the solver and findConfirmedZero, so "what the DOPE
+           tab shows for this slot", "what the trajectory fits" and "what a new
+           session pre-fills with" cannot disagree over a capital letter. */
+        location: locationLabel(s.rangeLocation), locKey: locationKey(s.rangeLocation),
         position: (s.position||'').trim() || 'Unspecified',
         yards: Number(s.rangeYards)||0, date: s.date||'', ts: s.ts||0,
         elev: last.elev||0, wind: last.wind||0, moved, noDope,
@@ -10161,15 +10374,28 @@ function DopeTab({ sessions, firearms, getTarget }) {
   // position is its own zero slot — same distance, different hold, different zero.
   const cells = {};
   entries.forEach(e => {
-    const key = `${e.rifleId}|${e.location}|${e.yards}|${e.position}`;
-    (cells[key] ||= { rifleId:e.rifleId, location:e.location, yards:e.yards, position:e.position, sessions:[] }).sessions.push(e);
+    const key = `${e.rifleId}|${e.locKey}|${e.yards}|${e.position}`;
+    (cells[key] ||= { rifleId:e.rifleId, locKey:e.locKey, yards:e.yards, position:e.position, sessions:[] }).sessions.push(e);
   });
   Object.values(cells).forEach(c => c.sessions.sort((a,b)=>b.ts-a.ts)); // newest first
+
+  /* One display name per folded key, chosen across the whole log rather than
+     per cell -- otherwise "Camp Perry" at 200 and "Camp perry" at 600 would
+     group together and then render under two headers anyway. */
+  const locNames = (() => {
+    const m = new Map();
+    for (const e of entries) {
+      if (!m.has(e.locKey)) m.set(e.locKey, new Map());
+      const c = m.get(e.locKey); c.set(e.location, (c.get(e.location) || 0) + 1);
+    }
+    return new Map([...m].map(([k, c]) => [k, commonestLabel(c) || k]));
+  })();
+  Object.values(cells).forEach(c => { c.location = locNames.get(c.locKey) || c.locKey; });
 
   // Order cells: firearm name, then location, then distance descending.
   const ordered = Object.entries(cells)
     .map(([key,c]) => ({ key, ...c, fname: firearmName(c.rifleId) }))
-    .sort((a,b)=> a.fname.localeCompare(b.fname) || a.location.localeCompare(b.location) || b.yards - a.yards || posRank(a.position) - posRank(b.position));
+    .sort((a,b)=> a.fname.localeCompare(b.fname) || a.locKey.localeCompare(b.locKey) || b.yards - a.yards || posRank(a.position) - posRank(b.position));
 
   // Re-group ordered cells under firearm → location headers for rendering.
   const byFirearm = {};

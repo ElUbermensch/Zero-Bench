@@ -50,7 +50,7 @@ const grabComponent = (name) => {
   }
   throw new Error(`test-geometry: could not read the body of ${name}`);
 };
-const NAMES = ['pointInShape', 'shapeBoundR', 'rayToEdge', 'zoneInnerR', 'zoneMidR',
+const NAMES = ['pointInShape', 'shapeBoundR', 'rayHit', 'rayToEdge', 'zoneInnerR', 'zoneMidR',
                'xyToZone', 'synthRingsFromZones', 'ringMidR', 'clockToXY', 'shotXY'];
 const G = new Function(NAMES.map(grab).join('\n') + `\nreturn {${NAMES.join(',')}};`)();
 const mk = (zones) => ({ zones, rings: G.synthRingsFromZones(zones) });
@@ -258,6 +258,60 @@ section('a fraction through a zone stays inside that zone');
   ok(strayed === 0,
      `${total} stored fractions across both shipped targets, none reconstructs into a different zone`
      + (strayed ? ` — ${strayed} did, e.g. ${first}` : ''));
+
+  /* The sweep above cannot see the offset case, and that is where the second
+   * half of this bug lived: neither shipped target has a zone that is offset
+   * from the target's centre, so every zone in it encloses the origin and its
+   * inner boundary is supplied by the better-scoring zone inside it. An OFFSET
+   * zone has no such neighbour -- nothing was supplying the ray's ENTRY into
+   * it -- so the fraction was interpolated across [0, exit] and the lower half
+   * of the range landed short of the zone entirely. Measured on the head box
+   * this file already constructs: A@0.50 came back at (0.00, 5.50), four
+   * inches under the box, scoring the body zone.
+   *
+   * A bearing that does not reach the zone at all is skipped rather than
+   * asserted: an A at 3 o'clock, where there is no head box, is a record of a
+   * shot that cannot have been fired, and the fallback that catches it is
+   * asserted on its own below. */
+  const head = mk([{ score: 'A', shape: { kind: 'rect', w: 6, h: 4, cx: 0, cy: 9 } },
+                   { score: 'C', shape: { kind: 'rect', w: 12, h: 24 } }]);
+  let offStray = 0, offTotal = 0, offFirst = null, offScored = 0;
+  for (const [h, m] of [[12, 0], [12, 20], [11, 40], [3, 0], [1, 30], [7, 45]]) {
+    const u = G.clockToXY(h, m, 1);
+    for (const z of head.zones) {
+      if (!G.rayToEdge(z.shape, u.x, u.y)) continue;     // this bearing misses it
+      for (let p = 0; p <= 1.0001; p += 0.05) {
+        const pt = G.shotXY({ ring: z.score, ringPos: Math.min(1, p), clockH: h, clockM: m, rpv: 2 }, head);
+        offTotal++;
+        if (!G.pointInShape(z.shape, pt.x, pt.y)) {
+          offStray++;
+          if (!offFirst) offFirst = `${z.score}@${p.toFixed(2)} -> (${pt.x.toFixed(2)},${pt.y.toFixed(2)})`;
+        }
+        /* Scoring the named zone is the stronger claim and it holds for the
+         * offset zone, which is the one this fix is about. It does NOT hold
+         * for the body zone directly under the head box: a hole there is
+         * inside both outlines and the rule book scores it the better of the
+         * two, which is what the hit test does and what `a hole inside both
+         * zones scores the better one` already pins. */
+        if (z.score === 'A' && G.xyToZone(head, pt.x, pt.y).ring !== 'A') offScored++;
+      }
+    }
+  }
+  ok(offTotal > 40 && offStray === 0,
+     `${offTotal} stored fractions on a target with an OFFSET zone, every one inside the zone it names`
+     + (offStray ? ` — ${offStray} were not, e.g. ${offFirst}` : ''));
+  ok(offScored === 0,
+     `and every fraction stored as the offset head box scores the head box`
+     + ` (${offScored} did not; 40 of 44 samples used to land in the body zone)`);
+
+  /* The specific number from the review, kept on its own because a count is
+   * easy to read past: the default fraction, at twelve o'clock, on the box. */
+  const mid5 = G.shotXY({ ring: 'A', ringPos: 0.5, clockH: 12, clockM: 0, rpv: 2 }, head);
+  ok(Math.abs(mid5.y - 9) < 1e-9 && G.xyToZone(head, mid5.x, mid5.y).ring === 'A',
+     `an A stored at 0.50 sits in the middle of the head box at ${mid5.y.toFixed(2)}", not at 5.50" in the C`);
+  const zero5 = G.shotXY({ ring: 'A', ringPos: 0, clockH: 12, clockM: 0, rpv: 2 }, head);
+  ok(Math.abs(zero5.y - 7) < 1e-9,
+     `...and at 0 on the bottom edge of the box (${zero5.y.toFixed(2)}"), which is where the zone starts`);
 }
 
 /* ============================================ and it still scores the right zone */
@@ -498,10 +552,27 @@ section('a zone the bearing misses falls back instead of collapsing to centre');
 {
   const head = mk([{ score: 'A', shape: { kind: 'rect', w: 6, h: 4, cx: 0, cy: 9 } },
                    { score: 'C', shape: { kind: 'rect', w: 12, h: 24 } }]);
+  /* Where the box IS: the record is reconstructable, so the assertion is the
+   * one that matters -- it comes back in the zone it names. `> 1` would pass
+   * on any point that is merely not the origin, including the 5.50" in the C
+   * zone that the missing entry point used to produce. */
+  const hit = G.shotXY({ ring: 'A', ringPos: 0.9, clockH: 12, clockM: 0, rpv: 2 }, head);
+  ok(G.xyToZone(head, hit.x, hit.y).ring === 'A',
+     `an A stored at 0.9 comes back in the head box at ${hit.y.toFixed(2)}"`
+     + ` (${G.xyToZone(head, hit.x, hit.y).ring}, was 9.90" and still an A only by luck)`);
+
+  /* Where the box is NOT. This record cannot be reconstructed into its own
+   * zone, because at six o'clock there is no head box to put it in -- so what
+   * is asserted is what the fallback owes: a finite point, off the centre, and
+   * a score it is entitled to. Without the fallback it returned 0.00" -- dead
+   * centre, scoring whatever zone covers the origin, out of a record that says
+   * otherwise, with nothing anywhere to show it had happened. */
   const p = G.shotXY({ ring: 'A', ringPos: 0.9, clockH: 6, clockM: 0, rpv: 2 }, head);
-  ok(Math.hypot(p.x, p.y) > 1,
-     `an A stored at 6 o'clock, where the head box is not, does not land at dead centre`
-     + ` (${Math.hypot(p.x, p.y).toFixed(2)}", was 0.00" and scored a C)`);
+  const scored = G.xyToZone(head, p.x, p.y).ring;
+  ok(Number.isFinite(p.x) && Number.isFinite(p.y) && Math.hypot(p.x, p.y) > 1
+     && G.pointInShape(head.zones[1].shape, p.x, p.y) && scored === 'C',
+     `an A stored at 6 o'clock, where the head box is not, lands on the paper below it`
+     + ` rather than at dead centre (${Math.hypot(p.x, p.y).toFixed(2)}", scores ${scored}; was 0.00")`);
 
   /* A bow-tie: self-intersecting, so pointInShape accepts points the ray
    * casting finds no crossing for. Not a shape the editor should make, but it

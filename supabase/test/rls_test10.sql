@@ -43,10 +43,25 @@ insert into public.profiles (id, display_name, is_admin) values
   ('e0000000-0000-0000-0000-00000000000e', 'MFA Shooter', false)
 on conflict (id) do update set is_admin = excluded.is_admin;
 
-/* test.as_user_aal() comes from rls_test9, the first suite that needed to name
- * an assurance level -- the same way as_user() itself is defined once in
- * rls_test.sql and used by every suite after it. The runner walks these files
- * in order against one database. */
+/* Defined here as well as in rls_test9, and the duplication is deliberate.
+ *
+ * run_tests.sh orders the suites with `sort -V`, so rls_test9 comes first and
+ * defines this. The CI workflow used a PLAIN glob, which is lexicographic:
+ * rls_test10 sorted between rls_test.sql and rls_test2, ran second, and died
+ * on a function that would not exist for another eight files. The workflow is
+ * fixed to sort the same way -- but a suite that only passes when something
+ * earlier happened to run is a suite that will break again the next time
+ * anything reorders them, so this one no longer depends on that.
+ *
+ * `create or replace` makes running after rls_test9 harmless. */
+create or replace function test.as_user_aal(u uuid, lvl text) returns void
+language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', u::text, false);
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', u::text, 'role', 'authenticated',
+                       'is_anonymous', false, 'aal', lvl)::text, false);
+end $$;
 
 -- ============================================== 4. writing is untouched, aal1
 set role authenticated;

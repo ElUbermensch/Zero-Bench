@@ -45,7 +45,13 @@ jobs:
           # A migration that gutted the keyset indexes merged green.
           rc=0
           shopt -s nullglob
-          for t in supabase/test/rls_test*.sql; do
+          # `sort -V`, which run_tests.sh has had all along and this did not.
+          # A plain glob is LEXICOGRAPHIC: the moment a tenth suite existed,
+          # rls_test10 sorted between rls_test.sql and rls_test2 and ran second
+          # -- eight files before the one that sets up what it builds on. The
+          # two runners must agree on order, or CI is testing a sequence no
+          # developer ever runs.
+          for t in $(ls supabase/test/rls_test*.sql | sort -V); do
             echo "== $t"
             psql -d shooting -v ON_ERROR_STOP=1 -f "$t" 2>&1 | tee out.txt || rc=1
             # A psql ERROR aborts the script without ever printing FAIL, so

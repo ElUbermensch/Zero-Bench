@@ -78,6 +78,16 @@ jobs:
       #
       # The backend config is genuinely absent in a fork, so that half is told
       # to skip rather than the whole thing being ignored.
+      # BEFORE preflight, because three of preflight's checks read the EMITTED
+      # information page -- the doctype, the charset and the viewport that a
+      # static host does not supply and an Artifact host does. site-info/dist
+      # is gitignored, so on a fresh checkout it does not exist and those three
+      # assertions were skipped in silence: they passed locally only because a
+      # dist from an earlier build happened to be lying around. `npm run build`
+      # is bench+zero and does not reach the page.
+      - run: npm run build:site
+        env:
+          ALLOW_UNCONFIGURED_BUILD: '1'
       - run: node tools/preflight.mjs
         env:
           PREFLIGHT_SKIP_CONFIG: '1'

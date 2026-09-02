@@ -761,11 +761,25 @@ section('removing cases changes the count and nothing else');
 
   // A later firing measures against the smaller lot, because that is the lot
   // that was actually in circulation.
+  /* Dated FROM THE CULL, not from a literal. The cull is stamped today(), and
+   * lotPopulationAt counts only culls dated on or before the batch -- so a
+   * hardcoded date is a fit for exactly the day it was typed on. This test was
+   * written on 2026-09-01 with the batch dated 2026-09-01, and on 2026-09-02 it
+   * started failing at 1.47: the cull now sorted AFTER the batch, so the firing
+   * measured against 100 cases (97/100 = 0.97) instead of the 97 that were
+   * actually in circulation. The assertion was right and the fixture had a
+   * shelf life. */
   await page.evaluate(() => {
+    const cull = DB.brassLots[0].culls[0];
+    const after = (iso, days) => {
+      const d = new Date(iso + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
     DB.batches.push({ ...DB.batches[0], id: 'bx2', serial: 'BX2',
-      date: '2026-09-01', qty: 97 });
-    DB.sessions.push({ id: 'sf6', batch: 'bx2',
-                       date: '2026-09-02', rounds: 97, distance: 100, pressureSigns: 'none' });
+      date: after(cull.date, 1), qty: 97 });
+    DB.sessions.push({ id: 'sf6', batch: 'bx2', date: after(cull.date, 2),
+                       rounds: 97, distance: 100, pressureSigns: 'none' });
     save();
   });
   const later = await page.evaluate(() => brassLife(DB.brassLots[0]));

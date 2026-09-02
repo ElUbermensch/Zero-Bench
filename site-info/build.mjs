@@ -84,10 +84,18 @@ if (bytes < 1024) {
  * to double it if the source ever grows one of its own. The source stays
  * Artifact-shaped, which is also the shape it is easiest to preview in. */
 const raw = fs.readFileSync(SRC, 'utf8');
-const head = raw.slice(0, 4096).toLowerCase();
+const all = raw.toLowerCase();
+/* doctype, charset and viewport have to be near the TOP to do their job -- a
+ * charset declared past the first kilobyte is one the parser has already
+ * guessed around -- so those are looked for in the opening slice. <html> and
+ * <body> only have to EXIST, and the source's stylesheet is tens of kilobytes
+ * long, so a nested <body> would sit far past any slice. Scanning the whole
+ * file for those two is what makes the refusal below a real guard rather than
+ * a guard against the first 4 KB. */
+const head = raw.slice(0, 1024).toLowerCase();
 const has = (re) => re.test(head);
 
-if (has(/<html[\s>]/) || has(/<body[\s>]/)) {
+if (/<html[\s>]/.test(all) || /<body[\s>]/.test(all)) {
   console.error('site-info/build: the source carries its own <html>/<body>. '
     + 'It must stay Artifact-shaped — remove them, or teach this script to '
     + 'stop wrapping.');

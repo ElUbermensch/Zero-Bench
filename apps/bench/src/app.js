@@ -1523,9 +1523,15 @@ function validate(kind, d, editId) {
  * ========================================================================*/
 let stack = [{ v: 'lookup' }];
 const cur = () => stack[stack.length - 1];
-const go = (v, arg) => { stack.push({ v, arg }); render(); scrollTo(0, 0); };
+/* Which screens actually get opened is the whole "what gets used" signal, and
+ * it is one helper because go() and reset() are the only two ways in. back() is
+ * deliberately not counted: returning to a screen is not choosing it, and
+ * counting it would inflate whichever screen happens to sit under the others. */
+const trackView = (v) => { if (CORE) CORE.track('screen_viewed', { screen: v }); };
+
+const go = (v, arg) => { trackView(v); stack.push({ v, arg }); render(); scrollTo(0, 0); };
 const back = () => { if (stack.length > 1) stack.pop(); render(); scrollTo(0, 0); };
-const reset = (v) => { stack = [{ v }]; render(); scrollTo(0, 0); };
+const reset = (v) => { trackView(v); stack = [{ v }]; render(); scrollTo(0, 0); };
 const toast = (m) => { UI.toast = m; };
 
 const TABS = [
@@ -3493,12 +3499,13 @@ const ACTIONS = {
   markpick: (a, el) => { const v = el.dataset.val;
     UI.marks[el.dataset.pos] = v === '' ? null : v; render(); },
 
-  printOne: () => window.print(),
+  printOne: () => { if (CORE) CORE.track('label_printed', { sheet: false }); window.print(); },
   printSheet: (a) => {
     const b = byId(DB.batches, a);
     const sheet = document.getElementById('sheet');
     const single = document.getElementById('single');
     if (!b || !sheet || !single) return;
+    if (CORE) CORE.track('label_printed', { sheet: true });
     sheet.innerHTML = Array.from({ length: 8 }, () => labelHtml(b)).join('');
     sheet.classList.remove('hidden');
     single.classList.add('noprint');
@@ -3796,6 +3803,12 @@ document.addEventListener('submit', (e) => {
   const wrote = save();
   toast(wrote ? msg : msg.replace(/\.$/, '') + ' — in memory only, not saved to this device.');
   if (mode === 'err') { if (box) box.innerHTML = `<div class="banner bad"><div>${esc(msg)}</div></div>`; return; }
+
+  /* One line covers every record type, because there is exactly one save path
+   * for all of them. Tracked AFTER the error return so a refused save is not
+   * counted as a creation, and `kind` travels as metadata rather than becoming
+   * eight event names nobody can chart together. */
+  if (CORE) CORE.track(editId ? 'record_edited' : 'record_created', { kind });
   stack.pop();
   if (mode === 'goDetail') go(target[0], target[1]); else reset(target);
 });
@@ -3829,6 +3842,10 @@ function openDeepLink() {
   const m = /(?:^|\/)s\/([^/?#]+)/.exec(decodeURIComponent(raw));
   if (!m) return false;
   const found = findBySerial(m[1]);
+  /* Whether the scan RESOLVED travels with it. A rising share of misses is the
+   * signature of the iOS container split described below, and it is invisible
+   * in a count of scans alone. */
+  if (CORE) CORE.track('qr_scanned', { resolved: !!found });
   if (location.hash && history.replaceState) {
     history.replaceState(null, '', location.pathname + location.search);
   }

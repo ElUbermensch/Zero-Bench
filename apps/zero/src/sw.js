@@ -74,7 +74,14 @@ self.addEventListener('fetch', (e) => {
   /* `(\/|$)`, not `\/`: the trailing-slash-less `/bench` is redirected at the
    * edge when there is a network, and answered by THIS worker's offline
    * fallback when there is not -- with Zero's page, under Bench's URL. */
-  if (/(^|\/)bench(\/|$)/.test(url.pathname)) return;
+  /* /admin/ is the owner dashboard, and its case is WORSE than Bench's rather
+   * than the same. Bench registers a narrower worker that eventually wins; the
+   * dashboard deliberately ships no worker at all, because every number on it
+   * comes from a query and a cached shell could only ever show stale figures.
+   * So nothing would ever take the scope back -- without this guard, opening
+   * the dashboard on a phone that has Zero installed serves Zero's page, at
+   * the dashboard's URL, for good. */
+  if (/(^|\/)(bench|admin)(\/|$)/.test(url.pathname)) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
       if (res && res.ok && res.type === 'basic') {

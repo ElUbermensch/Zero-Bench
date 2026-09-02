@@ -53,6 +53,7 @@ const le = (a, b) => (r) => r[a] == null || r[b] == null || Number(r[a]) <= Numb
  * every row Zero pushes without naming the app. gen_random_uuid()/auth.uid()/
  * now()/CURRENT_DATE are excluded: the mock supplies those itself. */
 const SCHEMA_DEFAULTS = {
+  analytics_event:     { metadata: {} },
   batches:             { quarantined: false },
   brass_lots:          { nickel: false, marks: {}, firings: 0, expected_firings: 6,
                          cost_total: 0, track_individual: false, retired: false },
@@ -70,6 +71,11 @@ const SCHEMA_DEFAULTS = {
 /* NOT NULL and no default: the client must send these on every push, tombstone
  * included -- which is why tombstones are a PATCH. 37 columns, 15 tables. */
 const NOT_NULL = {
+  /* The real table also denies SELECT to everyone but an admin, which this
+   * mock does not model -- its per-user filter would hand a user their own
+   * events back. Nothing in either app reads the table, and rls_test9.sql is
+   * where that denial is actually proven, against Postgres. */
+  analytics_event:     ['source_app', 'event_name'],
   batches:             ['serial', 'recipe_id', 'qty_loaded', 'qty_remaining'],
   brass_events:        ['brass_lot_id', 'kind'],
   brass_lots:          ['serial', 'cartridge', 'headstamp', 'qty_initial', 'qty_on_hand'],
@@ -89,6 +95,9 @@ const NOT_NULL = {
 };
 
 const CHECKS = {
+  analytics_event: [
+    ['analytics_event_source_app_check', oneOf('source_app', ['bench', 'zero'])],
+  ],
   batches: [
     ['batch_remaining_within_loaded', le('qty_remaining', 'qty_loaded')],
     ['batches_qty_loaded_check',      gt('qty_loaded', 0)],

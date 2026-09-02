@@ -70,7 +70,17 @@ const ZeroCore = (() => {
     // Shared surface: public-read, own-write. Writes ride the same outbox so
     // publishing works offline at a match; reads go through leaderboard().
     'leaderboard_profiles', 'leaderboard_entries',
+    /* Product telemetry. Write-only from a client: the server has an insert
+     * policy and no select policy, so a pull would come back empty for
+     * everyone except an admin -- and an admin reads the rollup views, not
+     * this. It is listed here because push walks cfg.tables and that is the
+     * only machinery it needs; no caller ever names it in sync's `tables`. */
+    'analytics_event',
   ]);
+
+  /** The one table in TABLES that is telemetry rather than the user's work.
+   *  Carved out of the outbox badge and the data:changed fan-out below. */
+  const TELEMETRY = 'analytics_event';
 
   /** Columns the server owns. Sending them is at best ignored and at worst
    *  lets a client clock decide conflict resolution. */
@@ -305,6 +315,12 @@ const ZeroCore = (() => {
      * Reported as a SYNC_ERROR with phase 'persist': it is not a rejected row
      * (the server never saw it) and it is not a network failure. Both apps
      * already listen for sync errors. */
+    /* Queued rows that are the USER's work, i.e. everything but telemetry.
+     * Declared here rather than beside pendingCount because persistOutbox runs
+     * during startup, before the later consts exist. */
+    const userPending = () =>
+      outbox.reduce((n, e) => n + (e.table === TELEMETRY ? 0 : 1), 0);
+
     const persistOutbox = () => {
       const okOutbox = store.set(K.outbox, outbox) !== false;
       const okRejected = store.set(K.rejected, rejected) !== false;
@@ -312,9 +328,9 @@ const ZeroCore = (() => {
         emit(EVENTS.SYNC_ERROR, { phase: 'persist', error: {
           message: 'the outbox could not be written to this device — '
                  + 'queued work is in memory only and will not survive a relaunch',
-          pending: outbox.length } });
+          pending: userPending() } });
       }
-      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length,
+      emit(EVENTS.OUTBOX_CHANGED, { pending: userPending(), rejected: rejected.length,
                                     durable: okOutbox && okRejected });
     };
 
@@ -453,6 +469,14 @@ const ZeroCore = (() => {
       }
       // With email confirmation on, signup returns a user but no tokens.
       if (json.access_token) setSession(shapeSession(json));
+      /* Tracked HERE rather than off AUTH_SIGNED_IN, which fires for a sign-up,
+       * a sign-in and a session restored from storage alike -- the call site is
+       * the only place that still knows which of the three this was.
+       *
+       * A signup awaiting email confirmation has no session, so track() drops
+       * it and the account is counted when they first sign in instead. */
+      trackOpen();
+      track('sign_up', {});
       return { ok: true, session, needsConfirmation: !json.access_token, user: json.user };
     }
 
@@ -470,6 +494,8 @@ const ZeroCore = (() => {
         return { ok: false, error: json };
       }
       setSession(shapeSession(json));
+      trackOpen();
+      track('sign_in', {});
       return { ok: true, session };
     }
 
@@ -498,6 +524,8 @@ const ZeroCore = (() => {
         return { ok: false, error: json };
       }
       setSession(shapeSession(json));
+      trackOpen();
+      track('sign_in_anonymous', {});
       return { ok: true, session };
     }
 
@@ -608,6 +636,10 @@ const ZeroCore = (() => {
        * it just cannot hold up the local state change. The token is captured
        * before the clear, since the request needs it. */
       const headers = (session && session.access_token) ? authHeaders() : null;
+      /* Before the clear, not after: track() attributes to the CURRENT user and
+       * there is about to not be one. The row then waits in the outbox until
+       * somebody signs in again -- which is also why it carries occurred_at. */
+      track('sign_out', {});
       setSession(null, 'user');
       cursors = {};
       store.set(K.cursors, cursors);
@@ -669,7 +701,13 @@ const ZeroCore = (() => {
       const entry = { table, row: clean, op: op || 'upsert', queuedAt: nowMs() };
       if (at >= 0) outbox[at] = entry; else outbox.push(entry);
       persistOutbox();
-      emit(EVENTS.DATA_CHANGED, { table, ids: [row.id], origin: 'local' });
+      /* Telemetry is not the user's data and must not look like it. Zero
+       * re-renders on data:changed, so announcing an analytics row would
+       * repaint the screen every time the app measured itself -- and a render
+       * that tracks anything would then feed itself. */
+      if (table !== TELEMETRY) {
+        emit(EVENTS.DATA_CHANGED, { table, ids: [row.id], origin: 'local' });
+      }
       return row.id;
     }
 
@@ -690,7 +728,12 @@ const ZeroCore = (() => {
     const remove = (table, id) =>
       enqueue(table, { id, deleted_at: new Date().toISOString() }, 'delete');
 
-    const pendingCount = () => outbox.length;
+    /* The badge counts the user's unsent WORK. Telemetry rides the same queue
+     * for the retry and chunking machinery, but a shooter looking at "3 items
+     * not yet synced" means three of their records, and a number that never
+     * reaches zero because the app keeps measuring itself is a number they
+     * stop believing. */
+    const pendingCount = () => userPending();
     /* How many refusals are kept. This is a retry queue now as well as a
      * diagnostic, so the cap is what a user can still get back. */
     const REJECTED_MAX = 500;
@@ -749,6 +792,92 @@ const ZeroCore = (() => {
       return n;
     };
     const pendingFor = (table) => outbox.filter(e => e.table === table).length;
+
+    /* ----------------------------------------------------------- telemetry */
+    /* One id per app load. Groups the events of a single visit without
+     * borrowing the word "session", which both apps have already spent: Zero on
+     * range_sessions and Bench on loading sessions. */
+    const usageSessionId = uuid();
+    const usageStartedMs = nowMs();
+    let openTracked = false;
+
+    /**
+     * Record a product-usage event. Fire-and-forget: it queues like any other
+     * write and leaves on the next sync, so it works at the range with no
+     * signal.
+     *
+     * Every row carries the SAME keys, deliberately. pushTable groups the
+     * outbox by key signature because PostgREST builds one column list for a
+     * bulk insert, so an event that omitted `metadata` would be sent as its own
+     * separate request rather than riding along with the others.
+     *
+     * Returns null when there is nobody to attribute the event to. The insert
+     * policy is `user_id = auth.uid()`, so a signed-out event would queue,
+     * fail, and land in the rejected list that BOTH apps show the user --
+     * telemetry must never produce a scary number on someone's sync screen.
+     * The cost is that a visit which never signs in is not counted.
+     */
+    function track(eventName, metadata) {
+      if (cfg.telemetry === false || !eventName) return null;
+      const u = getUser();
+      if (!u || !u.id) return null;
+      return enqueue(TELEMETRY, {
+        id: uuid(),
+        user_id: u.id,
+        source_app: cfg.appId,
+        event_name: String(eventName),
+        usage_session_id: usageSessionId,
+        metadata: (metadata && typeof metadata === 'object') ? metadata : {},
+        // The client's clock, kept for events that queue offline for days. The
+        // server stamps created_at and the rollups group on that.
+        occurred_at: new Date().toISOString(),
+      }, 'upsert');
+    }
+
+    /* Exactly one app_open per visit, and only once there is a user to hang it
+     * on. A visit that starts signed out and then signs in still counts, which
+     * is why the auth paths call this and not just create(). */
+    function trackOpen() {
+      if (openTracked) return;
+      // Only a row that actually queued counts. A signed-out create() returns
+      // null here, and the next sign-in is what finally opens the visit.
+      if (track('app_open', {}) !== null) openTracked = true;
+    }
+
+    /**
+     * Best-effort visit duration.
+     *
+     * visibilitychange and pagehide are the only signals a browser offers here
+     * and neither is promised: a mobile browser reclaiming a backgrounded tab
+     * is free to run nothing at all. So the duration this emits covers the
+     * visits that got to report, not all of them -- v_analytics_visits says the
+     * same thing in SQL. Visit COUNT comes from app_open and is reliable;
+     * duration is an estimate over a self-selected sample.
+     *
+     * The write is a synchronous localStorage queue, not a request, which is
+     * what makes it survivable in a pagehide handler at all.
+     */
+    function attachSessionListeners() {
+      if (typeof document === 'undefined' || typeof window === 'undefined') return () => {};
+      let reported = 0;
+      const report = (force) => {
+        if (!force && document.visibilityState !== 'hidden') return;
+        const now = nowMs();
+        // visibilitychange and pagehide both fire on the same departure. One
+        // visit, one row.
+        if (now - reported < 2000) return;
+        reported = now;
+        track('app_background', { duration_ms: now - usageStartedMs });
+      };
+      const onVisibility = () => report(false);
+      const onPageHide = () => report(true);
+      document.addEventListener('visibilitychange', onVisibility);
+      window.addEventListener('pagehide', onPageHide);
+      return () => {
+        document.removeEventListener('visibilitychange', onVisibility);
+        window.removeEventListener('pagehide', onPageHide);
+      };
+    }
 
     /* ---------------------------------------------------------------- pull */
     /* `commit` is false when nobody is going to do anything with the rows.
@@ -1596,6 +1725,17 @@ const ZeroCore = (() => {
         p_since_msg: relay.sinceMsg,
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'poll', error: r.error }); return r; }
+      /* The relay can END during the await above, and this function held a
+       * reference from before it. stopRelay() sets `relay` to null -- from
+       * endRelay, from a sign-out, or from the ended branch at the bottom of
+       * this very function on an earlier tick -- and the next line would then
+       * dereference null and take the whole poll loop down with an uncaught
+       * TypeError inside a timer, where nothing is left to catch it.
+       *
+       * pumpRelay re-checks after ITS await for the same reason, one function
+       * below. This one did not, and the guard at the top only covers the state
+       * before the request went out. */
+      if (!relay || relay.stopped) return { ok: false, reason: 'no-relay' };
       const st = r.data || {};
 
       /* Dedupe by id, because relay_state uses a >= cursor: rows sharing the
@@ -1825,6 +1965,8 @@ const ZeroCore = (() => {
       signUp, signIn, signInWithOtp, signOut, refresh,
       getSession, getUser, isSignedIn,
       upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected, retryRejected,
+      track, attachSessionListeners,
+      get usageSessionId() { return usageSessionId; },
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
@@ -1859,6 +2001,19 @@ const ZeroCore = (() => {
      * default: it shipped un-opted-in from both apps, and the consequence was
      * a queued write that could never leave the device. */
     if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    /* Telemetry attaches itself for the same reason connectivity does: the
+     * comment above is the record of what opt-in got us last time. Opt OUT with
+     * `telemetry: false`, which the SQL suite and the mock both use to keep
+     * their outboxes to what they queued on purpose.
+     *
+     * trackOpen() runs after the session has been restored from storage, so a
+     * returning user is counted on launch; a signed-out launch records nothing
+     * until they sign in, and signIn/signUp call trackOpen() for that. */
+    if (cfg.telemetry !== false) {
+      instance.detachSession = attachSessionListeners();
+      trackOpen();
+    }
 
     /* A confirmation link lands here carrying a session in the URL fragment.
      *

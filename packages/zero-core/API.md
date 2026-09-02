@@ -90,6 +90,8 @@ indicates a session that died on its own.
 | `startAutoSync(apply)` / `stopAutoSync()` | periodic sync |
 | `resetCursors()` | forces a full re-pull |
 | `uuid()` | client-side id generation |
+| `track(event, metadata)` | queue a product-usage event; see §8 |
+| `usageSessionId` | the id every event from this app load shares |
 
 `apply(table, rows)` is your callback for writing pulled rows into local state. It is
 passed through `sync`, `attachBrowserListeners` and `startAutoSync`.
@@ -206,7 +208,44 @@ instead of refreshing again.
 
 ---
 
-## 8. Running the tests
+## 8. Telemetry
+
+`track(name, metadata)` queues a row on `analytics_event`, which the owner dashboard
+reads through admin-only rollups. It rides the ordinary outbox, so it works offline
+and pushes on the next sync like anything else.
+
+```js
+core.track('batch_created', { kind: 'batch' });
+```
+
+Four events are emitted by zero-core itself, so an app gets them for free:
+`app_open` (once per visit), `sign_up`, `sign_in`, `sign_in_anonymous`, `sign_out`,
+and `app_background` carrying `duration_ms`. Everything else is the app's own call.
+
+**Opt out with `telemetry: false`.** The suite sets it, and so does the dashboard —
+it must not appear in its own numbers.
+
+Four things about it are deliberate and easy to undo by accident:
+
+- **It never appears in `pendingCount()` or `outbox:changed`.** That number is the
+  user's unsent *work*; a badge that never reaches zero because the app keeps
+  measuring itself is a badge people stop believing.
+- **It does not emit `data:changed`.** Zero re-renders on that event, so announcing
+  telemetry would repaint the screen every time the app measured itself — and a
+  render that tracks anything would then feed itself.
+- **Every event carries the same keys.** `pushTable` groups the outbox by key
+  signature, because PostgREST builds one column list for a bulk insert. An event
+  that omitted `metadata` would be sent as its own request.
+- **No user, no row.** `track()` returns `null` when signed out. The insert policy is
+  `user_id = auth.uid()`, so the alternative is a queued write that is refused and
+  lands in the rejected list both apps show the user. The cost is that a visit which
+  never signs in is not counted, and that is the honest trade.
+
+`created_at` is server-stamped and stripped from the payload like everywhere else;
+`occurred_at` carries the client's clock, for events that queue offline for days. The
+rollups group on `created_at`, the one a client cannot move.
+
+## 9. Running the tests
 
 ```bash
 node test-zero-core.mjs

@@ -135,6 +135,8 @@ paste each one whole rather than in pieces.
 | `0002_leaderboard.sql` | the one deliberately public table, and the handle system |
 | `0003_keepalive.sql` | the function that stops the project pausing |
 | `0004_relay.sql` | pair fire: relays, participants, shots, feed, and the join throttle |
+| `0015_admin_role.sql` | `profiles.is_admin`, and the `is_admin()` the analytics policies ask |
+| `0016_analytics_events.sql` | `analytics_event` and the four rollups the owner dashboard reads |
 
 If you have the Supabase CLI instead:
 
@@ -273,7 +275,57 @@ It cleans up after itself and cannot see your own rows.
 2. **Prove the relay works before you rely on it.** Open a session, tap **● go live**,
    read the code to a second device (a laptop browser is fine), tap **● join**. You are
    looking for shots appearing within a few seconds. Do this at home, not on the line.
-3. **Then** put real data in.
+3. **Make yourself the admin** (see below), if you want the dashboard.
+4. **Then** put real data in.
+
+---
+
+## The owner dashboard
+
+`/admin/` is a read-only page showing traffic, sign-ups and feature usage across both
+apps. It is not a PWA and ships no service worker: every number on it is a query, so
+there is nothing useful to cache.
+
+**Nobody is an admin until you say so, and there is no in-app way to become one.**
+After creating your account, run this once in **SQL Editor**:
+
+```sql
+update public.profiles set is_admin = true
+ where id = (select id from auth.users where email = 'you@example.com');
+```
+
+Then open `/admin/` and sign in with that account. Anyone else who finds the URL gets
+a sign-in box and, if they sign in, a page telling them they are not an admin — the
+row-level security in `0016` is what actually withholds the data, so this holds even
+against someone calling the REST API directly.
+
+**What is collected.** Sign-ups, sign-ins, sign-outs, one `app_open` per visit, a
+best-effort `app_background` carrying visit duration, screens opened, and the feature
+actions each app tracks (records created and edited, labels printed, QR scans, shots
+logged, sessions and matches created, relays hosted and joined, leaderboard posts).
+No IP addresses, no device fingerprints, no free-text content — the `metadata` column
+carries small facts like `{"kind":"batch"}`, never what was typed.
+
+**Three things worth knowing before you rely on the numbers:**
+
+- **A signed-out visit is not counted.** Events are attributed to a user, and the
+  insert policy requires it, so someone who opens an app and never signs in leaves no
+  trace. Visit counts are of *signed-in* visits.
+- **Visit duration is an estimate, and visit count is not.** Duration comes from
+  `visibilitychange`/`pagehide`, and a mobile browser killing a backgrounded tab is
+  free to run neither. The dashboard says which visits reported.
+- **Daily user counts cannot be added up.** The same person on Monday and Tuesday is
+  one person, not two. The dashboard shows the busiest day rather than a sum, on
+  purpose.
+
+**It grows.** Screen views make this the busiest table in the schema by a wide margin.
+Nothing prunes it today; on the free tier's 500 MB, keep an eye on it and add a
+retention job (delete rows older than N months) before it becomes the reason you need
+a bigger plan.
+
+**Monetising this is a disclosure question as well as a technical one.** Once real
+customers are being measured, a privacy policy saying what is collected and why is a
+business step this repo cannot do for you.
 
 ---
 
@@ -297,6 +349,7 @@ It cleans up after itself and cannot see your own rows.
 ```
 site/            Zero
 site/bench/      Bench
+site/admin/      the owner dashboard
 ```
 
 Zero is at the root because it is the app with existing users. They are bookmarked

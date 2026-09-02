@@ -288,12 +288,34 @@ apps. It is not a PWA and ships no service worker: every number on it is a query
 there is nothing useful to cache.
 
 **Nobody is an admin until you say so, and there is no in-app way to become one.**
-After creating your account, run this once in **SQL Editor**:
+After creating your account, run this once in **SQL Editor** — the web page in the
+Supabase dashboard, the same one the migrations went into. It is SQL, not a shell
+command; pasting it into PowerShell gets you `The term 'update' is not recognized`.
 
 ```sql
-update public.profiles set is_admin = true
- where id = (select id from auth.users where email = 'you@example.com');
+insert into public.profiles (id, is_admin)
+select id, true from auth.users where email = 'you@example.com'
+on conflict (id) do update set is_admin = true;
 ```
+
+**An `update` will not do here, and the reason is a trap.** Nothing creates a
+`profiles` row for you — there is no trigger on `auth.users`; a row appears the
+first time an app syncs one. So a fresh account that has signed up but not yet
+used Zero or Bench has no profile at all, and `update ... where id = (...)` matches
+nothing, reports success, and changes nothing. You would then be told you are not an
+admin by a dashboard that is working correctly. The insert above covers both cases.
+
+Check it took, rather than assuming:
+
+```sql
+select u.email, coalesce(p.is_admin, false) as is_admin
+  from auth.users u
+  left join public.profiles p on p.id = u.id
+ where u.email = 'you@example.com';
+```
+
+One row, `is_admin` true. No row at all means the email does not match an account —
+check for a typo, or that you signed up with a different address.
 
 Then open `/admin/` and sign in with that account. Anyone else who finds the URL gets
 a sign-in box and, if they sign in, a page telling them they are not an admin — the

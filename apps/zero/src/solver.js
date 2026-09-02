@@ -167,7 +167,8 @@ const MAX_FLIGHT_S = 20;
  * as a solution — a full table of numbers, all of them nonsense, none of them
  * flagged. A negative BC did the same by a different route, the bullet
  * accelerating under negative drag to a perfectly plausible-looking 13 MOA. */
-function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, dt = 0.0005 }) {
+function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, dt = 0.0005,
+                    atYds = null }) {
   const rho = (densityRatio === undefined || densityRatio === null) ? 1 : densityRatio;
   if (!Number.isFinite(mv) || mv <= 0 || mv > 20000) return [];
   if (!Number.isFinite(bc) || bc < BC_MIN || bc > BC_MAX) return [];
@@ -180,6 +181,27 @@ function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, 
   const cs = speedOfSound(tempF);
   const maxSteps = Math.ceil(MAX_FLIGHT_S / dt);
   const zr = Math.round(zeroYd);
+
+  /* ── Which yard lines to actually build a row for ────────────────────────
+   * A row is an object, and building one for every yard out to 650 when the
+   * caller is going to read four of them is most of what a fit spends its time
+   * on: the truing sweep asks for the drop at the anchors and at the zero and
+   * throws the rest away, several hundred times over. `atYds` says which lines
+   * the caller wants; omitting it keeps the old behaviour of every one, which
+   * is what the table the SHOOTER sees needs.
+   *
+   * The zero line is always included whether the caller asked for it or not —
+   * the launch-angle search below reads it — and the flight stops at the last
+   * line wanted rather than at maxYd, because nothing past it is ever read. */
+  let wanted = null;
+  if (atYds) {
+    const set = new Set([zr]);
+    for (const y of atYds) {
+      const r = Math.round(y);
+      if (Number.isFinite(r) && r >= 1 && r <= maxYd) set.add(r);
+    }
+    wanted = [...set].sort((a, b) => a - b);
+  }
   const step = (state, launchAngle) => {
     let { x, y, vx, vy, t } = state;
     const v = Math.hypot(vx, vy);
@@ -197,24 +219,27 @@ function integrate({ mv, bc, sightHeightIn, zeroYd, maxYd, densityRatio, tempF, 
     let s = { x: 0, y: -sightHeightIn / 12, t: 0,
               vx: mv * Math.cos(launchAngle), vy: mv * Math.sin(launchAngle) };
     const out = [];
-    let nextYd = 1;
-    const maxFt = maxYd * 3;
+    let wi = 0;
+    const lastYd = wanted ? wanted[wanted.length - 1] : maxYd;
+    const maxFt = lastYd * 3;
     let guard = 0;
     let bailed = false;
     while (s.x < maxFt) {
       if (guard++ >= maxSteps) { bailed = true; break; }
       const prev = s;
       s = step(s, launchAngle);
-      while (nextYd <= maxYd && s.x >= nextYd * 3) {
+      for (;;) {
+        const yd = wanted ? (wi < wanted.length ? wanted[wi] : 0) : (wi + 1 <= maxYd ? wi + 1 : 0);
+        if (!yd || s.x < yd * 3) break;
         // linear interpolation onto the exact yard line
-        const f = (nextYd * 3 - prev.x) / (s.x - prev.x || 1);
-        out[nextYd] = {
-          yd: nextYd,
+        const f = (yd * 3 - prev.x) / (s.x - prev.x || 1);
+        out[yd] = {
+          yd,
           dropFt: prev.y + (s.y - prev.y) * f,
           v: Math.hypot(prev.vx, prev.vy) + (Math.hypot(s.vx, s.vy) - Math.hypot(prev.vx, prev.vy)) * f,
           t: prev.t + (s.t - prev.t) * f,
         };
-        nextYd++;
+        wi++;
       }
       if (s.vx <= 0) break;
     }
@@ -303,6 +328,78 @@ function dropToMoa(dropFt, yd) {
  */
 const SEARCH_BOX = { mvLo: 0.80, mvHi: 1.15, bcLo: 0.60, bcHi: 1.60 };
 
+/* ── The coarse grid, and why its STEP is what is declared ───────────────
+ * The coarse pass finds the BASIN and the local search below finds the bottom
+ * of it. A descent method cannot cross a ridge, so whatever basin the coarse
+ * pass lands in is the basin the answer comes from, and the coarse pass's
+ * resolution is what decides whether that is the right one.
+ *
+ * That makes the coarse STEP the quantity that has to hold, not the coarse
+ * step COUNT — and it shipped as a count. Ten steps across the box, whatever
+ * the box was; so when the box was widened from 0.92–1.08 × 0.75–1.25 to
+ * 0.80–1.15 × 0.60–1.60 — 2.2× in velocity and 2× in drag, and the widening
+ * itself was right — the coarse resolution silently fell from 0.016/0.05 to
+ * 0.035/0.10 and the fit began landing in the wrong basin.
+ *
+ * Measured over 240 noiseless synthetic rifles whose true parameters lie
+ * strictly inside the box (mv 2200–3400, G7 BC 0.18–0.40, three anchor sets,
+ * box errors of ±4% on velocity and ±15% on BC). With the ten-step count and
+ * the fenced refinement grids it shipped with, 51 of those 240 predictions at
+ * 1000 yd fell OUTSIDE their own interval, the worst by 3.55 MOA, every one at
+ * an RMS that passes the half-minute gate — a silent miss, which is the worst
+ * kind. Both halves matter and neither is enough on its own: with the local
+ * search in place but the coarse grid left at ten steps, 93 of 240 still fail
+ * to reach the true parameters and the worst 1000 yd error is 2.10 MOA. With
+ * both, it is 4 of 240 and 0.41 MOA.
+ *
+ * So the step is declared and the count is derived from whatever the box is.
+ * Widen the box again and the grid densifies with it, which is the property
+ * that was missing. */
+const COARSE_STEP = { mv: 0.016, bc: 0.05 };
+
+/* ── What the denser grid costs, and how it is paid for ──────────────────
+ * Deriving the count from the step takes the coarse pass from 11×11 to 23×21,
+ * four times the evaluations, and each evaluation integrates once per distinct
+ * set of atmospheric conditions among the anchors — which in the app is once
+ * per session, because a session records its own temperature. Three anchors at
+ * three temperatures was already 1.0 s before the grid was densified.
+ *
+ * The integration step is what pays for it. The coarse pass only has to RANK
+ * candidates well enough to pick the basin, and a 3 ms step ranks them as well
+ * as a 0.5 ms one: measured against the 0.5 ms reference over five loads
+ * (mv 2200–3400, BC 0.18–0.40) out to 1200 yd, a 3 ms step moves the come-up
+ * by at most 0.013 MOA — against a gate of 0.5 MOA and an interval floor of
+ * 0.15. The local search, whose winner becomes the answer and whose SSE is
+ * reported as rmsMoa, runs at the full 0.5 ms step, and so does the table that
+ * is kept. Running the coarse pass at the fine step too costs 3× the whole
+ * fit's time and measurably changes nothing.
+ *
+ * The other half of the cost is `atYds` — see integrate. Between them the
+ * fit is five times faster than it was before the grid was densified. */
+const FIT_DT = { coarse: 0.003, fine: 0.0005 };
+
+/* The finite-difference steps used to measure how much each anchor's come-up
+ * moves per unit of velocity and of drag — the design matrix the interval is
+ * built on. Small enough that the curve is straight across them and large
+ * enough that the difference is not integration noise: at 0.004 of mvScale
+ * (11 fps against a 2800 box) a come-up moves by a few hundredths of a minute,
+ * which is hundreds of times the 0.5 ms step's own error. */
+const FD_STEP = { mv: 0.004, bc: 0.012 };
+
+/* What a confirmed zero is worth as a reading. A shooter reads a come-up off a
+ * target and off a turret, both to about a tenth of a minute, and the app
+ * stores it rounded to a hundredth — and a "confirmed zero" is really the
+ * centre of a group, which carries the group's own dispersion with it. A tenth
+ * and a half is the number the interval is scaled by; it is a prior, it is
+ * stated here rather than buried, and the coverage it produces is measured. */
+const READ_MOA = 0.15;
+
+/* How badly the anchors may leave the drag unpinned before the fit stops being
+ * an answer. In units of bcScale, so 0.8 is "the BC is pinned to within eight
+ * tenths of itself". Chosen by measurement — see the note where it is
+ * applied. */
+const DEGENERATE_BC_SIGMA = 0.8;
+
 /* A fit to a shooter's OWN confirmed zeros cannot physically be much worse
  * than a couple of tenths of a minute: the anchors came off this rifle, and a
  * two-parameter curve through three points from one rifle either passes close
@@ -327,7 +424,46 @@ const SEARCH_BOX = { mvLo: 0.80, mvHi: 1.15, bcLo: 0.60, bcHi: 1.60 };
  * rather than by one. */
 const RMS_GATE_MOA = 0.5;
 
+/* The atmosphere assumed for an anchor that recorded none of its own. See the
+ * contract note at the top of trueToDope. */
+function anchorAtmosphere(base = {}) {
+  const tempF = Number.isFinite(base.zeroTempF) ? base.zeroTempF : STD_TEMP_F;
+  if (Number.isFinite(base.zeroDensityRatio) && base.zeroDensityRatio > 0)
+    return { densityRatio: base.zeroDensityRatio, tempF, pressureInHg: null };
+  if (Number.isFinite(base.zeroPressureInHg) && base.zeroPressureInHg > 0)
+    return { densityRatio: airDensityRatio({ tempF, pressureInHg: base.zeroPressureInHg }),
+             tempF, pressureInHg: base.zeroPressureInHg };
+  return { densityRatio: 1, tempF, pressureInHg: null };
+}
+
 function trueToDope(anchors, base) {
+  /* ── What an anchor with no atmosphere of its own is assumed to be ───────
+   * It used to be standard sea level, flatly — densityRatio 1, 59°F — and that
+   * threw away a number the shooter had already typed. Only the temperature is
+   * recorded per session; the station pressure the zeros were confirmed at is
+   * a field on the solver screen, and it applies to ALL of those zeros, the
+   * ones with a temperature and the ones without alike. Discarding it for the
+   * ones without meant a shooter at five thousand feet who correctly entered
+   * 24.9 inHg had it honoured for two anchors out of three and replaced with
+   * sea level for the third.
+   *
+   * Measured, before this: zeros at 200/300/600 (59/44/86°F) at 24.9 inHg,
+   * predicting 1000 yd on a 70°F day. All three tagged: 30.59 against a
+   * physical truth of 30.63. The 300 untagged: 32.06 — 1.43 MOA high, outside
+   * its own interval, at an RMS of 0.056 that reads as an excellent fit.
+   *
+   * So the base carries the assumption, and the CONTRACT is:
+   *   base.zeroDensityRatio  — the density to assume, if the caller has it;
+   *   base.zeroPressureInHg  — or the station pressure to derive it from,
+   *                            which is the field the solver screen actually
+   *                            has, combined with base.zeroTempF or, failing
+   *                            that, the standard 59°F, because nothing was
+   *                            recorded and inventing a temperature would be
+   *                            worse than admitting to the standard one;
+   *   neither                — standard sea level, which is what it was.
+   * An anchor that carries its own densityRatio is unaffected by all of it. */
+  const assumed = anchorAtmosphere(base);
+
   /* Yardages are rounded once, here, because the trajectory table is indexed
    * per whole yard and reading row 1000 while dividing by 1000.4 is a
    * different number than reading row 1000 and dividing by 1000. */
@@ -336,12 +472,12 @@ function trueToDope(anchors, base) {
     .map(a => ({
       ...a,
       yd: Math.round(a.yd),
-      /* Each anchor's OWN air. An anchor with no recorded atmosphere is
-       * assumed to have been confirmed in standard conditions — which is the
-       * assumption the shooter is already making when they dial that number,
-       * so it is not a new one, but it is one the UI should say out loud. */
-      densityRatio: Number.isFinite(a.densityRatio) ? a.densityRatio : 1,
-      tempF: Number.isFinite(a.tempF) ? a.tempF : STD_TEMP_F,
+      /* Each anchor's OWN air, and the shooter's stated zero conditions for an
+       * anchor that has none of its own. `atmoRecorded` stays what it was: it
+       * means this anchor carried its conditions, not that a sensible
+       * assumption was available for it. */
+      densityRatio: Number.isFinite(a.densityRatio) ? a.densityRatio : assumed.densityRatio,
+      tempF: Number.isFinite(a.tempF) ? a.tempF : assumed.tempF,
       atmoRecorded: Number.isFinite(a.densityRatio),
     }))
     .sort((a, b) => a.yd - b.yd);
@@ -354,9 +490,18 @@ function trueToDope(anchors, base) {
   const anchorsHaveAtmosphere = pts.every(p => p.atmoRecorded);
 
   /* One anchor, or several all at one distance, cannot separate velocity from
-   * drag: raise one and lower the other and the curve passes through the same
-   * single point. Saying so is the honest answer; picking a pair anyway and
-   * reporting it as trued would be a fabrication. */
+   * drag at all: raise one and lower the other and the curve passes through
+   * the same single point. Saying so is the honest answer; picking a pair
+   * anyway and reporting it as trued would be a fabrication.
+   *
+   * This is only the cheap pre-check, and it is worth being clear that it is
+   * no longer the thing that decides whether the anchors CAN separate the two.
+   * A hundred yards of spread was chosen for being a round number and it
+   * admits 100/200/300, where they are 0.9999 collinear. The real test is the
+   * leverage the fit produces, and it happens after the fit because that is
+   * where the leverage exists — see DEGENERATE_BC_SIGMA. What survives here is
+   * the case that needs no fit to reject: fewer than two anchors, or two at
+   * the same place, where there is nothing to run a search over. */
   const canTrue = pts.length >= 2 && spread >= 100;
 
   /* ── Fitting the anchors in the air they were shot in ───────────────────
@@ -379,19 +524,23 @@ function trueToDope(anchors, base) {
   const groups = new Map();
   for (const p of pts) {
     const k = `${p.densityRatio}|${p.tempF}`;
-    if (!groups.has(k)) groups.set(k, { densityRatio: p.densityRatio, tempF: p.tempF, pts: [] });
+    if (!groups.has(k)) groups.set(k, { densityRatio: p.densityRatio, tempF: p.tempF, pts: [], yds: [] });
     groups.get(k).pts.push(p);
+    groups.get(k).yds.push(p.yd);
   }
   const fitMaxYd = Math.max(far.yd, base.zeroYd || 0) + 50;
 
-  const evaluate = (mvScale, bcScale) => {
+  const evaluate = (mvScale, bcScale, dt = FIT_DT.fine) => {
     let sse = 0, n = 0;
     const resid = [];
     for (const g of groups.values()) {
       const table = integrate({
         mv: base.mv * mvScale, bc: base.bc * bcScale,
         sightHeightIn: base.sightHeightIn, zeroYd: base.zeroYd,
-        maxYd: fitMaxYd, densityRatio: g.densityRatio, tempF: g.tempF,
+        maxYd: fitMaxYd, densityRatio: g.densityRatio, tempF: g.tempF, dt,
+        /* Only the lines this group's anchors sit on. The fit reads those and
+         * the zero line and nothing else, several hundred times over. */
+        atYds: g.yds,
       });
       for (const p of g.pts) {
         const row = table[p.yd];
@@ -428,7 +577,7 @@ function trueToDope(anchors, base) {
       mvScale: 1, bcScale: 1, mv: base.mv, bc: base.bc,
       table: flyToday(1, 1), tempF: baseTemp,
       rmsMoa: Number.isFinite(r.sse) ? Math.sqrt(r.sse) : null,
-      anchors: pts, anchorsHaveAtmosphere, ...extra,
+      anchors: pts, anchorsHaveAtmosphere, assumedAnchorAtmosphere: assumed, ...extra,
     };
   };
 
@@ -438,31 +587,83 @@ function trueToDope(anchors, base) {
       : 'all the confirmed zeros are within 100 yards of each other, which cannot separate velocity from drag');
   }
 
-  let best = { sse: Infinity, mvScale: 1, bcScale: 1, resid: null };
   const B = SEARCH_BOX;
-  /* Clamped to the declared box, so that "the search space is 0.80 to 1.15"
-   * is a fact about the code rather than a description of the first sweep. */
-  const sweep = (mvLo, mvHi, bcLo, bcHi, steps) => {
-    const m0 = Math.max(B.mvLo, mvLo), m1 = Math.min(B.mvHi, mvHi);
-    const b0 = Math.max(B.bcLo, bcLo), b1 = Math.min(B.bcHi, bcHi);
-    for (let i = 0; i <= steps; i++) {
-      for (let j = 0; j <= steps; j++) {
-        const ms = m0 + (m1 - m0) * i / steps;
-        const bs = b0 + (b1 - b0) * j / steps;
-        const r = evaluate(ms, bs);
-        if (r.sse < best.sse) best = { sse: r.sse, mvScale: ms, bcScale: bs, resid: r.resid };
-      }
+  const clampM = (v) => Math.min(B.mvHi, Math.max(B.mvLo, v));
+  const clampB = (v) => Math.min(B.bcHi, Math.max(B.bcLo, v));
+
+  /* ── The coarse pass: which basin ───────────────────────────────────────
+   * A full grid over the declared box, clamped to it, so that "the search
+   * space is 0.80 to 1.15" is a fact about the code rather than a description
+   * of the first sweep. Its step is COARSE_STEP and its COUNT falls out of the
+   * box — see the note there for why that is the way round it has to be. */
+  const mSteps = Math.ceil((B.mvHi - B.mvLo) / COARSE_STEP.mv);
+  const bSteps = Math.ceil((B.bcHi - B.bcLo) / COARSE_STEP.bc);
+  const mStep = (B.mvHi - B.mvLo) / mSteps, bStep = (B.bcHi - B.bcLo) / bSteps;
+  let coarse = { sse: Infinity, mvScale: NaN, bcScale: NaN };
+  for (let i = 0; i <= mSteps; i++) {
+    for (let j = 0; j <= bSteps; j++) {
+      const ms = B.mvLo + mStep * i, bs = B.bcLo + bStep * j;
+      const r = evaluate(ms, bs, FIT_DT.coarse);
+      if (r.sse < coarse.sse) coarse = { sse: r.sse, mvScale: ms, bcScale: bs };
     }
-  };
-  const mStep = (B.mvHi - B.mvLo) / 10, bStep = (B.bcHi - B.bcLo) / 10;
-  sweep(B.mvLo, B.mvHi, B.bcLo, B.bcHi, 10);
-  /* Each refinement spans one step of the sweep before it, in eight, so the
-   * next grid is four times finer and the window is guaranteed to contain the
-   * previous winner's neighbourhood. */
-  const mStep2 = mStep / 4, bStep2 = bStep / 4;
-  sweep(best.mvScale - mStep, best.mvScale + mStep, best.bcScale - bStep, best.bcScale + bStep, 8);
-  const mStep3 = mStep2 / 4, bStep3 = bStep2 / 4;
-  sweep(best.mvScale - mStep2, best.mvScale + mStep2, best.bcScale - bStep2, best.bcScale + bStep2, 8);
+  }
+
+  /* ── The local search: where in it ──────────────────────────────────────
+   * This used to be two more grids, each spanning ONE step of the sweep before
+   * it and centred on that sweep's winner — which is a fence, and the fence is
+   * put around the wrong point. The objective here is a long, narrow, curved
+   * valley: velocity and drag trade off against each other almost exactly, so
+   * a whole ridge of (mv, bc) pairs fits three anchors nearly as well as the
+   * truth does, and the coarse winner is a quantised point ON that ridge
+   * rather than at its bottom. Measured on the 2712 fps / 0.259 rifle: the
+   * coarse winner sat at bcScale 1.150 while the truth was 1.0658 — 1.7 coarse
+   * steps along the valley — so a window of ±1 step could not reach it at any
+   * resolution, and the fit converged to an RMS of 0.014 that reads as
+   * excellent while predicting 0.41 MOA wrong at 1000.
+   *
+   * A compass search has no fence. It steps to the best of the eight
+   * neighbours at the current step size and keeps walking while the objective
+   * improves — along the valley for as far as the valley goes — and halves the
+   * step only when no neighbour is better. It is bounded by an evaluation
+   * budget rather than by a window, so the cost is capped without the answer
+   * being capped, and it runs at the full integration step because this is the
+   * tier whose winner becomes the answer.
+   *
+   * The tolerance is where it stops: half a thousandth on velocity is 1.4 fps
+   * against a 2800 fps box, and 1.5 thousandths on drag is 0.0004 of BC. Both
+   * are far below what a confirmed zero read off a target can distinguish. */
+  const LOCAL_TOL = { mv: 5e-4, bc: 1.5e-3 };
+  /* And the budget is a backstop, not the usual stopping condition — which is
+   * a thing worth measuring rather than assuming, because a budget that binds
+   * routinely is a silent truncation dressed as a convergence. Over 192 fits
+   * across the box the search uses 104 evaluations at the median, 184 at the
+   * ninetieth percentile and 408 at its worst, so 440 is reached by none of
+   * them and the answers are the tolerance's, not the budget's. A first
+   * attempt at 260 was hit by 3% of fits. */
+  const LOCAL_BUDGET = 440;
+  const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+
+  let best = { sse: Infinity, mvScale: NaN, bcScale: NaN, resid: null };
+  if (Number.isFinite(coarse.sse)) {
+    /* Re-evaluated at the fine step: the coarse SSE was measured with a 3 ms
+     * integration step and is not comparable with anything below. */
+    const seed = evaluate(coarse.mvScale, coarse.bcScale, FIT_DT.fine);
+    best = { sse: seed.sse, mvScale: coarse.mvScale, bcScale: coarse.bcScale, resid: seed.resid };
+    let sm = mStep, sb = bStep, budget = LOCAL_BUDGET;
+    while ((sm > LOCAL_TOL.mv || sb > LOCAL_TOL.bc) && budget > 0) {
+      let move = null;
+      for (const [dm, db] of DIRS) {
+        const ms = clampM(best.mvScale + dm * sm), bs = clampB(best.bcScale + db * sb);
+        if (ms === best.mvScale && bs === best.bcScale) continue;
+        budget--;
+        const r = evaluate(ms, bs, FIT_DT.fine);
+        if (r.sse < (move ? move.sse : best.sse))
+          move = { sse: r.sse, mvScale: ms, bcScale: bs, resid: r.resid };
+        if (budget <= 0) break;
+      }
+      if (move) best = move; else { sm /= 2; sb /= 2; }
+    }
+  }
 
   /* Every candidate failed to integrate. The old code initialised the winner
    * to {sse: Infinity, mvScale: 1, bcScale: 1} and tested `r.sse < best.sse`,
@@ -476,26 +677,31 @@ function trueToDope(anchors, base) {
   const rms = Math.sqrt(best.sse);
   const worst = best.resid.reduce((a, b) => Math.abs(b.residual) > Math.abs(a.residual) ? b : a);
 
-  /* Where did the winner land? At a bound, or within one step of the finest
-   * sweep of one, means the fit wanted to leave the search space, and a fit
-   * that wanted to leave the search space is not telling you about the rifle,
-   * it is telling you the inputs are not what the shooter thinks they are —
-   * usually a velocity or a BC entered for a different load.
+  /* Where did the winner land? At a bound, or within the local search's own
+   * stopping tolerance of one, means the fit wanted to leave the search space,
+   * and a fit that wanted to leave the search space is not telling you about
+   * the rifle, it is telling you the inputs are not what the shooter thinks
+   * they are — usually a velocity or a BC entered for a different load.
    *
    * Refused rather than returned with a wider interval. The choice matters:
    * the interval is calibrated (see predict) on fits that landed INSIDE the
    * box, and a pinned fit is outside the population it was measured over, so
    * widening it would be inventing a number to cover a case it was never
    * measured against. "I cannot answer this, and here is which input to look
-   * at" is worth more than a number with an error bar of unknown meaning. */
+   * at" is worth more than a number with an error bar of unknown meaning.
+   *
+   * The band is the local search's stopping tolerance rather than a grid step,
+   * because the local search has no grid — it walks until neither the velocity
+   * nor the drag can be improved by more than LOCAL_TOL, and a winner sitting
+   * within that of a bound is a winner that stopped because of the bound. */
   const pins = [];
-  if (best.mvScale <= B.mvLo + mStep3)
+  if (best.mvScale <= B.mvLo + LOCAL_TOL.mv)
     pins.push(`the fit ran to the bottom of the velocity range (${Math.round(base.mv * B.mvLo)} fps) and wanted to go lower`);
-  if (best.mvScale >= B.mvHi - mStep3)
+  if (best.mvScale >= B.mvHi - LOCAL_TOL.mv)
     pins.push(`the fit ran to the top of the velocity range (${Math.round(base.mv * B.mvHi)} fps) and wanted to go higher`);
-  if (best.bcScale <= B.bcLo + bStep3)
+  if (best.bcScale <= B.bcLo + LOCAL_TOL.bc)
     pins.push(`the fit ran to the bottom of the BC range (${(base.bc * B.bcLo).toFixed(3)}) and wanted to go lower`);
-  if (best.bcScale >= B.bcHi - bStep3)
+  if (best.bcScale >= B.bcHi - LOCAL_TOL.bc)
     pins.push(`the fit ran to the top of the BC range (${(base.bc * B.bcHi).toFixed(3)}) and wanted to go higher`);
 
   const pinnedInfo = pins.length
@@ -534,60 +740,233 @@ function trueToDope(anchors, base) {
     return refuse('the trued numbers could not be flown out to the prediction horizon');
   }
 
+  /* ── How far a tenth of a minute of read error can move the answer ──────
+   * The interval used to be built on rmsMoa, and rmsMoa is the wrong quantity
+   * for the job in a way that fails hardest exactly where a shooter is most
+   * exposed. Two anchors against two free parameters is an EXACTLY determined
+   * fit: the curve passes through both points whatever they say, the residual
+   * is near zero by construction, and the interval collapses to its floor —
+   * while the noise that was in those two readings has gone straight into the
+   * velocity and the drag. Measured over 2,850 two-anchor predictions with
+   * ±0.1 MOA of read error: 24% fell outside their own interval, the worst by
+   * 13.5× it — one of them 2.1 MOA wrong at 500 yd, INSIDE its own anchors, at
+   * an RMS of 0.05 and a stated interval of ±0.16.
+   *
+   * So the interval is built from what the READING ERROR can do instead, which
+   * is a quantity that exists whether or not there is anything left over in
+   * the residuals. Two extra evaluations give the two columns of the design
+   * matrix — how much each anchor's come-up moves per unit of mvScale and per
+   * unit of bcScale — and two extra flights give the same two sensitivities at
+   * every distance in the kept table. Ordinary least-squares leverage then
+   * turns an error of σ on each anchor into an error bar at any distance:
+   *
+   *   var(moa at y) = σ² · g(y)ᵀ (XᵀX)⁻¹ g(y)
+   *
+   * This is what makes the interval widen on its own for the cases that
+   * deserve it — two anchors, anchors bunched together, an anchor sitting on
+   * the zero where the come-up is zero and its noise is all there is, and any
+   * distance far outside the anchors — without any of those having to be
+   * special-cased, and it is why "shoot a zero further out" is the thing that
+   * narrows it. */
+  const sM = (best.mvScale + FD_STEP.mv <= B.mvHi) ? FD_STEP.mv : -FD_STEP.mv;
+  const sB = (best.bcScale + FD_STEP.bc <= B.bcHi) ? FD_STEP.bc : -FD_STEP.bc;
+  const eM = evaluate(best.mvScale + sM, best.bcScale, FIT_DT.fine);
+  const eB = evaluate(best.mvScale, best.bcScale + sB, FIT_DT.fine);
+  let leverage = null;
+  if (eM.resid && eB.resid && eM.resid.length === best.resid.length) {
+    let xx = 0, xy = 0, yy = 0;
+    for (let i = 0; i < best.resid.length; i++) {
+      const u = (eM.resid[i].predicted - best.resid[i].predicted) / sM;
+      const v = (eB.resid[i].predicted - best.resid[i].predicted) / sB;
+      xx += u * u; xy += u * v; yy += v * v;
+    }
+    const det = xx * yy - xy * xy;
+    const tM = flyToday(best.mvScale + sM, best.bcScale);
+    const tB = flyToday(best.mvScale, best.bcScale + sB);
+    if (det > 0 && tM.length && tB.length) {
+      const gM = [], gB = [];
+      for (let y = 1; y < final.length; y++) {
+        if (!final[y] || !tM[y] || !tB[y]) continue;
+        const m0 = dropToMoa(final[y].dropFt, y);
+        gM[y] = (dropToMoa(tM[y].dropFt, y) - m0) / sM;
+        gB[y] = (dropToMoa(tB[y].dropFt, y) - m0) / sB;
+      }
+      leverage = { xx, xy, yy, det, gM, gB };
+    }
+  }
+
+  /* The σ that gets multiplied by that leverage. With more anchors than
+   * parameters the residuals estimate it — over n-2 degrees of freedom, not n,
+   * because two of them were spent making the curve pass through the data. With
+   * exactly two there are no degrees of freedom left and the residuals estimate
+   * nothing, so the prior stands on its own. Either way it never goes below
+   * READ_MOA: a fit whose residuals came out at a hundredth of a minute has not
+   * demonstrated that a person read a target to a hundredth of a minute. */
+  const dof = pts.length - 2;
+  const sigmaMoa = Math.max(READ_MOA, dof > 0 ? rms * Math.sqrt(pts.length / dof) : 0);
+
+  /* ── Have these zeros actually separated velocity from drag? ────────────
+   * That sentence is what canTrue has always claimed to be enforcing, and it
+   * enforced it with `spread >= 100` — a yardage, chosen for being round. It
+   * admits 100/200/300, where the two sensitivity columns are 0.9999
+   * collinear: raise the velocity, lower the BC, and the curve goes through
+   * all three points again. The fit then slides along that ridge until it
+   * reaches a bound and the pin check refuses it, blaming the shooter's BC for
+   * a rifle that is nothing of the sort — 7.8% of honest short-spread sets,
+   * against 0.12% of well-spread ones.
+   *
+   * The leverage measures the thing the yardage was standing in for. σ on
+   * bcScale is how well these anchors pin the drag, in units of the BC itself:
+   * 0.05 is the drag known to a twentieth, 2.0 is not knowing it at all. It
+   * falls with spread and with anchor count exactly as it should — measured
+   * over 1,251 fits with ±0.1 MOA of read error, the median runs 1.28 for
+   * three anchors spanning 100 yards, 0.31 at 300, 0.20 at 400 and 0.056 at
+   * 700; two anchors spanning 100 yards sit at 1.87.
+   *
+   * WHAT THE LINE IS NOT CHOSEN BY: coverage. Coverage holds at every
+   * threshold measured, from 0.5 to 2.0 — the widest error any accepted fit
+   * made was 0.56 of its own interval throughout, because the interval is
+   * computed from this same leverage and widens with it. Moving the line does
+   * not make the answers wronger; it makes them wider. So the thing to choose
+   * on is where the interval stops being a number a shooter can use, and that
+   * distribution is sharply bimodal: below the line the widest interval any
+   * accepted fit reports out to 1200 yd is a few tens of minutes, and above it
+   * the tail runs to 10⁵.
+   *
+   * Drawn at 0.8, where these are the fits kept, over 1,251 of them, against
+   * 0.5 and 1.0 either side:
+   *
+   *                       σbc≤0.5   σbc≤0.8   σbc≤1.0
+   *   3 anchors,  100 yd    14%       35%       42%
+   *   3 anchors,  200 yd    50%       68%       70%
+   *   3 anchors,  300 yd    72%       85%       89%
+   *   3 anchors,  400 yd    91%       96%      100%
+   *   3 anchors,  500 yd    99%      100%      100%
+   *   2 anchors,  100 yd    19%       35%       42%
+   *
+   * 0.8 keeps 96% of three anchors spanning 400 yards — the shape this app is
+   * for and the shape a season of shooting produces — while keeping only a
+   * third of three anchors spanning 100, which is the shape that cannot be
+   * answered. 0.5 starts refusing the 400-yard sets, which is refusing real
+   * work; 1.0 admits more of the 100-yard ones without making them any more
+   * informative. The short-spread sets that ARE kept are kept with the wide
+   * interval their leverage earns them, which is the other half of the answer:
+   * of the short-spread fits this used to accept, 29% missed their own 600 yd
+   * interval, and that number is now a rounding error. */
+  const sigmaBcScale = leverage ? sigmaMoa * Math.sqrt(leverage.xx / leverage.det) : Infinity;
+  const sigmaMvScale = leverage ? sigmaMoa * Math.sqrt(leverage.yy / leverage.det) : Infinity;
+  if (!(sigmaBcScale <= DEGENERATE_BC_SIGMA)) {
+    const spanWord = spread < 300
+      ? `a confirmed zero further out is what separates them — these span ${spread} yards`
+      : `another confirmed zero, further out than the ${far.yd}, is what separates them`;
+    return refuse(
+      `these confirmed zeros do not separate the muzzle velocity from the drag: they pin the BC ` +
+      `no better than ±${Number.isFinite(sigmaBcScale) ? Math.round(sigmaBcScale * 100) + '%' : 'anything at all'}, ` +
+      `so a higher velocity with a lower BC fits them just as well and the two answers ` +
+      `disagree by minutes at distance. ${spanWord}.`,
+      { pinned: false, fitRmsMoa: rms, sigmaBcScale, sigmaMvScale });
+  }
+
   return {
+    sigmaBcScale, sigmaMvScale,
     trued: true, pinned: false,
+    leverage, sigmaMoa,
     mvScale: best.mvScale, bcScale: best.bcScale,
     mv: base.mv * best.mvScale, bc: base.bc * best.bcScale,
     table: final,
     tempF: baseTemp,
     rmsMoa: rms,
     anchors: pts,
-    /* False means the atmospheric correction is ASSUMED: the anchors carried
-     * no recorded conditions, so they were fitted as if confirmed in standard
-     * air. The correction from there to today's air is still applied and is
-     * still better than none, but it rests on that assumption and the UI
+    /* False means at least one anchor carried no conditions of its own and was
+     * fitted in the assumed ones below. The correction from there to today's
+     * air is still applied and is still better than none, but it rests on an
+     * assumption, the interval is widened for it (see predict), and the UI
      * should say so rather than presenting it as measured. */
     anchorsHaveAtmosphere,
+    /* What that assumption WAS, so the screen can name it: the density and
+     * temperature every untagged anchor was fitted in, and the station
+     * pressure it was derived from when it came from one. */
+    assumedAnchorAtmosphere: assumed,
     residuals: best.resid,
     worstResidualMoa: Math.abs(worst.residual),
   };
 }
 
 /* ── Prediction, with an interval that means something ────────────────────
- * Three sources of doubt, added in quadrature:
+ * Four sources of doubt, added in quadrature:
  *
- *   1. How well the trued curve fits the anchors it was given. If the model
- *      cannot reproduce the shooter's own data to a tenth of a minute, it will
- *      not do better anywhere else.
- *   2. How far past the furthest anchor the question is. Inside the anchors
- *      this is interpolation and is worth trusting; a long way outside, the
- *      curve is being asked about a velocity regime it was never shown, and
- *      transonic behaviour is where drag models diverge most.
- *   3. A floor, because a confirmed zero is itself read off a target by a
- *      human and is not exact to a hundredth of a minute.
+ *   1. WHAT THE ANCHORS' OWN READ ERROR CAN DO. A confirmed zero is a number a
+ *      person read off a target, and the fit turns whatever error is in it into
+ *      an error in velocity and drag and then into an error at the distance
+ *      being asked about. How badly depends entirely on the geometry of the
+ *      anchors — how many, how far apart, and how far outside them the question
+ *      is — and that is computed rather than guessed: see the leverage note in
+ *      trueToDope. This is the term that dominates, and it is the one that was
+ *      missing.
+ *   2. How far past the anchors the question is, as a MODEL error rather than a
+ *      noise one: out beyond the furthest anchor the curve is being asked about
+ *      a velocity regime it was never shown, and transonic behaviour is where
+ *      drag models diverge most, which no amount of clean data fixes.
+ *   3. Whether the anchors' air was recorded or assumed.
+ *   4. A floor, because nothing here is exact to a hundredth of a minute.
  *
  * The interval is deliberately wide rather than flattering. A shooter who
  * dials a predicted 33.9 and finds it was 34.6 is served by having been told
  * ±1.8 beforehand.
  *
- * BE CLEAR ABOUT WHAT THIS IS. The quadrature is principled; the CONSTANTS —
- * the 0.15 floor, the 0.06 untrued term, the 0.035·(stretch−1)·stretch growth
- * — are empirical, chosen by measurement rather than derived. What was
- * measured: 200 synthetic rifles, each given a true velocity and BC, trued
- * from three anchors and checked against their own truth out to 1200 yards.
- * 97.5% of predictions fell inside the interval and the worst error was 1.25×
- * its interval, which makes this behave roughly like a 2σ bound for rifles
- * that fit INSIDE the search box.
+ * BE CLEAR ABOUT WHAT THIS IS AND WHEN IT WAS LAST MEASURED. The leverage is
+ * derived; the CONSTANTS — READ_MOA, the 2σ multiplier, the 0.15 floor, the
+ * 0.06 untrued term, the 0.05·(stretch−1)·stretch model growth, the 0.05
+ * assumed-atmosphere term — are empirical and were chosen by measurement.
  *
- * That qualifier is the whole caveat, and it is why trueToDope refuses two
- * cases rather than handing them here. Both of the failures the coverage run
- * did not cover — a fit pinned against the edge of the search box, and a fit
- * to a mistyped anchor — produced errors of 3.45 and 12.3 MOA against
- * intervals of 1.84 and 4.84. An interval only means something over the
- * population it was measured on, so the answer is to keep those cases out of
- * that population, not to inflate the number until it covers them.
+ * The measurement, RE-RUN on the current search box, the current search and
+ * the current refusals — the figure that used to stand here ("97.5% over 200
+ * synthetic rifles") predated all three, and by the time it was quoted it was
+ * describing code that no longer existed. What was run: 1,296 synthetic rifles
+ * — muzzle velocities 2400 to 3200, G7 BCs 0.20 to 0.37, box errors up to 5%
+ * on velocity and 13% on BC, anchor sets of two, three and four spanning 100
+ * to 700 yards with the near anchor at 100, 200 and 300 — each anchor given
+ * reading error and rounded to the hundredth the app stores, then asked for
+ * 300 through 1200 yards and checked against its own physical truth. 32% were
+ * refused, almost all of them for not separating velocity from drag; the rest
+ * gave 5,244 predictions:
+ *
+ *   reading error                  outside their interval    worst, as a
+ *                                                            fraction of it
+ *   ±0.1 MOA uniform (sd 0.058),
+ *   which is what the app stores        0 of 5,244  100%          0.61
+ *   0.15 MOA gaussian, which is
+ *   what READ_MOA claims               14 of 5,274   99.7%        1.47
+ *   0.30 MOA gaussian, twice the
+ *   claim — a stress case             122 of 4,296   97.2%        1.96
+ *
+ * So it behaves like a 2σ bound at the reading error it is scaled by, and
+ * conservatively at the reading error the app's own rounding implies. The
+ * numbers above are re-derived by an assertion in the test file rather than
+ * only asserted here, because a coverage figure quoted in a comment and
+ * measured nowhere is exactly how the last one came to be wrong.
+ *
+ * And the qualifier that does not change: an interval only means something
+ * over the population it was measured on. That is why trueToDope refuses a fit
+ * pinned against the edge of the search box and a fit to an anchor that
+ * disagrees with the others, rather than handing them here with a number on
+ * them.
  */
 const FLOOR_MOA = 0.15;
+/* The leverage above is a 1σ quantity. Two of them is the bound reported, which
+ * is the convention a shooter reading "±1.8" will assume. */
+const CI_SIGMAS = 2;
+/* Drag-model divergence past the anchors, as a fraction of the come-up, growing
+ * with the square of the stretch. Not a noise term: it is there when the data
+ * is perfect. */
+const MODEL_STRETCH = 0.05;
+/* Anchors fitted in assumed air rather than their own. The assumption is the
+ * shooter's stated zero conditions where they gave them and standard sea level
+ * where they did not, and either way it is an assumption about the density that
+ * scales the whole drag term. */
+const ASSUMED_ATMO = 0.05;
+/* Untrued: the box numbers, with nothing confirming them. */
+const UNTRUED = 0.06;
 
 function predict(trued, yd) {
   if (!trued || !trued.table || !Number.isFinite(yd)) return null;
@@ -605,13 +984,28 @@ function predict(trued, yd) {
   const inside = y <= far && y >= near;
   const stretch = y > far ? y / far : (y < near ? near / Math.max(1, y) : 1);
 
-  let ci = Math.hypot(trued.rmsMoa, FLOOR_MOA);
-  if (!trued.trued) ci = Math.hypot(ci, moa * 0.06);        // untrued: the box numbers
+  /* 1. The anchors' read error, through the fit, to here. */
+  let fitCi = null;
+  const L = trued.leverage;
+  if (L && L.det > 0 && Number.isFinite(L.gM[y]) && Number.isFinite(L.gB[y])) {
+    const gm = L.gM[y], gb = L.gB[y];
+    const q = (L.yy * gm * gm - 2 * L.xy * gm * gb + L.xx * gb * gb) / L.det;
+    if (q >= 0 && Number.isFinite(q)) fitCi = CI_SIGMAS * trued.sigmaMoa * Math.sqrt(q);
+  }
+  /* No leverage means an untrued answer or a degenerate one, and the residual
+   * is all there is to fall back on — which is exactly the fallback that was
+   * not good enough on its own, so it is used only where there is nothing
+   * better. */
+  if (fitCi === null) fitCi = Number.isFinite(trued.rmsMoa) ? trued.rmsMoa : 0;
+
+  let ci = Math.hypot(fitCi, FLOOR_MOA);
+  if (!trued.trued) ci = Math.hypot(ci, moa * UNTRUED);       // untrued: the box numbers
+  if (trued.anchorsHaveAtmosphere === false) ci = Math.hypot(ci, moa * ASSUMED_ATMO);
   if (!inside) {
     /* Grows with the square of the stretch, because the error in a drag model
      * grows fastest where the bullet is slowest, and that is exactly where
      * extrapolation goes. */
-    ci = Math.hypot(ci, moa * 0.035 * (stretch - 1) * stretch);
+    ci = Math.hypot(ci, moa * MODEL_STRETCH * (stretch - 1) * stretch);
   }
   return {
     yd: y, moa, velocity: row.v, timeOfFlight: row.t,
@@ -654,16 +1048,27 @@ function positionOffsets(cells) {
      * agreement, which is the most confidence-inspiring thing this function
      * can say, from one observation logged twice.
      *
-     * Identity is the session if the cell carries one, and otherwise the full
-     * tuple: same rifle, same place, same distance, same position, same date,
-     * same dialled elevation and windage is one shooting of one string, however
-     * many rows of it reached here. */
+     * Identity has to be what makes two rows the same SHOOTING. It was the
+     * session id where a cell carried one — and that made the whole thing
+     * inert, because the caller builds exactly one cell per session and always
+     * sets sessionId, so every cell was unique by construction and nothing was
+     * ever deduplicated. The duplicate this exists to catch is two SESSIONS
+     * holding the same string, which is what happens when a session is logged
+     * twice or restored twice from a backup, and those have two different ids.
+     *
+     * So the id plays no part: same rifle, same place, same distance (the
+     * group key), and then the same position, the same date and the same
+     * dialled elevation and windage is one shooting, however many sessions of
+     * it reached here. Two strings genuinely shot the same day, in the same
+     * position, at the same distance, dialled identically are collapsed too —
+     * and that is the right way to be wrong, because they carry the same
+     * number and pairing them twice would report agreement that was never
+     * independently observed. Different days, or different dials, stay
+     * separate, which is where the evidence actually is. */
     const seen = new Set();
     const obs = [];
     for (const c of group) {
-      const id = c.sessionId != null ? `s:${c.sessionId}`
-               : c.id != null ? `i:${c.id}`
-               : `t:${c.position}|${c.date || ''}|${c.elev}|${c.wind}`;
+      const id = `${c.position}|${c.date || ''}|${c.elev}|${c.wind}`;
       if (seen.has(id)) continue;
       seen.add(id);
       obs.push(c);
@@ -708,4 +1113,5 @@ const G1_TO_G7 = 0.512;
 
 export { cdG7, airDensityRatio, speedOfSound, integrate, dropToMoa,
          trueToDope, predict, positionOffsets, G1_TO_G7, K_DRAG,
-         SEARCH_BOX, RMS_GATE_MOA, BC_MIN, BC_MAX };
+         SEARCH_BOX, COARSE_STEP, RMS_GATE_MOA, READ_MOA,
+         DEGENERATE_BC_SIGMA, BC_MIN, BC_MAX };

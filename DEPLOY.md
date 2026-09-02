@@ -135,6 +135,9 @@ paste each one whole rather than in pieces.
 | `0002_leaderboard.sql` | the one deliberately public table, and the handle system |
 | `0003_keepalive.sql` | the function that stops the project pausing |
 | `0004_relay.sql` | pair fire: relays, participants, shots, feed, and the join throttle |
+| `0015_admin_role.sql` | `profiles.is_admin`, and the `is_admin()` the analytics policies ask |
+| `0016_analytics_events.sql` | `analytics_event` and the four rollups the owner dashboard reads |
+| `0017_admin_mfa.sql` | requires a verified second factor (`aal2`) to read the analytics |
 
 If you have the Supabase CLI instead:
 
@@ -273,7 +276,111 @@ It cleans up after itself and cannot see your own rows.
 2. **Prove the relay works before you rely on it.** Open a session, tap **● go live**,
    read the code to a second device (a laptop browser is fine), tap **● join**. You are
    looking for shots appearing within a few seconds. Do this at home, not on the line.
-3. **Then** put real data in.
+3. **Make yourself the admin** (see below), if you want the dashboard.
+4. **Then** put real data in.
+
+---
+
+## The owner dashboard
+
+`/admin/` is a read-only page showing traffic, sign-ups and feature usage across both
+apps. It is not a PWA and ships no service worker: every number on it is a query, so
+there is nothing useful to cache.
+
+**Nobody is an admin until you say so, and there is no in-app way to become one.**
+After creating your account, run this once in **SQL Editor** — the web page in the
+Supabase dashboard, the same one the migrations went into. It is SQL, not a shell
+command; pasting it into PowerShell gets you `The term 'update' is not recognized`.
+
+```sql
+insert into public.profiles (id, is_admin)
+select id, true from auth.users where email = 'you@example.com'
+on conflict (id) do update set is_admin = true;
+```
+
+**An `update` will not do here, and the reason is a trap.** Nothing creates a
+`profiles` row for you — there is no trigger on `auth.users`; a row appears the
+first time an app syncs one. So a fresh account that has signed up but not yet
+used Zero or Bench has no profile at all, and `update ... where id = (...)` matches
+nothing, reports success, and changes nothing. You would then be told you are not an
+admin by a dashboard that is working correctly. The insert above covers both cases.
+
+Check it took, rather than assuming:
+
+```sql
+select u.email, coalesce(p.is_admin, false) as is_admin
+  from auth.users u
+  left join public.profiles p on p.id = u.id
+ where u.email = 'you@example.com';
+```
+
+One row, `is_admin` true. No row at all means the email does not match an account —
+check for a typo, or that you signed up with a different address.
+
+Then open `/admin/` and sign in with that account. Anyone else who finds the URL gets
+a sign-in box and, if they sign in, a page telling them they are not an admin — the
+row-level security in `0016` is what actually withholds the data, so this holds even
+against someone calling the REST API directly.
+
+### The second factor
+
+**The dashboard also asks for a code from an authenticator app**, on top of the
+password. It reads every user's usage history, which is the most sensitive read in the
+project, and one password is thin cover for it.
+
+On first sign-in it shows a QR code. Scan it with **Microsoft Authenticator** —
+*Add account → Other (Google, Facebook, etc.)* — or any TOTP app (Google
+Authenticator, Authy, 1Password all work; nothing here is tied to one). If the camera
+will not cooperate, the setup key is printed underneath to type in by hand. Enter the
+six digits to finish. After that, every sign-in asks for the current code.
+
+**This is enforced by the database, not by the page.** `0017` requires the `aal2`
+claim on the token to read `analytics_event`, and only Supabase issues that claim, and
+only after it has checked a code. Someone who skips the page and calls the REST API
+with a password-only token gets an empty array. A client-side MFA gate would be worth
+nothing here, because the dashboard is a static page served with the public key.
+
+Two things worth knowing:
+
+- **Enrolment happens before you have a factor**, on the password-only session. That is
+  deliberate: requiring a code in order to set up the code would lock the only admin
+  out with no way back except editing the database by hand.
+- **The check is per sign-in, not once per account** — that is the point of it. If you
+  lose the phone, clear the factor as `postgres` in the SQL editor
+  (`delete from auth.mfa_factors where user_id = '<your uuid>';`) and the dashboard
+  will offer enrolment again on the next sign-in.
+
+The apps themselves are untouched by this. Zero and Bench are used at a range with no
+signal, and demanding a rotating code to open your own logbook would be a way of
+locking people out of their own data.
+
+**What is collected.** Sign-ups, sign-ins, sign-outs, one `app_open` per visit, a
+best-effort `app_background` carrying visit duration, screens opened, and the feature
+actions each app tracks (records created and edited, labels printed, QR scans, shots
+logged, sessions and matches created, relays hosted and joined, leaderboard posts).
+No IP addresses, no device fingerprints, no free-text content — the `metadata` column
+carries small facts like `{"kind":"batch"}`, never what was typed.
+
+**Three things worth knowing before you rely on the numbers:**
+
+- **A signed-out visit is not counted.** Events are attributed to a user, and the
+  insert policy requires it, so someone who opens an app and never signs in leaves no
+  trace. Visit counts are of *signed-in* visits.
+- **Visit duration is an estimate, and visit count is not.** Duration comes from
+  `visibilitychange`/`pagehide`, and a mobile browser killing a backgrounded tab is
+  free to run neither. The dashboard says which visits reported.
+- **Daily user counts cannot be added up.** The same person on Monday and Tuesday is
+  one person, not two. The dashboard shows the busiest day rather than a sum, on
+  purpose.
+
+**It grows.** Screen views make this the busiest table in the schema by a wide margin.
+Nothing prunes it today; on the free tier's 500 MB, keep an eye on it and add a
+retention job (delete rows older than N months) before it becomes the reason you need
+a bigger plan.
+
+**Monetising this is a disclosure question as well as a technical one.** Once real
+customers are being measured, a privacy policy saying what is collected and why is a
+business step this repo cannot do for you.
 
 ---
 
@@ -297,6 +404,7 @@ It cleans up after itself and cannot see your own rows.
 ```
 site/            Zero
 site/bench/      Bench
+site/admin/      the owner dashboard
 ```
 
 Zero is at the root because it is the app with existing users. They are bookmarked
@@ -329,6 +437,13 @@ paths. The reasoning, which cannot live in the file itself:
   returning user is pinned to an old build indefinitely with no way to tell.
 - **`/(index.html)?`** and **`/bench/(index.html)?`** — the shells name the bundle,
   so a stale shell points at a stale bundle. Same failure, one step removed.
+- **`/admin/(index.html)?`** — for the opposite reason to the other two, and it is
+  the one that would have been missed. The dashboard is a single self-contained
+  file: no worker, no hashed bundle name, nothing downstream to invalidate it. So
+  there is no second chance — cache that page and the owner reads an old dashboard
+  with no way to tell, which for a page whose entire job is reporting numbers is the
+  worst possible failure. `/admin` also gets the trailing-slash redirect `/bench`
+  has, or Vercel answers the slashless form with a 404.
 
 JSON has no comments. An earlier version of this file carried `"//"` keys inside the
 `headers` entries as a comment convention; Vercel validates `vercel.json` against a

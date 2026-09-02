@@ -64,6 +64,11 @@ if (!cfg.ok && process.env.ALLOW_UNCONFIGURED_BUILD !== '1') {
 
 execFileSync(process.execPath, [path.join(ROOT, 'apps/bench/build.mjs')], { stdio: 'inherit' });
 execFileSync(process.execPath, [path.join(ROOT, 'apps/zero/build.mjs')], { stdio: 'inherit' });
+/* The owner dashboard, at /admin/. It ships no service worker of its own -- it
+ * is a page you open, not an offline app -- so Zero's worker is what would
+ * answer for it, permanently. apps/zero/src/sw.js declines /admin/ for exactly
+ * that reason; the two facts have to stay together. */
+execFileSync(process.execPath, [path.join(ROOT, 'apps/admin/build.mjs')], { stdio: 'inherit' });
 
 /* The information page is built here too, and published somewhere else.
  *
@@ -79,8 +84,10 @@ execFileSync(process.execPath, [path.join(ROOT, 'site-info/build.mjs')], { stdio
 
 fs.rmSync(SITE, { recursive: true, force: true });
 fs.mkdirSync(path.join(SITE, 'bench'), { recursive: true });
+fs.mkdirSync(path.join(SITE, 'admin'), { recursive: true });
 fs.cpSync(path.join(ROOT, 'apps/zero/dist'), SITE, { recursive: true });
 fs.cpSync(path.join(ROOT, 'apps/bench/dist'), path.join(SITE, 'bench'), { recursive: true });
+fs.cpSync(path.join(ROOT, 'apps/admin/dist'), path.join(SITE, 'admin'), { recursive: true });
 
 const count = (d) => fs.readdirSync(d, { recursive: true }).length;
 console.log(`site/ assembled — ${count(SITE)} entries` +

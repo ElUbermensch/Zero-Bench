@@ -20,9 +20,16 @@ const memStore = () => {
 };
 
 const mock = await startMock({ ttlSec: 3600 });
+/* telemetry defaults OFF here and nowhere else.
+ *
+ * zero-core queues an app_open the moment it has a user, which is correct in an
+ * app and ruinous in a suite that asserts on outbox CONTENTS and push order:
+ * every such assertion would be reading past a row it did not queue. The
+ * telemetry section below turns it back on deliberately, which is also the only
+ * place that should be reasoning about those rows. */
 const mkClient = (store, extra = {}) => ZeroCore.create(Object.assign({
   url: mock.url, anonKey: 'anon-key-public', appId: 'bench',
-  storage: store || memStore(), pageSize: 2,
+  storage: store || memStore(), pageSize: 2, telemetry: false,
 }, extra));
 
 /* ===================================================================== auth */
@@ -1695,6 +1702,155 @@ section('whole-device backup');
   const none = mkClient(undefined, { appId: 'zero' });
   const n = await none.backupPut({ app: 'zero', payload: '{}' });
   ok(!n.ok && /signed in/.test(n.reason), 'nor can a device with no account');
+}
+
+/* ================================================================ telemetry */
+section('telemetry');
+{
+  const store = memStore();
+  const c = mkClient(store, { appId: 'bench', telemetry: true });
+
+  /* The public `outbox` getter deliberately exposes only {table, id, op}, so
+   * the queued ROWS come from storage -- namespaced per app, hence the key. */
+  const rowsOf = () => JSON.parse(store._dump.get('zerocore.bench.outbox') || '[]')
+    .filter(e => e.table === 'analytics_event');
+  const evOf = (core) => core.outbox.filter(e => e.table === 'analytics_event');
+  const names = () => rowsOf().map(e => e.row.event_name);
+
+  ok(evOf(c).length === 0, 'a signed-out launch records nothing — there is nobody to attribute it to');
+
+  await c.signUp('owner@example.com', 'hunter2');
+  ok(names().includes('app_open'), 'signing up opens the visit that started signed out');
+  ok(names().includes('sign_up'), 'a sign-up is recorded as a sign-up');
+  ok(!names().includes('sign_in'),
+     '...and not also as a sign-in — auth:signed-in fires for both, the call site is what knows');
+  ok(names().filter(n => n === 'app_open').length === 1, 'exactly one app_open per visit');
+
+  /* The badge is the user's unsent WORK. Telemetry rides the same queue for the
+   * retry and chunking machinery and must stay out of the number. */
+  ok(c.pendingCount() === 0, 'queued telemetry does not show up as pending work');
+  let badge = null;
+  c.on(c.EVENTS.OUTBOX_CHANGED, (p) => { badge = p.pending; });
+  c.track('batch_created', { qty: 50 });
+  ok(badge === 0, 'nor in the outbox:changed the sync badge is driven from');
+  ok(c.pendingFor('analytics_event') > 0, '...though it really is queued');
+
+  /* Zero re-renders on data:changed. An app that repainted every time it
+   * measured itself would feed itself. */
+  let dataChanged = 0;
+  c.on(c.EVENTS.DATA_CHANGED, () => { dataChanged++; });
+  c.track('label_printed', {});
+  ok(dataChanged === 0, 'tracking does not announce itself as a data change');
+  c.upsert('recipes', { name: 'Sierra 175', cartridge: '308 Win', charge_gr: 41.5 });
+  ok(dataChanged === 1, '...but a real write still does');
+
+  const rows = rowsOf();
+  const sigs = new Set(rows.map(e => Object.keys(e.row).sort().join(',')));
+  /* pushTable groups the outbox by key signature because PostgREST builds one
+   * column list for a bulk insert. An event that omitted `metadata` would be
+   * sent as its own request rather than riding along. */
+  ok(sigs.size === 1, 'every event carries the same columns, so they push as one request');
+  ok(rows.every(e => e.row.usage_session_id === c.usageSessionId),
+     'events from one launch share a usage_session_id');
+  ok(rows.every(e => e.row.source_app === 'bench'), 'the app that fired it travels with it');
+  ok(rows.every(e => typeof e.row.occurred_at === 'string'),
+     'the client clock is kept, for events that queue offline for days');
+  ok(rows.every(e => !('created_at' in e.row)),
+     '...and the server clock is not sent — created_at is the trustworthy axis');
+
+  const sent = await c.sync({ trigger: 'manual', tables: [] });
+  ok(sent.ok, 'telemetry pushes on the next sync like any other queued write');
+  ok(evOf(c).length === 0, '...and leaves the outbox when it lands');
+
+  /* Sign-out is recorded while there is still a user to attribute it to. */
+  await c.signOut();
+  const outRows = rowsOf();
+  ok(outRows.some(e => e.row.event_name === 'sign_out'),
+     'sign-out is tracked before the session is cleared, not after');
+  ok(outRows.every(e => e.row.user_id), '...so it still knows whose sign-out it was');
+
+  /* An event with nobody to attribute it to must not queue: the insert policy
+   * is user_id = auth.uid(), so it would be refused and land in the rejected
+   * list BOTH apps show the user. */
+  const orphan = c.track('batch_created', {});
+  ok(orphan === null, 'tracking while signed out records nothing rather than queueing a refusal');
+
+  const off = mkClient(undefined, { telemetry: false });
+  await off.signUp('quiet@example.com', 'hunter2');
+  ok(off.outbox.filter(e => e.table === 'analytics_event').length === 0,
+     'telemetry: false records nothing at all');
+  ok(off.track('anything', {}) === null, '...including through a direct track() call');
+}
+
+/* ====================================================== MFA (second factor) */
+section('mfa');
+{
+  const c = mkClient(undefined, { appId: 'zero' });
+  await c.signUp('owner-mfa@example.com', 'hunter2');
+
+  ok(c.aal() === 'aal1',
+     'a password sign-in is aal1 — the analytics policy wants aal2 and this is not it');
+
+  const f0 = await c.mfaFactors();
+  ok(f0.ok && f0.factors.length === 0, 'a new account carries no factors');
+
+  const e = await c.mfaEnroll('Zero Suite dashboard');
+  ok(e.ok && !!e.factorId, 'enrolling returns a factor');
+  /* The secret and the otpauth URI both travel: the URI is what the QR
+   * encodes, the secret is what you type when the camera will not cooperate. */
+  ok(!!e.secret && /^otpauth:\/\/totp\//.test(e.uri || ''),
+     '...with both a secret and an otpauth URI, so a failed scan is not a dead end');
+
+  /* Enrolment happens on the password-only session on purpose. Requiring aal2
+   * to enrol would mean the only admin could never obtain aal2. */
+  ok(c.aal() === 'aal1', 'enrolling alone does not grant aal2 — the code still has to be checked');
+
+  const f1 = await c.mfaFactors();
+  ok(f1.factors.length === 1 && f1.verified.length === 0,
+     'the factor exists but is unverified until a code is checked');
+
+  const ch = await c.mfaChallenge(e.factorId);
+  ok(ch.ok && !!ch.challengeId, 'a challenge starts a verification window');
+
+  const wrong = await c.mfaVerify(e.factorId, ch.challengeId, '000000');
+  ok(!wrong.ok, 'a wrong code is refused');
+  ok(c.aal() === 'aal1', '...and leaves the session exactly as unprivileged as it was');
+
+  /* A challenge is spent whether or not the code was right, which is why the
+   * dashboard takes a fresh one per attempt rather than reusing the first. */
+  const reused = await c.mfaVerify(e.factorId, ch.challengeId, mock.state.TOTP_OK);
+  ok(!reused.ok, 'a spent challenge cannot be replayed, even with the right code');
+
+  const ch2 = await c.mfaChallenge(e.factorId);
+  const good = await c.mfaVerify(e.factorId, ch2.challengeId, mock.state.TOTP_OK);
+  ok(good.ok, 'a fresh challenge and the right code verify');
+  /* This is the whole mechanism: the server mints a NEW token carrying aal2.
+   * The client cannot award itself the claim the policy reads. */
+  ok(c.aal() === 'aal2', 'and the session comes back at aal2, on a token the SERVER minted');
+  ok(c.isSignedIn(), '...still signed in, on the new token');
+
+  const f2 = await c.mfaFactors();
+  ok(f2.verified.length === 1, 'the factor is now verified, so a later sign-in is challenged not re-enrolled');
+
+  /* A second enrolment while one is already verified is what would happen if
+   * the dashboard showed the QR screen to a returning admin. It must not. */
+  const dup = await c.mfaEnroll('second');
+  ok(dup.ok, 'a verified account may still add another factor (a spare phone)');
+  const dup2 = await c.mfaEnroll('third');
+  ok(!dup2.ok && dup2.status === 422,
+     '...but not stack a second UNVERIFIED one — the dashboard turns this 422 into an instruction');
+
+  ok((await c.mfaUnenroll(dup.factorId)).ok, 'a factor can be removed');
+  const f3 = await c.mfaFactors();
+  ok(f3.verified.length === 1, '...leaving the verified one alone');
+
+  /* Signing out and back in returns to aal1: the second factor is verified per
+   * SESSION, not once per account, which is the property that makes it worth
+   * anything after a stolen password. */
+  await c.signOut();
+  const back = await c.signIn('owner-mfa@example.com', 'hunter2');
+  ok(back.ok, 'signing back in works');
+  ok(c.aal() === 'aal1', 'and starts at aal1 again — the factor is per session, not once per account');
 }
 
 await mock.stop();

@@ -2304,7 +2304,17 @@ const ZeroCore = (() => {
     // Shared surface: public-read, own-write. Writes ride the same outbox so
     // publishing works offline at a match; reads go through leaderboard().
     'leaderboard_profiles', 'leaderboard_entries',
+    /* Product telemetry. Write-only from a client: the server has an insert
+     * policy and no select policy, so a pull would come back empty for
+     * everyone except an admin -- and an admin reads the rollup views, not
+     * this. It is listed here because push walks cfg.tables and that is the
+     * only machinery it needs; no caller ever names it in sync's `tables`. */
+    'analytics_event',
   ]);
+
+  /** The one table in TABLES that is telemetry rather than the user's work.
+   *  Carved out of the outbox badge and the data:changed fan-out below. */
+  const TELEMETRY = 'analytics_event';
 
   /** Columns the server owns. Sending them is at best ignored and at worst
    *  lets a client clock decide conflict resolution. */
@@ -2539,6 +2549,12 @@ const ZeroCore = (() => {
      * Reported as a SYNC_ERROR with phase 'persist': it is not a rejected row
      * (the server never saw it) and it is not a network failure. Both apps
      * already listen for sync errors. */
+    /* Queued rows that are the USER's work, i.e. everything but telemetry.
+     * Declared here rather than beside pendingCount because persistOutbox runs
+     * during startup, before the later consts exist. */
+    const userPending = () =>
+      outbox.reduce((n, e) => n + (e.table === TELEMETRY ? 0 : 1), 0);
+
     const persistOutbox = () => {
       const okOutbox = store.set(K.outbox, outbox) !== false;
       const okRejected = store.set(K.rejected, rejected) !== false;
@@ -2546,9 +2562,9 @@ const ZeroCore = (() => {
         emit(EVENTS.SYNC_ERROR, { phase: 'persist', error: {
           message: 'the outbox could not be written to this device — '
                  + 'queued work is in memory only and will not survive a relaunch',
-          pending: outbox.length } });
+          pending: userPending() } });
       }
-      emit(EVENTS.OUTBOX_CHANGED, { pending: outbox.length, rejected: rejected.length,
+      emit(EVENTS.OUTBOX_CHANGED, { pending: userPending(), rejected: rejected.length,
                                     durable: okOutbox && okRejected });
     };
 
@@ -2687,6 +2703,14 @@ const ZeroCore = (() => {
       }
       // With email confirmation on, signup returns a user but no tokens.
       if (json.access_token) setSession(shapeSession(json));
+      /* Tracked HERE rather than off AUTH_SIGNED_IN, which fires for a sign-up,
+       * a sign-in and a session restored from storage alike -- the call site is
+       * the only place that still knows which of the three this was.
+       *
+       * A signup awaiting email confirmation has no session, so track() drops
+       * it and the account is counted when they first sign in instead. */
+      trackOpen();
+      track('sign_up', {});
       return { ok: true, session, needsConfirmation: !json.access_token, user: json.user };
     }
 
@@ -2704,6 +2728,8 @@ const ZeroCore = (() => {
         return { ok: false, error: json };
       }
       setSession(shapeSession(json));
+      trackOpen();
+      track('sign_in', {});
       return { ok: true, session };
     }
 
@@ -2732,7 +2758,21 @@ const ZeroCore = (() => {
         return { ok: false, error: json };
       }
       setSession(shapeSession(json));
+      trackOpen();
+      track('sign_in_anonymous', {});
       return { ok: true, session };
+    }
+
+    /** The access token's payload, or null if it is not a readable JWT.
+     *  Only for claims the server does not also put on the user object. */
+    function jwtClaims() {
+      if (!session || !session.access_token) return null;
+      try {
+        return JSON.parse(
+          atob(session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      } catch (e) {
+        return null;
+      }
     }
 
     /** True when the current session is an anonymous device rather than a
@@ -2744,16 +2784,124 @@ const ZeroCore = (() => {
       if (session.user && typeof session.user.is_anonymous === 'boolean') {
         return session.user.is_anonymous;
       }
-      try {
-        const payload = JSON.parse(
-          atob(session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      const payload = jwtClaims();
+      if (payload) {
         return payload.is_anonymous === true;
-      } catch (e) {
+      }
+      {
         // Undecidable. Say "not anonymous": the server enforces this anyway via
         // a restrictive policy, so the worst case is offering a publish button
         // that fails, rather than hiding one that would have worked.
         return false;
       }
+    }
+
+    /* ---------------------------------------------------------------- MFA */
+    /*
+     * TOTP second factor. Used by the owner dashboard and nothing else: the
+     * apps are offline-first and used at a range with no signal, where
+     * demanding a rotating code to look at your own logbook would be a way of
+     * locking people out of their data. The dashboard is a page you open on a
+     * desk, and it is the thing worth a second factor.
+     *
+     * Endpoints are GoTrue's, taken from @supabase/auth-js rather than guessed:
+     *   POST   /auth/v1/factors                       enroll
+     *   POST   /auth/v1/factors/{id}/challenge        start a verification
+     *   POST   /auth/v1/factors/{id}/verify           finish it, new session
+     *   DELETE /auth/v1/factors/{id}                  unenroll
+     *
+     * The enrolment itself happens at aal1, deliberately -- otherwise an admin
+     * could never obtain the aal2 the policy wants, having no way to enrol
+     * without it. Only READING the analytics needs aal2.
+     */
+    async function mfaEnroll(friendlyName) {
+      const res = await authed('/auth/v1/factors', {
+        method: 'POST',
+        body: JSON.stringify({
+          factor_type: 'totp',
+          friendly_name: friendlyName || 'Authenticator',
+          issuer: 'Zero Suite',
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaEnroll', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      /* `secret` and `uri` are what a user types in by hand when the QR will
+       * not scan, so both travel rather than only the image. */
+      return { ok: true, factorId: json.id,
+               qr: (json.totp && json.totp.qr_code) || null,
+               secret: (json.totp && json.totp.secret) || null,
+               uri: (json.totp && json.totp.uri) || null };
+    }
+
+    async function mfaChallenge(factorId) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}/challenge`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaChallenge', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      return { ok: true, challengeId: json.id, expiresAt: json.expires_at };
+    }
+
+    /**
+     * Verify a code against a challenge. On success GoTrue issues a NEW
+     * session whose token carries `aal: 'aal2'` -- which is the entire point,
+     * because the policy reads that claim and not anything this client says.
+     * Adopting it is therefore not bookkeeping; it is the step that grants the
+     * access.
+     */
+    async function mfaVerify(factorId, challengeId, code) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ challenge_id: challengeId, code: String(code || '').trim() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.access_token) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaVerify', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      setSession(shapeSession(json));
+      return { ok: true, session, aal: aal() };
+    }
+
+    async function mfaUnenroll(factorId) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}`,
+                               { method: 'DELETE' });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaUnenroll', error });
+        return { ok: false, status: res.status, error };
+      }
+      return { ok: true };
+    }
+
+    /** The factors on the account, refreshed from the server rather than from
+     *  the cached user -- an enrolment made on another device is exactly the
+     *  case this has to see. */
+    async function mfaFactors() {
+      const res = await authed('/auth/v1/user', { method: 'GET' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, status: res.status, error: json };
+      const factors = (json.factors || []).filter(f => f.factor_type === 'totp');
+      if (session && json && json.id) { session.user = json; store.set(K.session, session); }
+      return { ok: true, factors,
+               verified: factors.filter(f => f.status === 'verified') };
+    }
+
+    /**
+     * 'aal1' after a password sign-in, 'aal2' once a second factor has been
+     * verified in THIS session. Read off the token, because that is the same
+     * claim the server's policies read -- anything else would be this client's
+     * opinion of its own privileges.
+     */
+    function aal() {
+      const c = jwtClaims();
+      return (c && c.aal) || 'aal1';
     }
 
     /** Ensure SOME identity exists, without asking the user for anything.
@@ -2842,6 +2990,10 @@ const ZeroCore = (() => {
        * it just cannot hold up the local state change. The token is captured
        * before the clear, since the request needs it. */
       const headers = (session && session.access_token) ? authHeaders() : null;
+      /* Before the clear, not after: track() attributes to the CURRENT user and
+       * there is about to not be one. The row then waits in the outbox until
+       * somebody signs in again -- which is also why it carries occurred_at. */
+      track('sign_out', {});
       setSession(null, 'user');
       cursors = {};
       store.set(K.cursors, cursors);
@@ -2903,7 +3055,13 @@ const ZeroCore = (() => {
       const entry = { table, row: clean, op: op || 'upsert', queuedAt: nowMs() };
       if (at >= 0) outbox[at] = entry; else outbox.push(entry);
       persistOutbox();
-      emit(EVENTS.DATA_CHANGED, { table, ids: [row.id], origin: 'local' });
+      /* Telemetry is not the user's data and must not look like it. Zero
+       * re-renders on data:changed, so announcing an analytics row would
+       * repaint the screen every time the app measured itself -- and a render
+       * that tracks anything would then feed itself. */
+      if (table !== TELEMETRY) {
+        emit(EVENTS.DATA_CHANGED, { table, ids: [row.id], origin: 'local' });
+      }
       return row.id;
     }
 
@@ -2924,7 +3082,12 @@ const ZeroCore = (() => {
     const remove = (table, id) =>
       enqueue(table, { id, deleted_at: new Date().toISOString() }, 'delete');
 
-    const pendingCount = () => outbox.length;
+    /* The badge counts the user's unsent WORK. Telemetry rides the same queue
+     * for the retry and chunking machinery, but a shooter looking at "3 items
+     * not yet synced" means three of their records, and a number that never
+     * reaches zero because the app keeps measuring itself is a number they
+     * stop believing. */
+    const pendingCount = () => userPending();
     /* How many refusals are kept. This is a retry queue now as well as a
      * diagnostic, so the cap is what a user can still get back. */
     const REJECTED_MAX = 500;
@@ -2983,6 +3146,92 @@ const ZeroCore = (() => {
       return n;
     };
     const pendingFor = (table) => outbox.filter(e => e.table === table).length;
+
+    /* ----------------------------------------------------------- telemetry */
+    /* One id per app load. Groups the events of a single visit without
+     * borrowing the word "session", which both apps have already spent: Zero on
+     * range_sessions and Bench on loading sessions. */
+    const usageSessionId = uuid();
+    const usageStartedMs = nowMs();
+    let openTracked = false;
+
+    /**
+     * Record a product-usage event. Fire-and-forget: it queues like any other
+     * write and leaves on the next sync, so it works at the range with no
+     * signal.
+     *
+     * Every row carries the SAME keys, deliberately. pushTable groups the
+     * outbox by key signature because PostgREST builds one column list for a
+     * bulk insert, so an event that omitted `metadata` would be sent as its own
+     * separate request rather than riding along with the others.
+     *
+     * Returns null when there is nobody to attribute the event to. The insert
+     * policy is `user_id = auth.uid()`, so a signed-out event would queue,
+     * fail, and land in the rejected list that BOTH apps show the user --
+     * telemetry must never produce a scary number on someone's sync screen.
+     * The cost is that a visit which never signs in is not counted.
+     */
+    function track(eventName, metadata) {
+      if (cfg.telemetry === false || !eventName) return null;
+      const u = getUser();
+      if (!u || !u.id) return null;
+      return enqueue(TELEMETRY, {
+        id: uuid(),
+        user_id: u.id,
+        source_app: cfg.appId,
+        event_name: String(eventName),
+        usage_session_id: usageSessionId,
+        metadata: (metadata && typeof metadata === 'object') ? metadata : {},
+        // The client's clock, kept for events that queue offline for days. The
+        // server stamps created_at and the rollups group on that.
+        occurred_at: new Date().toISOString(),
+      }, 'upsert');
+    }
+
+    /* Exactly one app_open per visit, and only once there is a user to hang it
+     * on. A visit that starts signed out and then signs in still counts, which
+     * is why the auth paths call this and not just create(). */
+    function trackOpen() {
+      if (openTracked) return;
+      // Only a row that actually queued counts. A signed-out create() returns
+      // null here, and the next sign-in is what finally opens the visit.
+      if (track('app_open', {}) !== null) openTracked = true;
+    }
+
+    /**
+     * Best-effort visit duration.
+     *
+     * visibilitychange and pagehide are the only signals a browser offers here
+     * and neither is promised: a mobile browser reclaiming a backgrounded tab
+     * is free to run nothing at all. So the duration this emits covers the
+     * visits that got to report, not all of them -- v_analytics_visits says the
+     * same thing in SQL. Visit COUNT comes from app_open and is reliable;
+     * duration is an estimate over a self-selected sample.
+     *
+     * The write is a synchronous localStorage queue, not a request, which is
+     * what makes it survivable in a pagehide handler at all.
+     */
+    function attachSessionListeners() {
+      if (typeof document === 'undefined' || typeof window === 'undefined') return () => {};
+      let reported = 0;
+      const report = (force) => {
+        if (!force && document.visibilityState !== 'hidden') return;
+        const now = nowMs();
+        // visibilitychange and pagehide both fire on the same departure. One
+        // visit, one row.
+        if (now - reported < 2000) return;
+        reported = now;
+        track('app_background', { duration_ms: now - usageStartedMs });
+      };
+      const onVisibility = () => report(false);
+      const onPageHide = () => report(true);
+      document.addEventListener('visibilitychange', onVisibility);
+      window.addEventListener('pagehide', onPageHide);
+      return () => {
+        document.removeEventListener('visibilitychange', onVisibility);
+        window.removeEventListener('pagehide', onPageHide);
+      };
+    }
 
     /* ---------------------------------------------------------------- pull */
     /* `commit` is false when nobody is going to do anything with the rows.
@@ -3830,6 +4079,17 @@ const ZeroCore = (() => {
         p_since_msg: relay.sinceMsg,
       });
       if (!r.ok) { emit(EVENTS.RELAY_ERROR, { phase: 'poll', error: r.error }); return r; }
+      /* The relay can END during the await above, and this function held a
+       * reference from before it. stopRelay() sets `relay` to null -- from
+       * endRelay, from a sign-out, or from the ended branch at the bottom of
+       * this very function on an earlier tick -- and the next line would then
+       * dereference null and take the whole poll loop down with an uncaught
+       * TypeError inside a timer, where nothing is left to catch it.
+       *
+       * pumpRelay re-checks after ITS await for the same reason, one function
+       * below. This one did not, and the guard at the top only covers the state
+       * before the request went out. */
+      if (!relay || relay.stopped) return { ok: false, reason: 'no-relay' };
       const st = r.data || {};
 
       /* Dedupe by id, because relay_state uses a >= cursor: rows sharing the
@@ -4059,12 +4319,15 @@ const ZeroCore = (() => {
       signUp, signIn, signInWithOtp, signOut, refresh,
       getSession, getUser, isSignedIn,
       upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected, retryRejected,
+      track, attachSessionListeners,
+      get usageSessionId() { return usageSessionId; },
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,
       selectView, rpc, ballisticProfiles, batchPerformance,
       backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
+      mfaEnroll, mfaChallenge, mfaVerify, mfaUnenroll, mfaFactors, aal,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
       relayPushShot, relayRetractShot, relaySend, relayInfo,
@@ -4093,6 +4356,19 @@ const ZeroCore = (() => {
      * default: it shipped un-opted-in from both apps, and the consequence was
      * a queued write that could never leave the device. */
     if (cfg.autoNetwork !== false) instance.detachNetwork = attachBrowserListeners();
+
+    /* Telemetry attaches itself for the same reason connectivity does: the
+     * comment above is the record of what opt-in got us last time. Opt OUT with
+     * `telemetry: false`, which the SQL suite and the mock both use to keep
+     * their outboxes to what they queued on purpose.
+     *
+     * trackOpen() runs after the session has been restored from storage, so a
+     * returning user is counted on launch; a signed-out launch records nothing
+     * until they sign in, and signIn/signUp call trackOpen() for that. */
+    if (cfg.telemetry !== false) {
+      instance.detachSession = attachSessionListeners();
+      trackOpen();
+    }
 
     /* A confirmation link lands here carrying a session in the URL fragment.
      *
@@ -4137,6 +4413,9 @@ const ZeroCore = (() => {
   return { create, EVENTS, TABLES, defaultStorage };
 })();
 //#endregion zero-core
+
+
+
 /* ── Shared deployment ────────────────────────────────────────────────────
  * Every install points at ONE Supabase project so the leaderboard has a
  * population. Fill these in before deploying and users never see a server
@@ -5325,6 +5604,10 @@ function JoinLiveForm({ core, onJoined, onCancel, fixedRole, note, distanceYd, t
     const r = await core.joinRelay(code, name || 'Guest', role, { distanceYd, targetName });
     setBusy(false);
     if (!r.ok) { setErr(relayErrText(r)); return; }
+    /* Tracked on the success path only. A failed join is a different question
+     * (is the code expiring, is the relay full) and folding it in here would
+     * make the join count disagree with the number of relays that ran. */
+    core.track('relay_joined', { role });
     onJoined(r);
   }
 
@@ -6040,6 +6323,15 @@ function App() {
     return core.on(core.EVENTS.RELAY_ENDED, () => setLiveSess(null));
   }, [core]);
 
+  /* Which screens get opened, from the state rather than from a dozen setTab
+   * call sites -- one of which is always the one somebody forgets. `more` is a
+   * submenu of the More tab, so it is part of the screen's identity: without it
+   * every menu row in there reads as the same view. */
+  useEffect(() => {
+    if (!core) return;
+    core.track('screen_viewed', { screen: more ? `more/${more}` : tab });
+  }, [core, tab, more]);
+
   /* Signing in changes what this component renders -- the sign-in card leaves
    * the home screen, and the More menu's rows change what they say -- but
    * `core.isSignedIn()` is a method call, not state, so nothing here re-runs
@@ -6134,7 +6426,7 @@ function App() {
       targetRings: tgt ? { name: tgt.name, rings: tgt.rings, zones: tgt.zones || null } : null,
       distanceYd: +sess.rangeYards || null,
     });
-    if (r.ok) bindRelay(sess, tgt);
+    if (r.ok) { core.track('relay_hosted', { hasTarget: !!tgt }); bindRelay(sess, tgt); }
     return r;
   };
 
@@ -6351,6 +6643,7 @@ function App() {
         if (need.length) saveDeletedBuiltins(deletedBuiltins.filter(id => !need.includes(id)));
         saveMatches([built.match, ...matches]);
         saveSessions([...built.sessions, ...sessions]);
+        if (core) core.track('match_created', { stages: built.sessions.length });
         setScreen('home');
       }}
     />;
@@ -6368,6 +6661,11 @@ function App() {
         const u = [s, ...sessions];
         saveSessions(u);
         if (newMatch) saveMatches([newMatch, ...matches]);
+        /* Whether a session was tied to a rifle and to a load is the seam this
+         * suite exists for -- a session with neither is a note, and one with
+         * both is what flows back to Bench. */
+        if (core) core.track('range_session_created',
+          { hasFirearm: !!s.rifleId, hasBatch: !!s.batchId, fromMatch: !!newMatch });
         setActiveSess(s.id);
         setScreen('detail');
       }}
@@ -6405,6 +6703,11 @@ function App() {
         const sh2 = Number.isFinite(sh.shotNo) ? sh : { ...sh, shotNo: nextShotNo(prior) };
         const u=sessions.map(s=>s.id===sess.id?{...s,shots:[...prior,sh2]}:s);
         saveSessions(u); mirrorShot({ ...sess, shots: prior }, tgt, sh2);
+        /* Per shot rather than per string, because there is no moment a string
+         * is declared finished -- a shooter adds to one over an afternoon. The
+         * shot NUMBER travels, so string length is still recoverable. */
+        if (core) core.track('shot_logged',
+          { shotNo: sh2.shotNo, sighter: !!sh2.sighter, live: !!liveSess });
       }}
       /* A deleted shot has to be REMEMBERED, not merely dropped. Once the
          string is on the server, dropping it locally leaves the row there;
@@ -6464,6 +6767,9 @@ function App() {
         // Mint the entry id ONCE and persist it, so republishing after editing
         // shots updates the same row instead of stacking duplicates.
         const lbId = s.lbId || core.uuid();
+        // Republishing an edited string is not a new entry, and counting it as
+        // one would read as leaderboard growth that never happened.
+        core.track('leaderboard_published', { republish: !!s.lbId });
         core.publishEntry({ ...entry, id: lbId });
         if (!s.lbId) saveSessions(sessions.map(x => x.id === s.id ? { ...x, lbId } : x));
         core.sync({ trigger: 'publish' });

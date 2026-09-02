@@ -1,0 +1,627 @@
+/* Owner dashboard for Zero and Bench.
+ *
+ * Read-only, and deliberately the thinnest thing that answers the question. It
+ * signs in with the same zero-core both apps carry, asks the server whether
+ * this account is an admin, and then reads four rollup views. It never writes.
+ *
+ * Two decisions worth stating out loud:
+ *
+ * 1. `telemetry: false`. This app must not appear in its own numbers. An owner
+ *    checking the dashboard every morning would otherwise show up as the most
+ *    engaged user of a product they are not using.
+ *
+ * 2. The is_admin() call is a COURTESY, not the boundary. RLS on
+ *    analytics_event is what actually decides -- a non-admin who skips this
+ *    page and calls the REST API directly gets an empty array, because there is
+ *    no select policy that would give them a row. What the check buys is an
+ *    honest screen instead of a dashboard full of zeroes.
+ */
+const CORE = (() => {
+  try {
+    if (!SHARED_SUPABASE?.url || !SHARED_SUPABASE?.anonKey) return null;
+    return ZeroCore.create({
+      url: SHARED_SUPABASE.url, anonKey: SHARED_SUPABASE.anonKey,
+      appId: 'admin',
+      /* Also keeps source_app honest: the column is CHECKed to ('bench','zero')
+       * and this app is neither. */
+      telemetry: false,
+      autoSyncMs: 0,
+    });
+  } catch (e) { return null; }
+})();
+
+const APPS = ['bench', 'zero'];
+const COLOR = { bench: 'var(--bench)', zero: 'var(--zero)' };
+const LABEL = { bench: 'Bench', zero: 'Zero' };
+
+const UI = { range: 30, view: 'loading', error: null, data: null, busy: false,
+             mfa: null };   // { factorId, qr, secret, uri, challengeId, fresh }
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;');
+const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString());
+
+/* Days are the SERVER's dates (UTC), which is what the views group on. Shown
+ * as given rather than shifted into the reader's zone: a dashboard that
+ * silently re-buckets is a dashboard whose totals stop adding up. */
+const isoDay = (d) => d.toISOString().slice(0, 10);
+const dayList = (n) => {
+  const out = [];
+  const end = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(end);
+    d.setUTCDate(d.getUTCDate() - i);
+    out.push(isoDay(d));
+  }
+  return out;
+};
+const shortDay = (iso) => iso.slice(5).replace('-', '/');
+
+/* ------------------------------------------------------------------ loading */
+async function load() {
+  const from = dayList(UI.range)[0];
+  const q = (extra) => `select=*&day=gte.${from}&order=day.asc${extra || ''}`;
+  const views = {
+    active: 'v_analytics_daily_active',
+    signups: 'v_analytics_new_users',
+    events: 'v_analytics_events_by_name',
+    visits: 'v_analytics_visits',
+  };
+  const out = {};
+  for (const [key, view] of Object.entries(views)) {
+    const res = await CORE.selectView(view, q());
+    /* A 404 here means the migrations have not been applied, which is a
+     * different problem from "no data yet" and must not be reported as an
+     * empty dashboard. */
+    if (!res.ok) {
+      const st = res.status;
+      throw new Error(st === 404
+        ? `The view ${view} does not exist — apply migrations 0015 and 0016 to the Supabase project first.`
+        : `Could not read ${view}${st ? ` (HTTP ${st})` : ''}.`);
+    }
+    out[key] = res.data || [];
+  }
+  return out;
+}
+
+/* --------------------------------------------------------------- SVG charts */
+/* Hand-rolled, for the same reason the rest of the suite is: no CDN, no chart
+ * library, nothing that has to keep working in five years but its own code. */
+
+const W = 760, PADL = 44, PADR = 58, PADT = 12;
+
+const axisText = (x, y, s, anchor, cls) =>
+  `<text x="${x}" y="${y}" text-anchor="${anchor || 'middle'}" font-size="10"
+     font-family="var(--fm)" fill="${cls || 'var(--ink3)'}">${esc(s)}</text>`;
+
+/* Round ticks, so the gridlines land on numbers a person would choose. */
+function niceMax(v) {
+  if (v <= 4) return Math.max(1, Math.ceil(v));
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  return Math.ceil(v / (pow / 2)) * (pow / 2);
+}
+
+/**
+ * Multi-series line chart with a crosshair. One y-axis, always: two measures of
+ * different scale get two charts, never a second axis.
+ */
+function lineChart(days, series, opts) {
+  const H = (opts && opts.height) || 210;
+  const max = niceMax(Math.max(1, ...series.flatMap(s => s.values.filter(v => v != null))));
+  const plotW = W - PADL - PADR, plotH = H - PADT - 26;
+  const x = (i) => PADL + (days.length === 1 ? plotW / 2 : (i / (days.length - 1)) * plotW);
+  const y = (v) => PADT + plotH - (v / max) * plotH;
+
+  let g = '';
+  for (let t = 0; t <= 4; t++) {
+    const v = (max / 4) * t, yy = y(v);
+    g += `<line x1="${PADL}" x2="${PADL + plotW}" y1="${yy}" y2="${yy}"
+            stroke="var(--line)" stroke-width="1" opacity="${t ? .5 : 1}"/>`;
+    g += axisText(PADL - 8, yy + 3, Math.round(v), 'end');
+  }
+
+  // Selective date labels: never one per point.
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  for (let i = 0; i < days.length; i += step) {
+    g += axisText(x(i), H - 8, shortDay(days[i]));
+  }
+
+  let marks = '';
+  for (const s of series) {
+    const pts = s.values.map((v, i) => (v == null ? null : [x(i), y(v)])).filter(Boolean);
+    if (!pts.length) continue;
+    marks += `<polyline fill="none" stroke="${s.color}" stroke-width="2"
+                stroke-linejoin="round" stroke-linecap="round"
+                points="${pts.map(p => p.join(',')).join(' ')}"/>`;
+    // A single point has no line to be, so it needs a mark of its own.
+    if (pts.length === 1) {
+      marks += `<circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="4" fill="${s.color}"/>`;
+    }
+    /* Direct label at the series end. With two series this is what makes
+     * identity survive a colourblind reader, a greyscale print, and forced
+     * colours -- the legend alone would not. */
+    const last = pts[pts.length - 1];
+    marks += `<text x="${last[0] + 8}" y="${last[1] + 4}" font-size="11"
+                font-family="var(--fh)" fill="var(--ink2)">${esc(s.label)}</text>`;
+  }
+
+  /* One transparent column per day, so the hit target is the whole column
+   * rather than a 2px line. */
+  let hit = '';
+  const colW = days.length > 1 ? plotW / (days.length - 1) : plotW;
+  days.forEach((d, i) => {
+    const vals = series.map(s => `${s.label} ${fmt(s.values[i] || 0)}`).join('  ·  ');
+    hit += `<rect x="${x(i) - colW / 2}" y="${PADT}" width="${colW}" height="${plotH}"
+              fill="transparent" data-tip="${esc(d + '  —  ' + vals)}"
+              data-x="${x(i)}"/>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" role="img">
+    <g>${g}</g><g>${marks}</g>
+    <line class="cross" x1="0" x2="0" y1="${PADT}" y2="${PADT + plotH}"
+      stroke="var(--ink3)" stroke-width="1" opacity="0"/>
+    <g>${hit}</g></svg>`;
+}
+
+/** Grouped bars: one group per day, one bar per app. */
+function barChart(days, series, opts) {
+  const H = (opts && opts.height) || 190;
+  const max = niceMax(Math.max(1, ...series.flatMap(s => s.values)));
+  const plotW = W - PADL - PADR, plotH = H - PADT - 26;
+  const groupW = plotW / days.length;
+  // 2px of surface between adjacent bars, so two fills never touch.
+  const barW = Math.max(2, (groupW - 6) / series.length - 2);
+
+  let g = '';
+  for (let t = 0; t <= 4; t++) {
+    const v = (max / 4) * t, yy = PADT + plotH - (v / max) * plotH;
+    g += `<line x1="${PADL}" x2="${PADL + plotW}" y1="${yy}" y2="${yy}"
+            stroke="var(--line)" stroke-width="1" opacity="${t ? .5 : 1}"/>`;
+    g += axisText(PADL - 8, yy + 3, Math.round(v), 'end');
+  }
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  for (let i = 0; i < days.length; i += step) {
+    g += axisText(PADL + groupW * (i + .5), H - 8, shortDay(days[i]));
+  }
+
+  let marks = '';
+  days.forEach((d, i) => {
+    series.forEach((s, k) => {
+      const v = s.values[i] || 0;
+      if (!v) return;
+      const h = (v / max) * plotH;
+      const bx = PADL + groupW * i + 3 + k * (barW + 2);
+      /* 4px rounded ends on the DATA end only; the baseline end stays square,
+       * because a bar that is rounded where it meets the axis reads as
+       * floating. */
+      const r = Math.min(4, h);
+      marks += `<path d="M${bx} ${PADT + plotH}
+                  V${PADT + plotH - h + r}
+                  q0 ${-r} ${r} ${-r}
+                  h${barW - 2 * r}
+                  q${r} 0 ${r} ${r}
+                  V${PADT + plotH} Z"
+                fill="${s.color}"
+                data-tip="${esc(`${d}  —  ${s.label} ${fmt(v)}`)}"/>`;
+    });
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" role="img">
+    <g>${g}</g><g>${marks}</g></svg>`;
+}
+
+/** Horizontal bars for a ranked list. One measure, one hue. */
+function rankChart(rows, opts) {
+  const rowH = 26, H = Math.max(40, rows.length * rowH + 8);
+  const labelW = (opts && opts.labelW) || 190;
+  const plotW = W - labelW - 70;
+  const max = Math.max(1, ...rows.map(r => r.value));
+  let out = '';
+  rows.forEach((r, i) => {
+    const y = i * rowH + 4;
+    const w = Math.max(2, (r.value / max) * plotW);
+    const rr = Math.min(4, w);
+    out += `<text x="${labelW - 10}" y="${y + 14}" text-anchor="end" font-size="12"
+              font-family="var(--fh)" fill="var(--ink2)">${esc(r.label)}</text>`;
+    out += `<path d="M${labelW} ${y + 3}
+              h${w - rr} q${rr} 0 ${rr} ${rr}
+              v${12 - 2 * rr} q0 ${rr} ${-rr} ${rr}
+              h${-(w - rr)} Z"
+            fill="${r.color || 'var(--zero)'}"
+            data-tip="${esc(`${r.label} — ${fmt(r.value)}${r.sub ? '  ·  ' + r.sub : ''}`)}"/>`;
+    out += `<text x="${labelW + w + 8}" y="${y + 14}" font-size="11"
+              font-family="var(--fm)" fill="var(--ink3)">${fmt(r.value)}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" role="img">${out}</svg>`;
+}
+
+/* ------------------------------------------------------------------ shaping */
+/* One row per (app, day) becomes one series per app over a dense day axis, so a
+ * day with no activity is a zero in the line rather than a gap the eye reads as
+ * a straight run between the days either side of it. */
+function seriesFor(rows, days, field) {
+  return APPS.map(app => {
+    const byDay = new Map(rows.filter(r => r.source_app === app).map(r => [r.day, +r[field] || 0]));
+    return { key: app, label: LABEL[app], color: COLOR[app],
+             values: days.map(d => byDay.get(d) || 0) };
+  });
+}
+const sum = (rows, field, app) => rows
+  .filter(r => !app || r.source_app === app)
+  .reduce((a, r) => a + (+r[field] || 0), 0);
+
+/* ----------------------------------------------------------------- rendering */
+function tile(k, v, s) {
+  return `<div class="tile"><div class="k">${esc(k)}</div>
+    <div class="v">${v}</div>${s ? `<div class="s">${esc(s)}</div>` : ''}</div>`;
+}
+
+function legend() {
+  return `<div class="legend">${APPS.map(a =>
+    `<span><i style="background:${COLOR[a]}"></i>${LABEL[a]}</span>`).join('')}</div>`;
+}
+
+function dashboard(d) {
+  const days = dayList(UI.range);
+  const active = seriesFor(d.active, days, 'active_users');
+  const visits = seriesFor(d.visits, days, 'visits');
+  const signups = seriesFor(d.signups, days, 'new_users');
+
+  /* Distinct people cannot be summed across days -- the same shooter on
+   * Monday and Tuesday is one user, and adding the columns would report two.
+   * The honest headline from a per-day rollup is the peak day, and it says so
+   * on the tile rather than being labelled "users" and quietly meaning
+   * something else. */
+  const peakActive = Math.max(0, ...active.flatMap(s => s.values));
+  const totalVisits = sum(d.visits, 'visits');
+  const totalSignups = sum(d.signups, 'new_users');
+  const totalEvents = sum(d.active, 'events');
+
+  const withDur = d.visits.filter(r => +r.visits_with_duration > 0);
+  const durNote = withDur.length
+    ? `${Math.round(100 * sum(d.visits, 'visits_with_duration') / Math.max(1, totalVisits))}% of visits reported one`
+    : 'no visit reported one yet';
+  const avgDur = withDur.length
+    ? (withDur.reduce((a, r) => a + (+r.avg_duration_s || 0), 0) / withDur.length)
+    : null;
+
+  // Feature usage: everything that is not the automatic auth/lifecycle spine.
+  const SPINE = new Set(['app_open', 'app_background', 'sign_in', 'sign_up',
+                         'sign_out', 'sign_in_anonymous']);
+  const byName = new Map();
+  for (const r of d.events) {
+    const key = r.source_app + ' ' + r.event_name;
+    const cur = byName.get(key) || { app: r.source_app, name: r.event_name, count: 0, users: 0 };
+    cur.count += +r.event_count || 0;
+    cur.users = Math.max(cur.users, +r.user_count || 0);
+    byName.set(key, cur);
+  }
+  const all = [...byName.values()].sort((a, b) => b.count - a.count);
+  const features = all.filter(r => !SPINE.has(r.name)).slice(0, 12);
+
+  const empty = !d.active.length;
+
+  return `
+  <main>
+    ${empty ? `<div class="banner warn">No events in the last ${UI.range} days.
+      If the apps have just been rebuilt, this fills in as people use them —
+      a visit is recorded on the first sign-in, not on a signed-out page load.</div>` : ''}
+
+    <section>
+      <h2>Last ${UI.range} days</h2>
+      <p class="note">Days are UTC, the axis the database groups on.</p>
+      <div class="tiles">
+        ${tile('Visits', fmt(totalVisits), 'app opens, both apps')}
+        ${tile('Busiest day', fmt(peakActive), 'people active — daily counts cannot be summed')}
+        ${tile('New sign-ups', fmt(totalSignups), 'accounts created')}
+        ${tile('Events recorded', fmt(totalEvents), 'every tracked action')}
+        ${tile('Typical visit', avgDur == null ? '—' : `${Math.round(avgDur)}s`, durNote)}
+      </div>
+    </section>
+
+    <section>
+      <h2>People per day</h2>
+      <p class="note">Distinct accounts that did anything at all, per app.</p>
+      <div class="card">${legend()}<div class="scroll">${lineChart(days, active)}</div></div>
+    </section>
+
+    <section>
+      <h2>Visits per day</h2>
+      <p class="note">One visit is one app open. This is the reliable traffic number —
+        visit <em>duration</em> is not, because a phone browser may kill a backgrounded
+        tab without running anything.</p>
+      <div class="card">${legend()}<div class="scroll">${lineChart(days, visits)}</div></div>
+    </section>
+
+    <section>
+      <h2>New sign-ups</h2>
+      <p class="note">Counted on the sign-up itself. An account created while email
+        confirmation is pending is counted when it first signs in.</p>
+      <div class="card">${legend()}<div class="scroll">${barChart(days, signups)}</div></div>
+    </section>
+
+    <section>
+      <h2>What people actually do</h2>
+      <p class="note">Feature actions only — sign-ins and app opens are the spine and are
+        reported above.</p>
+      <div class="card">${features.length
+        ? `<div class="scroll">${rankChart(features.map(r => ({
+            label: `${LABEL[r.app]} · ${r.name.replace(/_/g, ' ')}`,
+            value: r.count, color: COLOR[r.app],
+            sub: `${fmt(r.users)} ${r.users === 1 ? 'person' : 'people'}`,
+          })))}</div>`
+        : '<div class="empty">Nothing tracked yet.</div>'}</div>
+    </section>
+
+    <section>
+      <h2>Every event</h2>
+      <p class="note">The whole table, spine included, so a number above can always be
+        traced to what produced it.</p>
+      <div class="card"><div class="scroll"><table>
+        <thead><tr><th>App</th><th>Event</th><th class="n">Count</th>
+          <th class="n">People (peak day)</th></tr></thead>
+        <tbody>${all.length ? all.map(r => `<tr>
+          <td><span class="chip" style="color:${COLOR[r.app]}">${LABEL[r.app]}</span></td>
+          <td>${esc(r.name)}</td>
+          <td class="n">${fmt(r.count)}</td>
+          <td class="n">${fmt(r.users)}</td></tr>`).join('')
+          : '<tr><td colspan="4" class="empty">Nothing tracked yet.</td></tr>'}
+        </tbody></table></div></div>
+    </section>
+  </main>`;
+}
+
+function header() {
+  const u = CORE && CORE.getUser();
+  return `<header>
+    <h1>Zero Suite</h1>
+    <span class="sub">owner dashboard</span>
+    <span class="spacer"></span>
+    <span class="range">
+      ${[7, 30, 90].map(n => `<button data-range="${n}"
+        aria-pressed="${UI.range === n}">${n}d</button>`).join('')}
+    </span>
+    <button data-act="refresh">${UI.busy ? 'Loading…' : 'Refresh'}</button>
+    ${u ? `<button data-act="signout">Sign out</button>` : ''}
+  </header>`;
+}
+
+function gate(msg, kind) {
+  return `<div class="gate"><div class="card">
+    <h1 style="font-size:16px;margin:0 0 4px">Zero Suite</h1>
+    <p class="note">Owner dashboard.</p>
+    ${msg ? `<div class="banner ${kind || 'bad'}">${esc(msg)}</div>` : ''}
+    <form id="signin">
+      <label for="em">Email</label>
+      <input id="em" type="email" autocomplete="username" required>
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" required>
+      <button type="submit" style="width:100%;margin-top:14px">Sign in</button>
+    </form>
+  </div></div>`;
+}
+
+/* ------------------------------------------------------------------- MFA */
+/* The dashboard reads every user's usage history, so it asks for a TOTP code
+ * on top of the password. Microsoft Authenticator, Google Authenticator, Authy
+ * and 1Password all speak the same standard; nothing here is tied to one.
+ *
+ * This screen is a CONVENIENCE, not the boundary. The boundary is the policy
+ * in 0017: analytics_event's select policy demands `aal2`, a claim that only
+ * exists on a token GoTrue mints after it has checked a code. Skipping this
+ * page and calling the REST API with a password-only token returns an empty
+ * array, which is the same answer it gives everyone else.
+ */
+function mfaScreen() {
+  const m = UI.mfa || {};
+  const enrolling = !!m.qr;
+  /* Rendered from the otpauth URI with the same encoder Bench prints labels
+   * with, rather than injecting the SVG string the server hands back: the
+   * server's copy would be markup from the network going straight into
+   * innerHTML, and the encoder is already in the repo. */
+  const qr = enrolling && m.uri
+    ? QR.toSvg(m.uri, { ecc: 'M', quietZone: 2, dark: '#0f1117', light: '#ffffff' })
+    : '';
+
+  return `<div class="gate"><div class="card">
+    <h1 style="font-size:16px;margin:0 0 4px">${enrolling ? 'Set up your authenticator' : 'Second factor'}</h1>
+    <p class="note">${enrolling
+      ? 'Scan this with Microsoft Authenticator — <em>Add account → Other</em> — then enter the six digits it shows.'
+      : 'Open Microsoft Authenticator and enter the six digits for Zero Suite.'}</p>
+    ${UI.error ? `<div class="banner bad">${esc(UI.error)}</div>` : ''}
+    ${qr ? `<div class="qr">${qr}</div>
+      <p class="note" style="text-align:center">Cannot scan? Enter this key by hand:<br>
+        <code class="key">${esc(m.secret || '')}</code></p>` : ''}
+    <form id="mfa">
+      <label for="code">Six-digit code</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*"
+             maxlength="7" required
+             style="font-family:var(--fm);font-size:20px;letter-spacing:.3em;text-align:center">
+      <button type="submit" style="width:100%;margin-top:14px">${UI.busy ? 'Checking…' : 'Verify'}</button>
+    </form>
+    <button data-act="signout" style="width:100%;margin-top:8px;background:none;border:none;color:var(--ink3)">
+      Sign out</button>
+  </div></div>`;
+}
+
+/** Decide which of the two MFA screens to show, and prepare it. */
+async function startMfa() {
+  UI.busy = true; UI.error = null;
+  const f = await CORE.mfaFactors();
+  if (!f.ok) {
+    UI.view = 'error';
+    UI.error = 'Could not check this account for a second factor.';
+    UI.busy = false; return render();
+  }
+  if (f.verified.length) {
+    /* Already enrolled: challenge the existing factor. No QR -- showing one
+     * again would enrol a SECOND factor and leave the first as a way in. */
+    const c = await CORE.mfaChallenge(f.verified[0].id);
+    UI.mfa = { factorId: f.verified[0].id, challengeId: c.ok ? c.challengeId : null };
+    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+  } else {
+    /* Enrolment runs on the password-only session, deliberately: an admin who
+     * has never enrolled has no way to reach aal2, so requiring it here would
+     * lock the only admin out with no path back. */
+    const e = await CORE.mfaEnroll('Zero Suite dashboard');
+    if (!e.ok) {
+      UI.view = 'error';
+      UI.error = e.status === 422
+        ? 'This account already has an unverified factor. Remove it in the Supabase dashboard and try again.'
+        : 'Could not start enrolment.';
+      UI.busy = false; return render();
+    }
+    const c = await CORE.mfaChallenge(e.factorId);
+    UI.mfa = { factorId: e.factorId, qr: e.qr, secret: e.secret, uri: e.uri,
+               challengeId: c.ok ? c.challengeId : null, fresh: true };
+    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+  }
+  UI.view = 'mfa';
+  UI.busy = false;
+  render();
+}
+
+function render() {
+  const app = $('app');
+  if (!CORE) {
+    app.innerHTML = gate('No backend is configured in this build — supabase.config.json '
+      + 'was empty when it was built.', 'bad');
+    return;
+  }
+  if (UI.view === 'signin')  { app.innerHTML = gate(UI.error, 'bad'); return; }
+  if (UI.view === 'mfa')     { app.innerHTML = mfaScreen(); const c = $('code'); if (c) c.focus(); return; }
+  if (UI.view === 'denied')  {
+    app.innerHTML = header() + `<main><div class="banner bad">
+      This account is not an admin, so there is nothing to show. Set
+      <code>profiles.is_admin</code> to true for it in the Supabase SQL editor.
+    </div></main>`;
+    return;
+  }
+  if (UI.view === 'error')   {
+    app.innerHTML = header() + `<main><div class="banner bad">${esc(UI.error)}</div></main>`;
+    return;
+  }
+  if (UI.view === 'loading') { app.innerHTML = header() + '<main><p class="note">Loading…</p></main>'; return; }
+  app.innerHTML = header() + dashboard(UI.data);
+}
+
+/* -------------------------------------------------------------------- flow */
+async function enter() {
+  UI.view = 'loading'; UI.busy = true; render();
+  /* Ask the server, every time. A stale "yes" cached on the device would keep
+   * showing a dashboard shell after the flag was revoked -- empty, because RLS
+   * still refuses the rows, but misleading about what this account can do. */
+  const who = await CORE.rpc('is_admin');
+  if (!who.ok) {
+    UI.view = 'error';
+    UI.error = who.status === 404
+      ? 'The is_admin() function does not exist — apply migration 0015 to the Supabase project first.'
+      : 'Could not reach the backend to check this account.';
+    UI.busy = false; return render();
+  }
+  if (who.data !== true) { UI.view = 'denied'; UI.busy = false; return render(); }
+  /* An admin, but the analytics need a second factor verified in THIS session.
+   * Checked from the token's own aal claim, which is the same thing the policy
+   * reads — asking the client's opinion of its own privileges would be the one
+   * check that proves nothing. */
+  if (CORE.aal() !== 'aal2') { UI.busy = false; return startMfa(); }
+  try {
+    UI.data = await load();
+    UI.view = 'ready';
+  } catch (e) {
+    UI.view = 'error'; UI.error = e.message || String(e);
+  }
+  UI.busy = false;
+  render();
+}
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'mfa') {
+    e.preventDefault();
+    if (UI.busy) return;
+    const m = UI.mfa || {};
+    // Spaces are how every authenticator app displays the code, so accept them.
+    const code = $('code').value.replace(/\s+/g, '');
+    UI.busy = true; UI.error = null; render();
+
+    /* A challenge expires, and one is also spent by a failed attempt. Getting a
+     * fresh one per submission means "wrong code, try again" is actually
+     * retryable rather than failing forever against a dead challenge. */
+    let challengeId = m.challengeId;
+    if (!challengeId) {
+      const c = await CORE.mfaChallenge(m.factorId);
+      if (!c.ok) {
+        UI.busy = false; UI.error = 'Could not start the check. Try again.'; return render();
+      }
+      challengeId = c.challengeId;
+    }
+    const v = await CORE.mfaVerify(m.factorId, challengeId, code);
+    UI.mfa = { ...m, challengeId: null };
+    if (!v.ok) {
+      UI.busy = false;
+      UI.error = v.status === 422 || v.status === 401
+        ? 'That code was not accepted. Codes last about thirty seconds — wait for the next one and try again.'
+        : 'Could not check the code. Try again.';
+      return render();
+    }
+    UI.mfa = null; UI.error = null; UI.busy = false;
+    return enter();
+  }
+  if (e.target.id !== 'signin') return;
+  e.preventDefault();
+  UI.error = null;
+  const r = await CORE.signIn($('em').value.trim(), $('pw').value);
+  if (!r.ok) {
+    UI.error = (r.error && (r.error.error_description || r.error.msg || r.error.message))
+      || 'Sign-in failed.';
+    return render();
+  }
+  enter();
+});
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.range) { UI.range = +b.dataset.range; return enter(); }
+  if (b.dataset.act === 'refresh') return enter();
+  if (b.dataset.act === 'signout') {
+    CORE.signOut();
+    UI.view = 'signin'; UI.data = null; UI.error = null;
+    return render();
+  }
+});
+
+/* One tooltip, driven by whatever mark is under the pointer. Bigger hit targets
+ * than the marks themselves: the line charts carry a transparent column per
+ * day, so a 2px line does not have to be hit exactly. */
+(() => {
+  const tip = $('tip');
+  document.addEventListener('mousemove', (e) => {
+    const t = e.target.closest('[data-tip]');
+    if (!t) {
+      tip.style.opacity = 0;
+      document.querySelectorAll('.cross').forEach(c => (c.style.opacity = 0));
+      return;
+    }
+    tip.textContent = t.dataset.tip;
+    tip.style.opacity = 1;
+    // Flip before the edge rather than after it, so the tip never leaves the page.
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - w - 8) + 'px';
+    tip.style.top = Math.max(8, e.clientY - h - 12) + 'px';
+    const svg = t.ownerSVGElement;
+    if (svg && t.dataset.x) {
+      const cross = svg.querySelector('.cross');
+      if (cross) {
+        cross.setAttribute('x1', t.dataset.x);
+        cross.setAttribute('x2', t.dataset.x);
+        cross.style.opacity = .5;
+      }
+    }
+  });
+})();
+
+if (CORE && CORE.isSignedIn()) enter();
+else { UI.view = 'signin'; render(); }

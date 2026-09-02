@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1117">
+<meta name="description" content="Owner dashboard for Zero and Bench: traffic, sign-ups and feature usage.">
+<meta name="robots" content="noindex, nofollow">
+<title>Zero Suite — Owner</title>
+<style>
+/* The suite's palette, value for value, so this reads as the same product as
+ * the two apps it reports on. Type stack likewise -- the faces are vendored and
+ * copied in at build time rather than fetched from a third party. */
+:root{
+  --fh:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --fm:'Space Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#252836; --line:#353848;
+  --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
+  --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
+  --r:9px;
+
+  /* The two series colours, and the reason they are not the apps' own accents.
+   *
+   * Bench is brass #c9a227 and Zero is orange #e8943a, which is exactly the
+   * pair a chart must not use: run through the palette validator they come back
+   * at deuteranope ΔE 1.3 and normal-vision ΔE 6.4 -- indistinguishable to a
+   * colourblind reader and hard work for everyone else. These two are the same
+   * warm/cool idea re-stepped until all five checks pass on this surface
+   * (lightness band, chroma, CVD separation, normal-vision floor, contrast).
+   * Every line is direct-labelled as well, so identity never rests on colour. */
+  --bench:#c9822b; --zero:#4a86d8;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink); font-family:var(--fh);
+  font-size:14px; line-height:1.5;
+  padding:0 0 60px;
+}
+a{color:var(--zero)}
+
+header{
+  position:sticky; top:0; z-index:5; background:rgba(15,17,23,.94);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+  padding:14px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+}
+header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.01em}
+header .sub{color:var(--ink3); font-size:12px; font-family:var(--fm)}
+.spacer{flex:1}
+
+main{max-width:1080px; margin:0 auto; padding:20px}
+section{margin-bottom:26px}
+h2{font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+   color:var(--ink2); margin:0 0 4px; font-weight:600}
+.note{color:var(--ink3); font-size:12px; margin:0 0 12px}
+
+button{
+  font-family:inherit; font-size:13px; background:var(--panel2); color:var(--ink);
+  border:1px solid var(--line); border-radius:6px; padding:7px 12px; cursor:pointer;
+}
+button:hover{border-color:var(--ink3)}
+button[aria-pressed="true"]{background:var(--ink); color:var(--bg); border-color:var(--ink)}
+.range{display:flex; gap:6px}
+
+input{
+  font-family:inherit; font-size:13px; background:var(--panel2); color:var(--ink);
+  border:1px solid var(--line); border-radius:6px; padding:9px 11px; width:100%;
+}
+
+/* Stat tiles. A hero number with no plot needs no hover layer -- the number is
+ * already the whole message. */
+.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px}
+.tile{background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:14px 16px}
+.tile .k{color:var(--ink2); font-size:12px; margin-bottom:6px}
+.tile .v{font-family:var(--fm); font-size:26px; line-height:1.1; font-variant-numeric:tabular-nums}
+.tile .s{color:var(--ink3); font-size:11px; margin-top:5px}
+
+.card{background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+      padding:16px 18px 12px}
+.legend{display:flex; gap:16px; align-items:center; margin:2px 0 10px;
+        font-size:12px; color:var(--ink2)}
+.legend i{width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:6px}
+
+/* Wide content scrolls inside its own box; the page itself never scrolls
+ * sideways. */
+.scroll{overflow-x:auto}
+svg{display:block; max-width:100%}
+/* On a narrow screen a chart SCROLLS rather than shrinks. Letting a 760-unit
+ * viewBox squash into 375px keeps the whole plot on screen and takes the 10px
+ * axis labels down to about five, which is a chart you can see and not read. */
+.scroll svg{min-width:600px}
+.tip{
+  position:fixed; pointer-events:none; z-index:20; background:var(--panel2);
+  border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:12px;
+  font-family:var(--fm); white-space:nowrap; box-shadow:0 6px 20px rgba(0,0,0,.45);
+  opacity:0; transition:opacity .08s;
+}
+
+table{border-collapse:collapse; width:100%; font-size:13px}
+th{text-align:left; color:var(--ink2); font-weight:600; font-size:11px;
+   text-transform:uppercase; letter-spacing:.06em; padding:8px 10px;
+   border-bottom:1px solid var(--line); white-space:nowrap}
+td{padding:8px 10px; border-bottom:1px solid var(--panel2); white-space:nowrap}
+td.n{font-family:var(--fm); text-align:right; font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+.chip{display:inline-block; font-size:11px; font-family:var(--fm);
+      padding:2px 7px; border-radius:20px; border:1px solid var(--line)}
+
+.banner{border-radius:var(--r); padding:13px 15px; margin-bottom:16px; font-size:13px}
+.banner.bad{background:rgba(240,96,96,.1); border:1px solid rgba(240,96,96,.4)}
+.banner.warn{background:rgba(232,163,23,.1); border:1px solid rgba(232,163,23,.4)}
+
+/* The QR keeps a white quiet zone whatever the page is doing around it — a
+ * dark-themed code with a transparent background is one many phone cameras
+ * decline to read. */
+.qr{background:#fff; border-radius:8px; padding:10px; margin:14px auto 10px;
+    width:190px}
+.qr svg{width:100%; height:auto; display:block}
+code.key{font-family:var(--fm); font-size:13px; letter-spacing:.12em;
+         color:var(--ink); word-break:break-all; user-select:all}
+
+.gate{max-width:340px; margin:14vh auto 0; padding:0 20px}
+.gate .card{padding:22px}
+.gate label{display:block; font-size:12px; color:var(--ink2); margin:10px 0 5px}
+.empty{color:var(--ink3); font-size:13px; padding:22px 0; text-align:center}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="tip" id="tip"></div>
+<!--APP-->
+</body>
+</html>

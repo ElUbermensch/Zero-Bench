@@ -15,6 +15,7 @@ becomes a selectable load in Zero, and the group it shoots flows back to that ba
 ```
 apps/bench           the reloading PWA (vanilla, single-file build)
 apps/zero            Zero (React, bundled with esbuild)
+apps/admin           the owner dashboard: traffic, sign-ups, feature usage
 packages/zero-core   shared auth + offline sync, embedded byte-identically in both
 supabase/            migrations and the RLS test suites
 tools/               preflight, live verification, the zero-core embed step

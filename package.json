@@ -4,9 +4,10 @@
   "type": "module",
   "description": "Zero (precision shooting log) and Bench, over one shared Supabase backend.",
   "scripts": {
-    "build": "npm run build:bench && npm run build:zero",
+    "build": "npm run build:bench && npm run build:zero && npm run build:admin",
     "build:bench": "node apps/bench/build.mjs",
     "build:zero": "npm run embed && node apps/zero/build.mjs",
+    "build:admin": "npm run embed && node apps/admin/build.mjs",
     "test": "node tools/embed-core.mjs --check && npm run test:core && npm run test:bench && npm run test:bench-sync && npm run test:zero && npm run test:cross",
     "test:core": "node packages/zero-core/test-zero-core.mjs",
     "test:bench": "cd apps/bench && node test.mjs && node test-sync-ui.mjs",

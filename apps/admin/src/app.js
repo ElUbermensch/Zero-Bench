@@ -34,7 +34,8 @@ const APPS = ['bench', 'zero'];
 const COLOR = { bench: 'var(--bench)', zero: 'var(--zero)' };
 const LABEL = { bench: 'Bench', zero: 'Zero' };
 
-const UI = { range: 30, view: 'loading', error: null, data: null, busy: false };
+const UI = { range: 30, view: 'loading', error: null, data: null, busy: false,
+             mfa: null };   // { factorId, qr, secret, uri, challengeId, fresh }
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)
@@ -402,6 +403,86 @@ function gate(msg, kind) {
   </div></div>`;
 }
 
+/* ------------------------------------------------------------------- MFA */
+/* The dashboard reads every user's usage history, so it asks for a TOTP code
+ * on top of the password. Microsoft Authenticator, Google Authenticator, Authy
+ * and 1Password all speak the same standard; nothing here is tied to one.
+ *
+ * This screen is a CONVENIENCE, not the boundary. The boundary is the policy
+ * in 0017: analytics_event's select policy demands `aal2`, a claim that only
+ * exists on a token GoTrue mints after it has checked a code. Skipping this
+ * page and calling the REST API with a password-only token returns an empty
+ * array, which is the same answer it gives everyone else.
+ */
+function mfaScreen() {
+  const m = UI.mfa || {};
+  const enrolling = !!m.qr;
+  /* Rendered from the otpauth URI with the same encoder Bench prints labels
+   * with, rather than injecting the SVG string the server hands back: the
+   * server's copy would be markup from the network going straight into
+   * innerHTML, and the encoder is already in the repo. */
+  const qr = enrolling && m.uri
+    ? QR.toSvg(m.uri, { ecc: 'M', quietZone: 2, dark: '#0f1117', light: '#ffffff' })
+    : '';
+
+  return `<div class="gate"><div class="card">
+    <h1 style="font-size:16px;margin:0 0 4px">${enrolling ? 'Set up your authenticator' : 'Second factor'}</h1>
+    <p class="note">${enrolling
+      ? 'Scan this with Microsoft Authenticator — <em>Add account → Other</em> — then enter the six digits it shows.'
+      : 'Open Microsoft Authenticator and enter the six digits for Zero Suite.'}</p>
+    ${UI.error ? `<div class="banner bad">${esc(UI.error)}</div>` : ''}
+    ${qr ? `<div class="qr">${qr}</div>
+      <p class="note" style="text-align:center">Cannot scan? Enter this key by hand:<br>
+        <code class="key">${esc(m.secret || '')}</code></p>` : ''}
+    <form id="mfa">
+      <label for="code">Six-digit code</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*"
+             maxlength="7" required
+             style="font-family:var(--fm);font-size:20px;letter-spacing:.3em;text-align:center">
+      <button type="submit" style="width:100%;margin-top:14px">${UI.busy ? 'Checking…' : 'Verify'}</button>
+    </form>
+    <button data-act="signout" style="width:100%;margin-top:8px;background:none;border:none;color:var(--ink3)">
+      Sign out</button>
+  </div></div>`;
+}
+
+/** Decide which of the two MFA screens to show, and prepare it. */
+async function startMfa() {
+  UI.busy = true; UI.error = null;
+  const f = await CORE.mfaFactors();
+  if (!f.ok) {
+    UI.view = 'error';
+    UI.error = 'Could not check this account for a second factor.';
+    UI.busy = false; return render();
+  }
+  if (f.verified.length) {
+    /* Already enrolled: challenge the existing factor. No QR -- showing one
+     * again would enrol a SECOND factor and leave the first as a way in. */
+    const c = await CORE.mfaChallenge(f.verified[0].id);
+    UI.mfa = { factorId: f.verified[0].id, challengeId: c.ok ? c.challengeId : null };
+    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+  } else {
+    /* Enrolment runs on the password-only session, deliberately: an admin who
+     * has never enrolled has no way to reach aal2, so requiring it here would
+     * lock the only admin out with no path back. */
+    const e = await CORE.mfaEnroll('Zero Suite dashboard');
+    if (!e.ok) {
+      UI.view = 'error';
+      UI.error = e.status === 422
+        ? 'This account already has an unverified factor. Remove it in the Supabase dashboard and try again.'
+        : 'Could not start enrolment.';
+      UI.busy = false; return render();
+    }
+    const c = await CORE.mfaChallenge(e.factorId);
+    UI.mfa = { factorId: e.factorId, qr: e.qr, secret: e.secret, uri: e.uri,
+               challengeId: c.ok ? c.challengeId : null, fresh: true };
+    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+  }
+  UI.view = 'mfa';
+  UI.busy = false;
+  render();
+}
+
 function render() {
   const app = $('app');
   if (!CORE) {
@@ -410,6 +491,7 @@ function render() {
     return;
   }
   if (UI.view === 'signin')  { app.innerHTML = gate(UI.error, 'bad'); return; }
+  if (UI.view === 'mfa')     { app.innerHTML = mfaScreen(); const c = $('code'); if (c) c.focus(); return; }
   if (UI.view === 'denied')  {
     app.innerHTML = header() + `<main><div class="banner bad">
       This account is not an admin, so there is nothing to show. Set
@@ -440,6 +522,11 @@ async function enter() {
     UI.busy = false; return render();
   }
   if (who.data !== true) { UI.view = 'denied'; UI.busy = false; return render(); }
+  /* An admin, but the analytics need a second factor verified in THIS session.
+   * Checked from the token's own aal claim, which is the same thing the policy
+   * reads — asking the client's opinion of its own privileges would be the one
+   * check that proves nothing. */
+  if (CORE.aal() !== 'aal2') { UI.busy = false; return startMfa(); }
   try {
     UI.data = await load();
     UI.view = 'ready';
@@ -451,6 +538,37 @@ async function enter() {
 }
 
 document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'mfa') {
+    e.preventDefault();
+    if (UI.busy) return;
+    const m = UI.mfa || {};
+    // Spaces are how every authenticator app displays the code, so accept them.
+    const code = $('code').value.replace(/\s+/g, '');
+    UI.busy = true; UI.error = null; render();
+
+    /* A challenge expires, and one is also spent by a failed attempt. Getting a
+     * fresh one per submission means "wrong code, try again" is actually
+     * retryable rather than failing forever against a dead challenge. */
+    let challengeId = m.challengeId;
+    if (!challengeId) {
+      const c = await CORE.mfaChallenge(m.factorId);
+      if (!c.ok) {
+        UI.busy = false; UI.error = 'Could not start the check. Try again.'; return render();
+      }
+      challengeId = c.challengeId;
+    }
+    const v = await CORE.mfaVerify(m.factorId, challengeId, code);
+    UI.mfa = { ...m, challengeId: null };
+    if (!v.ok) {
+      UI.busy = false;
+      UI.error = v.status === 422 || v.status === 401
+        ? 'That code was not accepted. Codes last about thirty seconds — wait for the next one and try again.'
+        : 'Could not check the code. Try again.';
+      return render();
+    }
+    UI.mfa = null; UI.error = null; UI.busy = false;
+    return enter();
+  }
   if (e.target.id !== 'signin') return;
   e.preventDefault();
   UI.error = null;

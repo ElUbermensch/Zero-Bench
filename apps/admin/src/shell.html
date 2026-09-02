@@ -110,6 +110,15 @@ tr:last-child td{border-bottom:none}
 .banner.bad{background:rgba(240,96,96,.1); border:1px solid rgba(240,96,96,.4)}
 .banner.warn{background:rgba(232,163,23,.1); border:1px solid rgba(232,163,23,.4)}
 
+/* The QR keeps a white quiet zone whatever the page is doing around it — a
+ * dark-themed code with a transparent background is one many phone cameras
+ * decline to read. */
+.qr{background:#fff; border-radius:8px; padding:10px; margin:14px auto 10px;
+    width:190px}
+.qr svg{width:100%; height:auto; display:block}
+code.key{font-family:var(--fm); font-size:13px; letter-spacing:.12em;
+         color:var(--ink); word-break:break-all; user-select:all}
+
 .gate{max-width:340px; margin:14vh auto 0; padding:0 20px}
 .gate .card{padding:22px}
 .gate label{display:block; font-size:12px; color:var(--ink2); margin:10px 0 5px}

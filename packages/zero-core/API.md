@@ -61,6 +61,20 @@ a local edit does.
 | `signOut()` | `Promise<void>` | clears session and cursors, **keeps the outbox** |
 | `refresh()` | `Promise<boolean>` | single-flight; rarely called directly |
 | `getSession()` / `getUser()` / `isSignedIn()` | | synchronous |
+| `mfaEnroll(name)` | `{ ok, factorId, qr, secret, uri, error? }` | TOTP; `uri` is what a QR should encode |
+| `mfaChallenge(factorId)` | `{ ok, challengeId, expiresAt, error? }` | one per attempt — a challenge is spent either way |
+| `mfaVerify(factorId, challengeId, code)` | `{ ok, session?, aal?, error? }` | on success adopts a **new** session at `aal2` |
+| `mfaUnenroll(factorId)` / `mfaFactors()` | | `mfaFactors()` re-reads from the server |
+| `aal()` | `'aal1'` \| `'aal2'` | synchronous; read off the token's own claim |
+
+**The second factor is per session, not once per account.** Signing out and back in
+returns to `aal1`, which is the property that makes it worth anything after a stolen
+password. Verifying mints a new token server-side — a client cannot award itself the
+claim, which is why `aal()` reads the token rather than any local flag.
+
+Enrolment deliberately works at `aal1`: an admin who has never enrolled has no way to
+reach `aal2`, so requiring it to enrol would lock the only admin out. Only *reading*
+the analytics needs `aal2`, and `0017` is where that is enforced.
 
 Sessions persist through `storage` (localStorage, or memory if the browser blocks it),
 so a reload stays signed in. Tokens refresh automatically 60 s before expiry and on any

@@ -1782,6 +1782,77 @@ section('telemetry');
   ok(off.track('anything', {}) === null, '...including through a direct track() call');
 }
 
+/* ====================================================== MFA (second factor) */
+section('mfa');
+{
+  const c = mkClient(undefined, { appId: 'zero' });
+  await c.signUp('owner-mfa@example.com', 'hunter2');
+
+  ok(c.aal() === 'aal1',
+     'a password sign-in is aal1 — the analytics policy wants aal2 and this is not it');
+
+  const f0 = await c.mfaFactors();
+  ok(f0.ok && f0.factors.length === 0, 'a new account carries no factors');
+
+  const e = await c.mfaEnroll('Zero Suite dashboard');
+  ok(e.ok && !!e.factorId, 'enrolling returns a factor');
+  /* The secret and the otpauth URI both travel: the URI is what the QR
+   * encodes, the secret is what you type when the camera will not cooperate. */
+  ok(!!e.secret && /^otpauth:\/\/totp\//.test(e.uri || ''),
+     '...with both a secret and an otpauth URI, so a failed scan is not a dead end');
+
+  /* Enrolment happens on the password-only session on purpose. Requiring aal2
+   * to enrol would mean the only admin could never obtain aal2. */
+  ok(c.aal() === 'aal1', 'enrolling alone does not grant aal2 — the code still has to be checked');
+
+  const f1 = await c.mfaFactors();
+  ok(f1.factors.length === 1 && f1.verified.length === 0,
+     'the factor exists but is unverified until a code is checked');
+
+  const ch = await c.mfaChallenge(e.factorId);
+  ok(ch.ok && !!ch.challengeId, 'a challenge starts a verification window');
+
+  const wrong = await c.mfaVerify(e.factorId, ch.challengeId, '000000');
+  ok(!wrong.ok, 'a wrong code is refused');
+  ok(c.aal() === 'aal1', '...and leaves the session exactly as unprivileged as it was');
+
+  /* A challenge is spent whether or not the code was right, which is why the
+   * dashboard takes a fresh one per attempt rather than reusing the first. */
+  const reused = await c.mfaVerify(e.factorId, ch.challengeId, mock.state.TOTP_OK);
+  ok(!reused.ok, 'a spent challenge cannot be replayed, even with the right code');
+
+  const ch2 = await c.mfaChallenge(e.factorId);
+  const good = await c.mfaVerify(e.factorId, ch2.challengeId, mock.state.TOTP_OK);
+  ok(good.ok, 'a fresh challenge and the right code verify');
+  /* This is the whole mechanism: the server mints a NEW token carrying aal2.
+   * The client cannot award itself the claim the policy reads. */
+  ok(c.aal() === 'aal2', 'and the session comes back at aal2, on a token the SERVER minted');
+  ok(c.isSignedIn(), '...still signed in, on the new token');
+
+  const f2 = await c.mfaFactors();
+  ok(f2.verified.length === 1, 'the factor is now verified, so a later sign-in is challenged not re-enrolled');
+
+  /* A second enrolment while one is already verified is what would happen if
+   * the dashboard showed the QR screen to a returning admin. It must not. */
+  const dup = await c.mfaEnroll('second');
+  ok(dup.ok, 'a verified account may still add another factor (a spare phone)');
+  const dup2 = await c.mfaEnroll('third');
+  ok(!dup2.ok && dup2.status === 422,
+     '...but not stack a second UNVERIFIED one — the dashboard turns this 422 into an instruction');
+
+  ok((await c.mfaUnenroll(dup.factorId)).ok, 'a factor can be removed');
+  const f3 = await c.mfaFactors();
+  ok(f3.verified.length === 1, '...leaving the verified one alone');
+
+  /* Signing out and back in returns to aal1: the second factor is verified per
+   * SESSION, not once per account, which is the property that makes it worth
+   * anything after a stolen password. */
+  await c.signOut();
+  const back = await c.signIn('owner-mfa@example.com', 'hunter2');
+  ok(back.ok, 'signing back in works');
+  ok(c.aal() === 'aal1', 'and starts at aal1 again — the factor is per session, not once per account');
+}
+
 await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -529,6 +529,18 @@ const ZeroCore = (() => {
       return { ok: true, session };
     }
 
+    /** The access token's payload, or null if it is not a readable JWT.
+     *  Only for claims the server does not also put on the user object. */
+    function jwtClaims() {
+      if (!session || !session.access_token) return null;
+      try {
+        return JSON.parse(
+          atob(session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      } catch (e) {
+        return null;
+      }
+    }
+
     /** True when the current session is an anonymous device rather than a
      *  real account. Anonymous users can relay but cannot publish scores. */
     function isAnonymous() {
@@ -538,16 +550,124 @@ const ZeroCore = (() => {
       if (session.user && typeof session.user.is_anonymous === 'boolean') {
         return session.user.is_anonymous;
       }
-      try {
-        const payload = JSON.parse(
-          atob(session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      const payload = jwtClaims();
+      if (payload) {
         return payload.is_anonymous === true;
-      } catch (e) {
+      }
+      {
         // Undecidable. Say "not anonymous": the server enforces this anyway via
         // a restrictive policy, so the worst case is offering a publish button
         // that fails, rather than hiding one that would have worked.
         return false;
       }
+    }
+
+    /* ---------------------------------------------------------------- MFA */
+    /*
+     * TOTP second factor. Used by the owner dashboard and nothing else: the
+     * apps are offline-first and used at a range with no signal, where
+     * demanding a rotating code to look at your own logbook would be a way of
+     * locking people out of their data. The dashboard is a page you open on a
+     * desk, and it is the thing worth a second factor.
+     *
+     * Endpoints are GoTrue's, taken from @supabase/auth-js rather than guessed:
+     *   POST   /auth/v1/factors                       enroll
+     *   POST   /auth/v1/factors/{id}/challenge        start a verification
+     *   POST   /auth/v1/factors/{id}/verify           finish it, new session
+     *   DELETE /auth/v1/factors/{id}                  unenroll
+     *
+     * The enrolment itself happens at aal1, deliberately -- otherwise an admin
+     * could never obtain the aal2 the policy wants, having no way to enrol
+     * without it. Only READING the analytics needs aal2.
+     */
+    async function mfaEnroll(friendlyName) {
+      const res = await authed('/auth/v1/factors', {
+        method: 'POST',
+        body: JSON.stringify({
+          factor_type: 'totp',
+          friendly_name: friendlyName || 'Authenticator',
+          issuer: 'Zero Suite',
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaEnroll', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      /* `secret` and `uri` are what a user types in by hand when the QR will
+       * not scan, so both travel rather than only the image. */
+      return { ok: true, factorId: json.id,
+               qr: (json.totp && json.totp.qr_code) || null,
+               secret: (json.totp && json.totp.secret) || null,
+               uri: (json.totp && json.totp.uri) || null };
+    }
+
+    async function mfaChallenge(factorId) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}/challenge`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaChallenge', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      return { ok: true, challengeId: json.id, expiresAt: json.expires_at };
+    }
+
+    /**
+     * Verify a code against a challenge. On success GoTrue issues a NEW
+     * session whose token carries `aal: 'aal2'` -- which is the entire point,
+     * because the policy reads that claim and not anything this client says.
+     * Adopting it is therefore not bookkeeping; it is the step that grants the
+     * access.
+     */
+    async function mfaVerify(factorId, challengeId, code) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ challenge_id: challengeId, code: String(code || '').trim() }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.access_token) {
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaVerify', error: json });
+        return { ok: false, status: res.status, error: json };
+      }
+      setSession(shapeSession(json));
+      return { ok: true, session, aal: aal() };
+    }
+
+    async function mfaUnenroll(factorId) {
+      const res = await authed(`/auth/v1/factors/${encodeURIComponent(factorId)}`,
+                               { method: 'DELETE' });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        emit(EVENTS.AUTH_ERROR, { phase: 'mfaUnenroll', error });
+        return { ok: false, status: res.status, error };
+      }
+      return { ok: true };
+    }
+
+    /** The factors on the account, refreshed from the server rather than from
+     *  the cached user -- an enrolment made on another device is exactly the
+     *  case this has to see. */
+    async function mfaFactors() {
+      const res = await authed('/auth/v1/user', { method: 'GET' });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, status: res.status, error: json };
+      const factors = (json.factors || []).filter(f => f.factor_type === 'totp');
+      if (session && json && json.id) { session.user = json; store.set(K.session, session); }
+      return { ok: true, factors,
+               verified: factors.filter(f => f.status === 'verified') };
+    }
+
+    /**
+     * 'aal1' after a password sign-in, 'aal2' once a second factor has been
+     * verified in THIS session. Read off the token, because that is the same
+     * claim the server's policies read -- anything else would be this client's
+     * opinion of its own privileges.
+     */
+    function aal() {
+      const c = jwtClaims();
+      return (c && c.aal) || 'aal1';
     }
 
     /** Ensure SOME identity exists, without asking the user for anything.
@@ -1973,6 +2093,7 @@ const ZeroCore = (() => {
       backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
+      mfaEnroll, mfaChallenge, mfaVerify, mfaUnenroll, mfaFactors, aal,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
       relayPushShot, relayRetractShot, relaySend, relayInfo,

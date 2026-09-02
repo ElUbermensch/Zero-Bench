@@ -273,8 +273,15 @@ export function startMock(opts = {}) {
     refreshTokens: new Map(),    // refresh_token -> userId
     rows: new Map(),             // table -> Map(id -> row)
     clock: 1_000_000,            // server clock, ms; tests advance it by hand
-    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {}, rpc: {} },
+    hits: { refresh: 0, signin: 0, push: {}, pull: {}, patch: {}, rpc: {},
+            mfaEnroll: 0, mfaChallenge: 0, mfaVerify: 0 },
     failRefresh: false,
+    factors: new Map(),          // userId -> [{ id, factor_type, status }]
+    challenges: new Map(),       // challenge id -> { factorId, userId }
+    /* The code a test "reads off the authenticator". Computing a real TOTP
+     * from the secret and the clock would be testing RFC 6238 rather than this
+     * client's enrol/challenge/verify flow. */
+    TOTP_OK: '123456',
     ttlSec: opts.ttlSec ?? 3600,
     pushOrder: [],               // tables in the order they were pushed to
     lastPush: {},                // table -> the exact payload the client sent
@@ -362,12 +369,16 @@ export function startMock(opts = {}) {
   const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-  function issue(userId, email) {
+  function issue(userId, email, aal) {
     // JWT-shaped, so a client that decodes the token (rather than reading the
     // user object) exercises a realistic path.
     const anon = state.anonUsers.has(userId);
+    /* `aal` is the whole mechanism behind the admin second factor: a password
+     * sign-in mints aal1 and only a verified TOTP code mints aal2, so the
+     * claim cannot be obtained without passing the check. */
     const access = [b64u({ alg: 'HS256', typ: 'JWT' }),
-                    b64u({ sub: userId, role: 'authenticated', is_anonymous: anon }),
+                    b64u({ sub: userId, role: 'authenticated', is_anonymous: anon,
+                           aal: aal || 'aal1' }),
                     'sig'].join('.');
     const refresh = 'rt_' + randomUUID();
     state.tokens.set(access, { userId, expiresAt: state.clock + state.ttlSec * 1000 });
@@ -440,6 +451,80 @@ export function startMock(opts = {}) {
       }
 
       if (p === '/auth/v1/logout') return json(res, 204, {});
+
+      /* --------------------------------------------------------- MFA (TOTP)
+       * Enough of GoTrue's factor API to exercise the admin second factor:
+       * enrol, challenge, verify, unenroll, and the factors on /user.
+       *
+       * TOTP_OK stands in for a correct code. A real authenticator computes it
+       * from the shared secret and the clock; reproducing that here would be
+       * testing an RFC rather than this client's flow, which is what the
+       * assertions are about. Any other code is refused with GoTrue's 422. */
+      if (p === '/auth/v1/user' && req.method === 'GET') {
+        const a = auth(req);
+        if (!a || a.expired) return json(res, 401, { message: 'invalid token' });
+        const email = [...state.users].find(([, v]) => v.id === a.userId)?.[0] || null;
+        return json(res, 200, { id: a.userId, email,
+                                factors: state.factors.get(a.userId) || [] });
+      }
+
+      if (p === '/auth/v1/factors' && req.method === 'POST') {
+        const a = auth(req);
+        if (!a || a.expired) return json(res, 401, { message: 'invalid token' });
+        const list = state.factors.get(a.userId) || [];
+        /* GoTrue refuses a second unverified factor with 422, and the
+         * dashboard turns that into an actionable message rather than a
+         * generic failure. */
+        if (list.some(f => f.status === 'unverified')) {
+          return json(res, 422, { message: 'unverified factor already exists' });
+        }
+        const id = randomUUID();
+        const secret = 'JBSWY3DPEHPK3PXP';
+        list.push({ id, factor_type: 'totp', status: 'unverified',
+                    friendly_name: payload.friendly_name || null });
+        state.factors.set(a.userId, list);
+        state.hits.mfaEnroll++;
+        return json(res, 200, { id, type: 'totp', totp: {
+          secret,
+          uri: `otpauth://totp/Zero%20Suite:user?secret=${secret}&issuer=Zero%20Suite`,
+          qr_code: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        } });
+      }
+
+      const mfa = /^\/auth\/v1\/factors\/([^/]+)(?:\/(challenge|verify))?$/.exec(p);
+      if (mfa) {
+        const a = auth(req);
+        if (!a || a.expired) return json(res, 401, { message: 'invalid token' });
+        const list = state.factors.get(a.userId) || [];
+        const factor = list.find(f => f.id === mfa[1]);
+        if (!factor) return json(res, 404, { message: 'factor not found' });
+
+        if (mfa[2] === 'challenge' && req.method === 'POST') {
+          const cid = randomUUID();
+          state.challenges.set(cid, { factorId: factor.id, userId: a.userId });
+          state.hits.mfaChallenge++;
+          return json(res, 200, { id: cid, expires_at: Math.floor(state.clock / 1000) + 300 });
+        }
+        if (mfa[2] === 'verify' && req.method === 'POST') {
+          state.hits.mfaVerify++;
+          const ch = state.challenges.get(payload.challenge_id);
+          if (!ch || ch.factorId !== factor.id) {
+            return json(res, 422, { message: 'invalid challenge' });
+          }
+          // A challenge is spent whether or not the code was right.
+          state.challenges.delete(payload.challenge_id);
+          if (payload.code !== state.TOTP_OK) {
+            return json(res, 422, { message: 'invalid totp code' });
+          }
+          factor.status = 'verified';
+          const email = [...state.users].find(([, v]) => v.id === a.userId)?.[0] || null;
+          return json(res, 200, issue(a.userId, email, 'aal2'));
+        }
+        if (req.method === 'DELETE') {
+          state.factors.set(a.userId, list.filter(f => f.id !== factor.id));
+          return json(res, 200, { id: factor.id });
+        }
+      }
 
       /* ------------------------------------------------------------- rpc */
       if (p.startsWith('/rest/v1/rpc/')) {

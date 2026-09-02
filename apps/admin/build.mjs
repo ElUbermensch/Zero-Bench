@@ -20,7 +20,13 @@ const cfg = loadConfig();
 const build = buildId();
 const conf = `const SHARED_SUPABASE = ${JSON.stringify({ url: cfg.url, anonKey: cfg.anonKey })};\n`
   + `const BUILD_ID = ${JSON.stringify(build.id)};`;
-const js = [conf, core, read('src/app.js')].join('\n');
+/* Bench's QR encoder, shared rather than re-implemented. The dashboard draws
+ * the TOTP enrolment code with it instead of rendering the SVG string GoTrue
+ * returns -- that would be markup from the network going into innerHTML, and
+ * this encoder is already here, already verified against segno, and works with
+ * no request at all. */
+const qr = read('../bench/src/qr.js');
+const js = [conf, qr, core, read('src/app.js')].join('\n');
 if (/<\/script|<!--/i.test(js)) throw new Error('payload would close the inline script');
 // replace via a FUNCTION: a string replacement expands $' and $& inside the payload
 const withFaces = shell.replace('<style>', () => '<style>\n' + FACE_CSS);

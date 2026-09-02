@@ -137,6 +137,7 @@ paste each one whole rather than in pieces.
 | `0004_relay.sql` | pair fire: relays, participants, shots, feed, and the join throttle |
 | `0015_admin_role.sql` | `profiles.is_admin`, and the `is_admin()` the analytics policies ask |
 | `0016_analytics_events.sql` | `analytics_event` and the four rollups the owner dashboard reads |
+| `0017_admin_mfa.sql` | requires a verified second factor (`aal2`) to read the analytics |
 
 If you have the Supabase CLI instead:
 
@@ -298,6 +299,38 @@ Then open `/admin/` and sign in with that account. Anyone else who finds the URL
 a sign-in box and, if they sign in, a page telling them they are not an admin — the
 row-level security in `0016` is what actually withholds the data, so this holds even
 against someone calling the REST API directly.
+
+### The second factor
+
+**The dashboard also asks for a code from an authenticator app**, on top of the
+password. It reads every user's usage history, which is the most sensitive read in the
+project, and one password is thin cover for it.
+
+On first sign-in it shows a QR code. Scan it with **Microsoft Authenticator** —
+*Add account → Other (Google, Facebook, etc.)* — or any TOTP app (Google
+Authenticator, Authy, 1Password all work; nothing here is tied to one). If the camera
+will not cooperate, the setup key is printed underneath to type in by hand. Enter the
+six digits to finish. After that, every sign-in asks for the current code.
+
+**This is enforced by the database, not by the page.** `0017` requires the `aal2`
+claim on the token to read `analytics_event`, and only Supabase issues that claim, and
+only after it has checked a code. Someone who skips the page and calls the REST API
+with a password-only token gets an empty array. A client-side MFA gate would be worth
+nothing here, because the dashboard is a static page served with the public key.
+
+Two things worth knowing:
+
+- **Enrolment happens before you have a factor**, on the password-only session. That is
+  deliberate: requiring a code in order to set up the code would lock the only admin
+  out with no way back except editing the database by hand.
+- **The check is per sign-in, not once per account** — that is the point of it. If you
+  lose the phone, clear the factor as `postgres` in the SQL editor
+  (`delete from auth.mfa_factors where user_id = '<your uuid>';`) and the dashboard
+  will offer enrolment again on the next sign-in.
+
+The apps themselves are untouched by this. Zero and Bench are used at a range with no
+signal, and demanding a rotating code to open your own logbook would be a way of
+locking people out of their own data.
 
 **What is collected.** Sign-ups, sign-ins, sign-outs, one `app_open` per visit, a
 best-effort `app_background` carrying visit duration, screens opened, and the feature

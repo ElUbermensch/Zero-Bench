@@ -1,0 +1,1294 @@
+﻿2026-09-02T19:13:19.4994109Z Current runner version: '2.337.0'
+2026-09-02T19:13:19.5020999Z ##[group]Runner Image Provisioner
+2026-09-02T19:13:19.5022069Z Hosted Compute Agent
+2026-09-02T19:13:19.5022697Z Version: 20260819.586
+2026-09-02T19:13:19.5023392Z Commit: 3cc4a88dfa507ef76119ad1bb3eccc6378bb2b76
+2026-09-02T19:13:19.5024183Z Build Date: 2026-08-18T23:20:18Z
+2026-09-02T19:13:19.5024925Z Worker ID: {cce8267d-fca7-4e35-a762-e8f989d7b5ff}
+2026-09-02T19:13:19.5025768Z Azure Region: westus2
+2026-09-02T19:13:19.5026430Z ##[endgroup]
+2026-09-02T19:13:19.5027718Z ##[group]Operating System
+2026-09-02T19:13:19.5028451Z Ubuntu
+2026-09-02T19:13:19.5029436Z 24.04.4
+2026-09-02T19:13:19.5030106Z LTS
+2026-09-02T19:13:19.5030651Z ##[endgroup]
+2026-09-02T19:13:19.5031203Z ##[group]Runner Image
+2026-09-02T19:13:19.5031887Z Image: ubuntu-24.04
+2026-09-02T19:13:19.5032480Z Version: 20260823.283.1
+2026-09-02T19:13:19.5033861Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260823.283/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-02T19:13:19.5035448Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260823.283
+2026-09-02T19:13:19.5036536Z ##[endgroup]
+2026-09-02T19:13:19.5037838Z ##[group]GITHUB_TOKEN Permissions
+2026-09-02T19:13:19.5040129Z Contents: read
+2026-09-02T19:13:19.5040756Z Metadata: read
+2026-09-02T19:13:19.5041445Z Packages: read
+2026-09-02T19:13:19.5042050Z ##[endgroup]
+2026-09-02T19:13:19.5044251Z Secret source: Actions
+2026-09-02T19:13:19.5045440Z Prepare workflow directory
+2026-09-02T19:13:19.5543665Z Prepare all required actions
+2026-09-02T19:13:19.5591731Z Getting action download info
+2026-09-02T19:13:19.8977070Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-09-02T19:13:20.1305827Z Complete job name: schema + RLS (PostgreSQL)
+2026-09-02T19:13:20.1918065Z ##[group]Checking docker version
+2026-09-02T19:13:20.1935338Z ##[command]/usr/bin/docker version --format '{{.Server.APIVersion}}'
+2026-09-02T19:13:20.2794455Z '1.48'
+2026-09-02T19:13:20.2803228Z Docker daemon API version: '1.48'
+2026-09-02T19:13:20.2804033Z ##[command]/usr/bin/docker version --format '{{.Client.APIVersion}}'
+2026-09-02T19:13:20.3013864Z '1.48'
+2026-09-02T19:13:20.3027975Z Docker client API version: '1.48'
+2026-09-02T19:13:20.3034660Z ##[endgroup]
+2026-09-02T19:13:20.3037111Z ##[group]Clean up resources from previous jobs
+2026-09-02T19:13:20.3043586Z ##[command]/usr/bin/docker ps --all --quiet --no-trunc --filter "label=837966"
+2026-09-02T19:13:20.3195845Z ##[command]/usr/bin/docker network prune --force --filter "label=837966"
+2026-09-02T19:13:20.3338199Z ##[endgroup]
+2026-09-02T19:13:20.3339132Z ##[group]Create local container network
+2026-09-02T19:13:20.3349474Z ##[command]/usr/bin/docker network create --label 837966 github_network_54e47743e9eb4f0e97abe235d01d0b77
+2026-09-02T19:13:20.3933437Z 146609149a3e87302a783963c9fb3e4a68a2511c2f1c59a05b949502dd8877ee
+2026-09-02T19:13:20.3951088Z ##[endgroup]
+2026-09-02T19:13:20.3976485Z ##[group]Starting postgres service container
+2026-09-02T19:13:20.3997089Z ##[command]/usr/bin/docker pull postgres:16
+2026-09-02T19:13:21.5352826Z 16: Pulling from library/postgres
+2026-09-02T19:13:21.8098946Z 6310eb16bf42: Pulling fs layer
+2026-09-02T19:13:21.8103537Z 4d710b756578: Pulling fs layer
+2026-09-02T19:13:21.8104287Z 3fa541d8cac9: Pulling fs layer
+2026-09-02T19:13:21.8104898Z b3ffe1fd6e79: Pulling fs layer
+2026-09-02T19:13:21.8105555Z f122bc3261fc: Pulling fs layer
+2026-09-02T19:13:21.8106040Z 5322d81b9b21: Pulling fs layer
+2026-09-02T19:13:21.8106451Z 9bd242f25e75: Pulling fs layer
+2026-09-02T19:13:21.8106839Z 9d1e9c1e61f4: Pulling fs layer
+2026-09-02T19:13:21.8107218Z 48dd761b6bfe: Pulling fs layer
+2026-09-02T19:13:21.8107597Z 00034b17b963: Pulling fs layer
+2026-09-02T19:13:21.8107967Z 8a082189cfe1: Pulling fs layer
+2026-09-02T19:13:21.8108422Z 988d57697ad2: Pulling fs layer
+2026-09-02T19:13:21.8109175Z 9f809ec5ff35: Pulling fs layer
+2026-09-02T19:13:21.8109614Z af7708f26521: Pulling fs layer
+2026-09-02T19:13:21.8110030Z b3ffe1fd6e79: Waiting
+2026-09-02T19:13:21.8110751Z f122bc3261fc: Waiting
+2026-09-02T19:13:21.8111094Z 5322d81b9b21: Waiting
+2026-09-02T19:13:21.8111429Z 9bd242f25e75: Waiting
+2026-09-02T19:13:21.8111790Z 48dd761b6bfe: Waiting
+2026-09-02T19:13:21.8112152Z 00034b17b963: Waiting
+2026-09-02T19:13:21.8112488Z 9d1e9c1e61f4: Waiting
+2026-09-02T19:13:21.8112898Z 8a082189cfe1: Waiting
+2026-09-02T19:13:21.8113422Z 9f809ec5ff35: Waiting
+2026-09-02T19:13:21.8113938Z 988d57697ad2: Waiting
+2026-09-02T19:13:21.8114456Z af7708f26521: Waiting
+2026-09-02T19:13:22.0806890Z 4d710b756578: Verifying Checksum
+2026-09-02T19:13:22.0809960Z 4d710b756578: Download complete
+2026-09-02T19:13:22.1757502Z 3fa541d8cac9: Verifying Checksum
+2026-09-02T19:13:22.1759564Z 3fa541d8cac9: Download complete
+2026-09-02T19:13:22.2473195Z 6310eb16bf42: Verifying Checksum
+2026-09-02T19:13:22.2473864Z 6310eb16bf42: Download complete
+2026-09-02T19:13:22.3880523Z b3ffe1fd6e79: Verifying Checksum
+2026-09-02T19:13:22.3881270Z b3ffe1fd6e79: Download complete
+2026-09-02T19:13:22.5225942Z f122bc3261fc: Verifying Checksum
+2026-09-02T19:13:22.5227490Z f122bc3261fc: Download complete
+2026-09-02T19:13:22.5424892Z 5322d81b9b21: Verifying Checksum
+2026-09-02T19:13:22.5425558Z 5322d81b9b21: Download complete
+2026-09-02T19:13:22.6212733Z 9bd242f25e75: Verifying Checksum
+2026-09-02T19:13:22.6229262Z 9bd242f25e75: Download complete
+2026-09-02T19:13:22.7627848Z 9d1e9c1e61f4: Verifying Checksum
+2026-09-02T19:13:22.7629269Z 9d1e9c1e61f4: Download complete
+2026-09-02T19:13:22.8655945Z 00034b17b963: Verifying Checksum
+2026-09-02T19:13:22.8657041Z 00034b17b963: Download complete
+2026-09-02T19:13:23.0074728Z 8a082189cfe1: Download complete
+2026-09-02T19:13:23.1020018Z 988d57697ad2: Download complete
+2026-09-02T19:13:23.2586900Z 9f809ec5ff35: Verifying Checksum
+2026-09-02T19:13:23.2588108Z 9f809ec5ff35: Download complete
+2026-09-02T19:13:23.2992782Z 6310eb16bf42: Pull complete
+2026-09-02T19:13:23.3486077Z af7708f26521: Verifying Checksum
+2026-09-02T19:13:23.3487704Z af7708f26521: Download complete
+2026-09-02T19:13:23.3749677Z 48dd761b6bfe: Verifying Checksum
+2026-09-02T19:13:23.3750343Z 48dd761b6bfe: Download complete
+2026-09-02T19:13:23.5957103Z 4d710b756578: Pull complete
+2026-09-02T19:13:23.7689678Z 3fa541d8cac9: Pull complete
+2026-09-02T19:13:23.8059898Z b3ffe1fd6e79: Pull complete
+2026-09-02T19:13:24.1068115Z f122bc3261fc: Pull complete
+2026-09-02T19:13:24.1764175Z 5322d81b9b21: Pull complete
+2026-09-02T19:13:24.1834724Z 9bd242f25e75: Pull complete
+2026-09-02T19:13:24.1925458Z 9d1e9c1e61f4: Pull complete
+2026-09-02T19:13:27.2587872Z 48dd761b6bfe: Pull complete
+2026-09-02T19:13:27.2712156Z 00034b17b963: Pull complete
+2026-09-02T19:13:27.2865092Z 8a082189cfe1: Pull complete
+2026-09-02T19:13:27.2952340Z 988d57697ad2: Pull complete
+2026-09-02T19:13:27.3048142Z 9f809ec5ff35: Pull complete
+2026-09-02T19:13:27.3125258Z af7708f26521: Pull complete
+2026-09-02T19:13:27.3160635Z Digest: sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+2026-09-02T19:13:27.3169697Z Status: Downloaded newer image for postgres:16
+2026-09-02T19:13:27.3177755Z docker.io/library/postgres:16
+2026-09-02T19:13:27.3240489Z ##[command]/usr/bin/docker create --name 2e0cd14c213f4b169c2e08a3aa5fd275_postgres16_3808ff --label 837966 --network github_network_54e47743e9eb4f0e97abe235d01d0b77 --network-alias postgres -p 5432:5432 --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5 -e "POSTGRES_PASSWORD=postgres" -e GITHUB_ACTIONS=true -e CI=true postgres:16
+2026-09-02T19:13:27.3532344Z 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:27.3557834Z ##[command]/usr/bin/docker start 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:27.6461395Z 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:27.6502334Z ##[command]/usr/bin/docker ps --all --filter id=6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe --filter status=running --no-trunc --format "{{.ID}} {{.Status}}"
+2026-09-02T19:13:27.6652228Z 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe Up Less than a second (health: starting)
+2026-09-02T19:13:27.6677741Z ##[command]/usr/bin/docker port 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:27.6823369Z 5432/tcp -> 0.0.0.0:5432
+2026-09-02T19:13:27.6824053Z 5432/tcp -> [::]:5432
+2026-09-02T19:13:27.6873978Z ##[endgroup]
+2026-09-02T19:13:27.6882899Z ##[group]Waiting for all services to be ready
+2026-09-02T19:13:27.6897748Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:27.7077884Z starting
+2026-09-02T19:13:27.7107663Z postgres service is starting, waiting 2 seconds before checking again.
+2026-09-02T19:13:29.7098930Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:29.7232977Z starting
+2026-09-02T19:13:29.7246819Z postgres service is starting, waiting 4 seconds before checking again.
+2026-09-02T19:13:33.7802218Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:33.7950645Z starting
+2026-09-02T19:13:33.7969467Z postgres service is starting, waiting 7 seconds before checking again.
+2026-09-02T19:13:41.6560863Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:41.6689909Z healthy
+2026-09-02T19:13:41.6708989Z postgres service is healthy.
+2026-09-02T19:13:41.6709819Z ##[endgroup]
+2026-09-02T19:13:41.6993572Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T19:13:41.7001846Z ##[group]Run actions/checkout@v4
+2026-09-02T19:13:41.7002252Z with:
+2026-09-02T19:13:41.7002487Z   repository: ElUbermensch/Zero-Bench
+2026-09-02T19:13:41.7005428Z   token: ***
+2026-09-02T19:13:41.7005662Z   ssh-strict: true
+2026-09-02T19:13:41.7005880Z   ssh-user: git
+2026-09-02T19:13:41.7006103Z   persist-credentials: true
+2026-09-02T19:13:41.7006348Z   clean: true
+2026-09-02T19:13:41.7006575Z   sparse-checkout-cone-mode: true
+2026-09-02T19:13:41.7006844Z   fetch-depth: 1
+2026-09-02T19:13:41.7082177Z   fetch-tags: false
+2026-09-02T19:13:41.7082508Z   show-progress: true
+2026-09-02T19:13:41.7082801Z   lfs: false
+2026-09-02T19:13:41.7083144Z   submodules: false
+2026-09-02T19:13:41.7083454Z   set-safe-directory: true
+2026-09-02T19:13:41.7083831Z   allow-unsafe-pr-checkout: false
+2026-09-02T19:13:41.7084977Z env:
+2026-09-02T19:13:41.7085254Z   PGPASSWORD: postgres
+2026-09-02T19:13:41.7085678Z   PGHOST: localhost
+2026-09-02T19:13:41.7086028Z   PGUSER: postgres
+2026-09-02T19:13:41.7086381Z ##[endgroup]
+2026-09-02T19:13:41.8154152Z Syncing repository: ElUbermensch/Zero-Bench
+2026-09-02T19:13:41.8156207Z ##[group]Getting Git version info
+2026-09-02T19:13:41.8156836Z Working directory is '/home/runner/work/Zero-Bench/Zero-Bench'
+2026-09-02T19:13:41.8157773Z [command]/usr/bin/git version
+2026-09-02T19:13:41.8220473Z git version 2.55.0
+2026-09-02T19:13:41.8243325Z ##[endgroup]
+2026-09-02T19:13:41.8259158Z Temporarily overriding HOME='/home/runner/work/_temp/de8977a8-627e-44c8-bda3-c8e8d9ca9c99' before making global git config changes
+2026-09-02T19:13:41.8260386Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T19:13:41.8265737Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/Zero-Bench/Zero-Bench
+2026-09-02T19:13:41.8325763Z Deleting the contents of '/home/runner/work/Zero-Bench/Zero-Bench'
+2026-09-02T19:13:41.8331066Z ##[group]Initializing the repository
+2026-09-02T19:13:41.8336018Z [command]/usr/bin/git init /home/runner/work/Zero-Bench/Zero-Bench
+2026-09-02T19:13:41.8429948Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-02T19:13:41.8430870Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-02T19:13:41.8431709Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-02T19:13:41.8432353Z hint: call:
+2026-09-02T19:13:41.8432646Z hint:
+2026-09-02T19:13:41.8433147Z hint: 	git config --global init.defaultBranch <name>
+2026-09-02T19:13:41.8433659Z hint:
+2026-09-02T19:13:41.8434117Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-02T19:13:41.8434934Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-02T19:13:41.8435529Z hint:
+2026-09-02T19:13:41.8435855Z hint: 	git branch -m <name>
+2026-09-02T19:13:41.8436239Z hint:
+2026-09-02T19:13:41.8436791Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-02T19:13:41.8437747Z Initialized empty Git repository in /home/runner/work/Zero-Bench/Zero-Bench/.git/
+2026-09-02T19:13:41.8447238Z [command]/usr/bin/git remote add origin https://github.com/ElUbermensch/Zero-Bench
+2026-09-02T19:13:41.8497832Z ##[endgroup]
+2026-09-02T19:13:41.8498691Z ##[group]Disabling automatic garbage collection
+2026-09-02T19:13:41.8509004Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-02T19:13:41.8540587Z ##[endgroup]
+2026-09-02T19:13:41.8541158Z ##[group]Setting up auth
+2026-09-02T19:13:41.8549442Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T19:13:41.8588825Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T19:13:41.8994095Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T19:13:41.9037293Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T19:13:41.9304978Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T19:13:41.9345141Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T19:13:41.9595532Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-02T19:13:41.9637721Z ##[endgroup]
+2026-09-02T19:13:41.9638355Z ##[group]Fetching the repository
+2026-09-02T19:13:41.9647976Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +c316afed3570678eb5f1b89436187d277c3d7d91:refs/remotes/pull/1/merge
+2026-09-02T19:13:42.5296011Z From https://github.com/ElUbermensch/Zero-Bench
+2026-09-02T19:13:42.5296668Z  * [new ref]         c316afed3570678eb5f1b89436187d277c3d7d91 -> pull/1/merge
+2026-09-02T19:13:42.5303034Z ##[endgroup]
+2026-09-02T19:13:42.5318691Z ##[group]Determining the checkout info
+2026-09-02T19:13:42.5319633Z ##[endgroup]
+2026-09-02T19:13:42.5323466Z [command]/usr/bin/git sparse-checkout disable
+2026-09-02T19:13:42.5378077Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-02T19:13:42.5413527Z ##[group]Checking out the ref
+2026-09-02T19:13:42.5416942Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/1/merge
+2026-09-02T19:13:42.5639063Z Note: switching to 'refs/remotes/pull/1/merge'.
+2026-09-02T19:13:42.5639515Z 
+2026-09-02T19:13:42.5639837Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-09-02T19:13:42.5640353Z changes and commit them, and you can discard any commits you make in this
+2026-09-02T19:13:42.5640833Z state without impacting any branches by switching back to a branch.
+2026-09-02T19:13:42.5641427Z 
+2026-09-02T19:13:42.5641816Z If you want to create a new branch to retain commits you create, you may
+2026-09-02T19:13:42.5642480Z do so (now or later) by using -c with the switch command. Example:
+2026-09-02T19:13:42.5642862Z 
+2026-09-02T19:13:42.5643019Z   git switch -c <new-branch-name>
+2026-09-02T19:13:42.5643290Z 
+2026-09-02T19:13:42.5643443Z Or undo this operation with:
+2026-09-02T19:13:42.5643683Z 
+2026-09-02T19:13:42.5643812Z   git switch -
+2026-09-02T19:13:42.5644027Z 
+2026-09-02T19:13:42.5644414Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-02T19:13:42.5644932Z 
+2026-09-02T19:13:42.5645490Z HEAD is now at c316afe Merge 88af7ceb31690fa454cf8010aaa4538c3ea2dc1e into 8ace1f5b0d68002ec0bd1da275b3c042069333e9
+2026-09-02T19:13:42.5649831Z ##[endgroup]
+2026-09-02T19:13:42.5702109Z [command]/usr/bin/git log -1 --format=%H
+2026-09-02T19:13:42.5732796Z c316afed3570678eb5f1b89436187d277c3d7d91
+2026-09-02T19:13:42.5952662Z ##[group]Run psql -c 'create database shooting'
+2026-09-02T19:13:42.5953115Z [36;1mpsql -c 'create database shooting'[0m
+2026-09-02T19:13:42.5953548Z [36;1m# harness.sql stubs the auth schema so the migrations can run in[0m
+2026-09-02T19:13:42.5954069Z [36;1m# vanilla Postgres. It is NEVER deployed; Supabase provides the real one.[0m
+2026-09-02T19:13:42.5954575Z [36;1mpsql -d shooting -v ON_ERROR_STOP=1 -f supabase/test/harness.sql[0m
+2026-09-02T19:13:42.5954980Z [36;1mfor m in supabase/migrations/*.sql; do[0m
+2026-09-02T19:13:42.5955273Z [36;1m  echo "== $m"[0m
+2026-09-02T19:13:42.5955546Z [36;1m  psql -d shooting -v ON_ERROR_STOP=1 -f "$m"[0m
+2026-09-02T19:13:42.5955872Z [36;1mdone[0m
+2026-09-02T19:13:42.5956149Z [36;1mpsql -d shooting -c 'create schema if not exists test;[0m
+2026-09-02T19:13:42.5956545Z [36;1m  grant usage on schema test to authenticated, anon;'[0m
+2026-09-02T19:13:42.6002566Z shell: /usr/bin/bash -e {0}
+2026-09-02T19:13:42.6002840Z env:
+2026-09-02T19:13:42.6003125Z   PGPASSWORD: postgres
+2026-09-02T19:13:42.6003367Z   PGHOST: localhost
+2026-09-02T19:13:42.6003578Z   PGUSER: postgres
+2026-09-02T19:13:42.6003791Z ##[endgroup]
+2026-09-02T19:13:42.7338980Z CREATE DATABASE
+2026-09-02T19:13:42.7736296Z DO
+2026-09-02T19:13:42.7740272Z CREATE SCHEMA
+2026-09-02T19:13:42.7783615Z CREATE TABLE
+2026-09-02T19:13:42.7789522Z CREATE FUNCTION
+2026-09-02T19:13:42.7793938Z CREATE FUNCTION
+2026-09-02T19:13:42.7807439Z DO
+2026-09-02T19:13:42.7813293Z GRANT
+2026-09-02T19:13:42.7817491Z GRANT
+2026-09-02T19:13:42.7826770Z GRANT
+2026-09-02T19:13:42.7847151Z == supabase/migrations/0001_init.sql
+2026-09-02T19:13:42.8250350Z CREATE EXTENSION
+2026-09-02T19:13:42.8258040Z CREATE FUNCTION
+2026-09-02T19:13:42.8261478Z COMMENT
+2026-09-02T19:13:42.8266717Z CREATE FUNCTION
+2026-09-02T19:13:42.8270532Z COMMENT
+2026-09-02T19:13:42.8307209Z CREATE TABLE
+2026-09-02T19:13:42.8334134Z CREATE TABLE
+2026-09-02T19:13:42.8363335Z CREATE TABLE
+2026-09-02T19:13:42.8387398Z CREATE TABLE
+2026-09-02T19:13:42.8410603Z CREATE TABLE
+2026-09-02T19:13:42.8450596Z CREATE TABLE
+2026-09-02T19:13:42.8455181Z COMMENT
+2026-09-02T19:13:42.8489128Z CREATE TABLE
+2026-09-02T19:13:42.8514560Z CREATE TABLE
+2026-09-02T19:13:42.8553060Z CREATE TABLE
+2026-09-02T19:13:42.8588764Z CREATE TABLE
+2026-09-02T19:13:42.8621412Z CREATE TABLE
+2026-09-02T19:13:42.8644297Z CREATE TABLE
+2026-09-02T19:13:42.8671067Z CREATE TABLE
+2026-09-02T19:13:42.8699574Z CREATE TABLE
+2026-09-02T19:13:42.8704786Z CREATE FUNCTION
+2026-09-02T19:13:42.8707986Z CREATE TRIGGER
+2026-09-02T19:13:42.8721101Z DO
+2026-09-02T19:13:42.8771770Z DO
+2026-09-02T19:13:42.8867062Z DO
+2026-09-02T19:13:42.8877057Z CREATE INDEX
+2026-09-02T19:13:42.8887829Z CREATE INDEX
+2026-09-02T19:13:42.8899547Z CREATE INDEX
+2026-09-02T19:13:42.8909717Z CREATE INDEX
+2026-09-02T19:13:42.8918623Z CREATE INDEX
+2026-09-02T19:13:42.8927407Z CREATE INDEX
+2026-09-02T19:13:42.8969564Z CREATE VIEW
+2026-09-02T19:13:42.8979104Z COMMENT
+2026-09-02T19:13:42.8998218Z CREATE VIEW
+2026-09-02T19:13:42.9003467Z COMMENT
+2026-09-02T19:13:42.9007644Z GRANT
+2026-09-02T19:13:42.9014418Z GRANT
+2026-09-02T19:13:42.9017582Z GRANT
+2026-09-02T19:13:42.9020459Z GRANT
+2026-09-02T19:13:42.9025211Z ALTER DEFAULT PRIVILEGES
+2026-09-02T19:13:42.9038247Z == supabase/migrations/0002_leaderboard.sql
+2026-09-02T19:13:42.9437504Z CREATE TABLE
+2026-09-02T19:13:42.9447874Z CREATE INDEX
+2026-09-02T19:13:42.9482561Z CREATE TABLE
+2026-09-02T19:13:42.9493228Z CREATE INDEX
+2026-09-02T19:13:42.9503022Z CREATE INDEX
+2026-09-02T19:13:42.9506499Z CREATE TRIGGER
+2026-09-02T19:13:42.9509667Z CREATE TRIGGER
+2026-09-02T19:13:42.9513572Z ALTER TABLE
+2026-09-02T19:13:42.9516684Z ALTER TABLE
+2026-09-02T19:13:42.9520450Z CREATE POLICY
+2026-09-02T19:13:42.9524082Z CREATE POLICY
+2026-09-02T19:13:42.9527479Z CREATE POLICY
+2026-09-02T19:13:42.9530996Z CREATE POLICY
+2026-09-02T19:13:42.9534251Z ALTER TABLE
+2026-09-02T19:13:42.9537498Z ALTER TABLE
+2026-09-02T19:13:42.9541264Z CREATE POLICY
+2026-09-02T19:13:42.9545209Z CREATE POLICY
+2026-09-02T19:13:42.9549423Z CREATE POLICY
+2026-09-02T19:13:42.9553017Z CREATE POLICY
+2026-09-02T19:13:42.9566204Z CREATE VIEW
+2026-09-02T19:13:42.9569650Z GRANT
+2026-09-02T19:13:42.9572805Z GRANT
+2026-09-02T19:13:42.9587641Z == supabase/migrations/0003_keepalive.sql
+2026-09-02T19:13:42.9951019Z CREATE FUNCTION
+2026-09-02T19:13:42.9954147Z COMMENT
+2026-09-02T19:13:42.9958443Z GRANT
+2026-09-02T19:13:42.9970521Z == supabase/migrations/0004_relay.sql
+2026-09-02T19:13:43.0375887Z CREATE TABLE
+2026-09-02T19:13:43.0387216Z CREATE INDEX
+2026-09-02T19:13:43.0397472Z CREATE INDEX
+2026-09-02T19:13:43.0430326Z CREATE TABLE
+2026-09-02T19:13:43.0440726Z CREATE INDEX
+2026-09-02T19:13:43.0449548Z CREATE INDEX
+2026-09-02T19:13:43.0482811Z CREATE TABLE
+2026-09-02T19:13:43.0491902Z CREATE INDEX
+2026-09-02T19:13:43.0529667Z CREATE TABLE
+2026-09-02T19:13:43.0539099Z CREATE INDEX
+2026-09-02T19:13:43.0558322Z CREATE TABLE
+2026-09-02T19:13:43.0567337Z CREATE INDEX
+2026-09-02T19:13:43.0580207Z DO
+2026-09-02T19:13:43.0585763Z CREATE FUNCTION
+2026-09-02T19:13:43.0590032Z CREATE FUNCTION
+2026-09-02T19:13:43.0597110Z CREATE FUNCTION
+2026-09-02T19:13:43.0605620Z CREATE FUNCTION
+2026-09-02T19:13:43.0612860Z CREATE FUNCTION
+2026-09-02T19:13:43.0616679Z CREATE FUNCTION
+2026-09-02T19:13:43.0620629Z ALTER TABLE
+2026-09-02T19:13:43.0624429Z ALTER TABLE
+2026-09-02T19:13:43.0627425Z ALTER TABLE
+2026-09-02T19:13:43.0630917Z ALTER TABLE
+2026-09-02T19:13:43.0634111Z ALTER TABLE
+2026-09-02T19:13:43.0637245Z ALTER TABLE
+2026-09-02T19:13:43.0640725Z ALTER TABLE
+2026-09-02T19:13:43.0643948Z ALTER TABLE
+2026-09-02T19:13:43.0646875Z ALTER TABLE
+2026-09-02T19:13:43.0649916Z ALTER TABLE
+2026-09-02T19:13:43.0653957Z CREATE POLICY
+2026-09-02T19:13:43.0657715Z CREATE POLICY
+2026-09-02T19:13:43.0661111Z CREATE POLICY
+2026-09-02T19:13:43.0664581Z CREATE POLICY
+2026-09-02T19:13:43.0668384Z CREATE POLICY
+2026-09-02T19:13:43.0672564Z CREATE POLICY
+2026-09-02T19:13:43.0681530Z CREATE POLICY
+2026-09-02T19:13:43.0685951Z CREATE POLICY
+2026-09-02T19:13:43.0690411Z CREATE POLICY
+2026-09-02T19:13:43.0694032Z CREATE POLICY
+2026-09-02T19:13:43.0697975Z CREATE POLICY
+2026-09-02T19:13:43.0701747Z CREATE POLICY
+2026-09-02T19:13:43.0704588Z CREATE POLICY
+2026-09-02T19:13:43.0710497Z CREATE POLICY
+2026-09-02T19:13:43.0713444Z CREATE POLICY
+2026-09-02T19:13:43.0716621Z GRANT
+2026-09-02T19:13:43.0722090Z GRANT
+2026-09-02T19:13:43.0737024Z == supabase/migrations/0005_velocity_authority.sql
+2026-09-02T19:13:43.1109436Z CREATE FUNCTION
+2026-09-02T19:13:43.1115996Z psql:supabase/migrations/0005_velocity_authority.sql:58: NOTICE:  trigger "range_sessions_guard_velocity" for relation "public.range_sessions" does not exist, skipping
+2026-09-02T19:13:43.1117111Z DROP TRIGGER
+2026-09-02T19:13:43.1118860Z CREATE TRIGGER
+2026-09-02T19:13:43.1141070Z == supabase/migrations/0006_source_app_case.sql
+2026-09-02T19:13:43.1509720Z UPDATE 0
+2026-09-02T19:13:43.1514472Z UPDATE 0
+2026-09-02T19:13:43.1523443Z ALTER TABLE
+2026-09-02T19:13:43.1532451Z ALTER TABLE
+2026-09-02T19:13:43.1537286Z ALTER TABLE
+2026-09-02T19:13:43.1544920Z ALTER TABLE
+2026-09-02T19:13:43.1551332Z UPDATE 0
+2026-09-02T19:13:43.1555889Z ALTER TABLE
+2026-09-02T19:13:43.1561213Z ALTER TABLE
+2026-09-02T19:13:43.1578215Z == supabase/migrations/0007_case_prep.sql
+2026-09-02T19:13:43.1951776Z ALTER TABLE
+2026-09-02T19:13:43.1963273Z ALTER TABLE
+2026-09-02T19:13:43.2039153Z CREATE VIEW
+2026-09-02T19:13:43.2052579Z == supabase/migrations/0008_firearm_barrel_life.sql
+2026-09-02T19:13:43.2422603Z ALTER TABLE
+2026-09-02T19:13:43.2441866Z DO
+2026-09-02T19:13:43.2446330Z COMMENT
+2026-09-02T19:13:43.2449077Z COMMENT
+2026-09-02T19:13:43.2463379Z == supabase/migrations/0009_relay_face.sql
+2026-09-02T19:13:43.2832445Z ALTER TABLE
+2026-09-02T19:13:43.2842537Z COMMENT
+2026-09-02T19:13:43.2856189Z CREATE FUNCTION
+2026-09-02T19:13:43.2862271Z DROP FUNCTION
+2026-09-02T19:13:43.2873510Z CREATE FUNCTION
+2026-09-02T19:13:43.2880417Z CREATE FUNCTION
+2026-09-02T19:13:43.2887332Z REVOKE
+2026-09-02T19:13:43.2891536Z GRANT
+2026-09-02T19:13:43.2899422Z CREATE FUNCTION
+2026-09-02T19:13:43.2904682Z GRANT
+2026-09-02T19:13:43.2917299Z == supabase/migrations/0010_account_backups.sql
+2026-09-02T19:13:43.3330897Z CREATE TABLE
+2026-09-02T19:13:43.3333990Z COMMENT
+2026-09-02T19:13:43.3343759Z CREATE INDEX
+2026-09-02T19:13:43.3346929Z psql:supabase/migrations/0010_account_backups.sql:91: NOTICE:  trigger "account_backups_set_updated_at" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3348144Z DROP TRIGGER
+2026-09-02T19:13:43.3349321Z CREATE TRIGGER
+2026-09-02T19:13:43.3358140Z ALTER TABLE
+2026-09-02T19:13:43.3361231Z psql:supabase/migrations/0010_account_backups.sql:102: NOTICE:  policy "account_backups_select_own" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3362242Z DROP POLICY
+2026-09-02T19:13:43.3364658Z CREATE POLICY
+2026-09-02T19:13:43.3367897Z psql:supabase/migrations/0010_account_backups.sql:106: NOTICE:  policy "account_backups_insert_own" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3368838Z DROP POLICY
+2026-09-02T19:13:43.3369902Z CREATE POLICY
+2026-09-02T19:13:43.3372570Z psql:supabase/migrations/0010_account_backups.sql:110: NOTICE:  policy "account_backups_update_own" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3373526Z DROP POLICY
+2026-09-02T19:13:43.3375259Z CREATE POLICY
+2026-09-02T19:13:43.3377968Z psql:supabase/migrations/0010_account_backups.sql:115: NOTICE:  policy "account_backups_delete_own" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3379203Z DROP POLICY
+2026-09-02T19:13:43.3380607Z CREATE POLICY
+2026-09-02T19:13:43.3383709Z psql:supabase/migrations/0010_account_backups.sql:123: NOTICE:  policy "account_backups_no_anon" for relation "public.account_backups" does not exist, skipping
+2026-09-02T19:13:43.3384822Z DROP POLICY
+2026-09-02T19:13:43.3390306Z CREATE POLICY
+2026-09-02T19:13:43.3393133Z GRANT
+2026-09-02T19:13:43.3402780Z CREATE VIEW
+2026-09-02T19:13:43.3405958Z GRANT
+2026-09-02T19:13:43.3429214Z == supabase/migrations/0011_shot_string.sql
+2026-09-02T19:13:43.3815397Z ALTER TABLE
+2026-09-02T19:13:43.3827564Z DO
+2026-09-02T19:13:43.3832340Z COMMENT
+2026-09-02T19:13:43.3844338Z CREATE INDEX
+2026-09-02T19:13:43.3849700Z ALTER TABLE
+2026-09-02T19:13:43.3852960Z COMMENT
+2026-09-02T19:13:43.3859864Z DO
+2026-09-02T19:13:43.3866042Z CREATE FUNCTION
+2026-09-02T19:13:43.3885474Z DO
+2026-09-02T19:13:43.3901252Z CREATE VIEW
+2026-09-02T19:13:43.3904424Z GRANT
+2026-09-02T19:13:43.3921471Z == supabase/migrations/0012_audit_fixes.sql
+2026-09-02T19:13:43.4295839Z ALTER TABLE
+2026-09-02T19:13:43.4310984Z CREATE INDEX
+2026-09-02T19:13:43.4313015Z DROP INDEX
+2026-09-02T19:13:43.4315097Z psql:supabase/migrations/0012_audit_fixes.sql:58: NOTICE:  index "shots_session_shot_no_live_idx" does not exist, skipping
+2026-09-02T19:13:43.4316142Z COMMENT
+2026-09-02T19:13:43.4321486Z DROP POLICY
+2026-09-02T19:13:43.4325688Z CREATE POLICY
+2026-09-02T19:13:43.4331031Z DELETE 0
+2026-09-02T19:13:43.4348917Z DO
+2026-09-02T19:13:43.4354981Z DO
+2026-09-02T19:13:43.4359112Z DROP POLICY
+2026-09-02T19:13:43.4366214Z CREATE POLICY
+2026-09-02T19:13:43.4379813Z == supabase/migrations/0013_keyset_sync_index.sql
+2026-09-02T19:13:43.4861548Z DO
+2026-09-02T19:13:43.4871918Z CREATE INDEX
+2026-09-02T19:13:43.4882413Z CREATE INDEX
+2026-09-02T19:13:43.4896088Z == supabase/migrations/0014_relay_one_device.sql
+2026-09-02T19:13:43.5287520Z CREATE FUNCTION
+2026-09-02T19:13:43.5290743Z REVOKE
+2026-09-02T19:13:43.5294345Z GRANT
+2026-09-02T19:13:43.5308654Z == supabase/migrations/0015_admin_role.sql
+2026-09-02T19:13:43.5690005Z ALTER TABLE
+2026-09-02T19:13:43.5693683Z COMMENT
+2026-09-02T19:13:43.5701793Z CREATE FUNCTION
+2026-09-02T19:13:43.5704746Z COMMENT
+2026-09-02T19:13:43.5707380Z REVOKE
+2026-09-02T19:13:43.5711815Z GRANT
+2026-09-02T19:13:43.5739353Z == supabase/migrations/0016_analytics_events.sql
+2026-09-02T19:13:43.6139164Z CREATE TABLE
+2026-09-02T19:13:43.6143066Z COMMENT
+2026-09-02T19:13:43.6145624Z COMMENT
+2026-09-02T19:13:43.6148179Z COMMENT
+2026-09-02T19:13:43.6158092Z CREATE INDEX
+2026-09-02T19:13:43.6166843Z CREATE INDEX
+2026-09-02T19:13:43.6176980Z CREATE INDEX
+2026-09-02T19:13:43.6185449Z CREATE INDEX
+2026-09-02T19:13:43.6189284Z ALTER TABLE
+2026-09-02T19:13:43.6192594Z ALTER TABLE
+2026-09-02T19:13:43.6197689Z CREATE POLICY
+2026-09-02T19:13:43.6201614Z CREATE POLICY
+2026-09-02T19:13:43.6213272Z CREATE VIEW
+2026-09-02T19:13:43.6216407Z COMMENT
+2026-09-02T19:13:43.6222781Z CREATE VIEW
+2026-09-02T19:13:43.6226276Z COMMENT
+2026-09-02T19:13:43.6232275Z CREATE VIEW
+2026-09-02T19:13:43.6235831Z COMMENT
+2026-09-02T19:13:43.6253086Z CREATE VIEW
+2026-09-02T19:13:43.6256932Z COMMENT
+2026-09-02T19:13:43.6260256Z GRANT
+2026-09-02T19:13:43.6277409Z == supabase/migrations/0017_admin_mfa.sql
+2026-09-02T19:13:43.6651921Z CREATE FUNCTION
+2026-09-02T19:13:43.6654903Z COMMENT
+2026-09-02T19:13:43.6658091Z REVOKE
+2026-09-02T19:13:43.6662245Z GRANT
+2026-09-02T19:13:43.6671696Z DROP POLICY
+2026-09-02T19:13:43.6676041Z CREATE POLICY
+2026-09-02T19:13:43.7057972Z CREATE SCHEMA
+2026-09-02T19:13:43.7059062Z GRANT
+2026-09-02T19:13:43.7112687Z ##[group]Run # A GLOB, not a list. The list said rls_test..rls_test6 while
+2026-09-02T19:13:43.7113230Z [36;1m# A GLOB, not a list. The list said rls_test..rls_test6 while[0m
+2026-09-02T19:13:43.7113731Z [36;1m# run_tests.sh ran eight, so the two newest suites -- account backups[0m
+2026-09-02T19:13:43.7114222Z [36;1m# and the shot string, which is to say the two most likely to have a[0m
+2026-09-02T19:13:43.7114699Z [36;1m# mistake in them -- were the two nobody re-checked on a pull request.[0m
+2026-09-02T19:13:43.7115162Z [36;1m# A migration that gutted the keyset indexes merged green.[0m
+2026-09-02T19:13:43.7115499Z [36;1mrc=0[0m
+2026-09-02T19:13:43.7115712Z [36;1mshopt -s nullglob[0m
+2026-09-02T19:13:43.7115984Z [36;1mfor t in supabase/test/rls_test*.sql; do[0m
+2026-09-02T19:13:43.7116281Z [36;1m  echo "== $t"[0m
+2026-09-02T19:13:43.7116613Z [36;1m  psql -d shooting -v ON_ERROR_STOP=1 -f "$t" 2>&1 | tee out.txt || rc=1[0m
+2026-09-02T19:13:43.7117156Z [36;1m  # A psql ERROR aborts the script without ever printing FAIL, so[0m
+2026-09-02T19:13:43.7117609Z [36;1m  # grepping for FAIL alone reports success on a suite that died.[0m
+2026-09-02T19:13:43.7117981Z [36;1m  grep -q 'ERROR:' out.txt && rc=1[0m
+2026-09-02T19:13:43.7118275Z [36;1m  grep -q FAIL out.txt && rc=1[0m
+2026-09-02T19:13:43.7118776Z [36;1mdone[0m
+2026-09-02T19:13:43.7119099Z [36;1m[ $rc -eq 0 ] || { echo '::error::SQL suites failed'; exit 1; }[0m
+2026-09-02T19:13:43.7119459Z [36;1mecho 'SQL suites passed'[0m
+2026-09-02T19:13:43.7161652Z shell: /usr/bin/bash -e {0}
+2026-09-02T19:13:43.7161918Z env:
+2026-09-02T19:13:43.7162134Z   PGPASSWORD: postgres
+2026-09-02T19:13:43.7162376Z   PGHOST: localhost
+2026-09-02T19:13:43.7162586Z   PGUSER: postgres
+2026-09-02T19:13:43.7162798Z ##[endgroup]
+2026-09-02T19:13:43.7226687Z == supabase/test/rls_test.sql
+2026-09-02T19:13:43.7599061Z DO
+2026-09-02T19:13:43.7599352Z Pager usage is off.
+2026-09-02T19:13:43.7609021Z INSERT 0 2
+2026-09-02T19:13:43.7616709Z CREATE FUNCTION
+2026-09-02T19:13:43.7621325Z CREATE FUNCTION
+2026-09-02T19:13:43.7622782Z SET
+2026-09-02T19:13:43.7628220Z  as_user 
+2026-09-02T19:13:43.7628845Z ---------
+2026-09-02T19:13:43.7629153Z  
+2026-09-02T19:13:43.7629420Z (1 row)
+2026-09-02T19:13:43.7629605Z 
+2026-09-02T19:13:43.7644134Z INSERT 0 1
+2026-09-02T19:13:43.7653348Z INSERT 0 1
+2026-09-02T19:13:43.7666443Z INSERT 0 1
+2026-09-02T19:13:43.7678304Z INSERT 0 1
+2026-09-02T19:13:43.7699225Z INSERT 0 1
+2026-09-02T19:13:43.7743703Z INSERT 0 5
+2026-09-02T19:13:43.7754412Z INSERT 0 1
+2026-09-02T19:13:43.7760112Z psql:supabase/test/rls_test.sql:106: NOTICE:  PASS  trigger: shot count = 5
+2026-09-02T19:13:43.7762288Z psql:supabase/test/rls_test.sql:106: NOTICE:  PASS  trigger: average = 2705
+2026-09-02T19:13:43.7763213Z psql:supabase/test/rls_test.sql:106: NOTICE:  PASS  trigger: velocity ES = 20
+2026-09-02T19:13:43.7764065Z psql:supabase/test/rls_test.sql:106: NOTICE:  PASS  trigger: sample SD = 7.906
+2026-09-02T19:13:43.7764742Z DO
+2026-09-02T19:13:43.7813598Z UPDATE 1
+2026-09-02T19:13:43.7814244Z psql:supabase/test/rls_test.sql:122: NOTICE:  PASS  exclude: n drops to 4
+2026-09-02T19:13:43.7815160Z psql:supabase/test/rls_test.sql:122: NOTICE:  PASS  exclude: ES recomputed to 15
+2026-09-02T19:13:43.7816166Z psql:supabase/test/rls_test.sql:122: NOTICE:  PASS  exclude: the shot row is retained, not deleted
+2026-09-02T19:13:43.7816908Z DO
+2026-09-02T19:13:43.7817193Z UPDATE 1
+2026-09-02T19:13:43.7817851Z psql:supabase/test/rls_test.sql:163: NOTICE:  PASS  source_app: the literal Bench actually sends is accepted
+2026-09-02T19:13:43.7819128Z psql:supabase/test/rls_test.sql:163: NOTICE:  PASS  source_app: ...on groups too, which is where Bench's sizes go
+2026-09-02T19:13:43.7820358Z psql:supabase/test/rls_test.sql:163: NOTICE:  PASS  source_app: and only one spelling is legal, so the trap cannot be reset
+2026-09-02T19:13:43.7821226Z DO
+2026-09-02T19:13:43.7828105Z psql:supabase/test/rls_test.sql:183: NOTICE:  PASS  guard: a hand-written summary cannot overwrite a derived one
+2026-09-02T19:13:43.7829555Z psql:supabase/test/rls_test.sql:183: NOTICE:  PASS  guard: ...and the shot count still comes from the shots
+2026-09-02T19:13:43.7830350Z DO
+2026-09-02T19:13:43.7837146Z psql:supabase/test/rls_test.sql:210: NOTICE:  PASS  guard: a chronograph readout survives when there is no shot string
+2026-09-02T19:13:43.7838623Z psql:supabase/test/rls_test.sql:210: NOTICE:  PASS  guard: ...spread and sample size included
+2026-09-02T19:13:43.7842812Z psql:supabase/test/rls_test.sql:210: NOTICE:  PASS  guard: an unrelated edit does not blank the readout
+2026-09-02T19:13:43.7843652Z DO
+2026-09-02T19:13:43.7855039Z psql:supabase/test/rls_test.sql:236: NOTICE:  PASS  guard: adding shots takes the summary back from the client
+2026-09-02T19:13:43.7860179Z psql:supabase/test/rls_test.sql:236: NOTICE:  PASS  guard: ...and will not give it back
+2026-09-02T19:13:43.7868714Z DO
+2026-09-02T19:13:43.7914349Z psql:supabase/test/rls_test.sql:264: NOTICE:  PASS  prep: the CBTO actually loaded reaches Zero, not just the recipe's
+2026-09-02T19:13:43.7915651Z psql:supabase/test/rls_test.sql:264: NOTICE:  PASS  prep: the sizing that produced this batch travels with it
+2026-09-02T19:13:43.7917300Z psql:supabase/test/rls_test.sql:264: NOTICE:  PASS  over max: the view reads the charge that went in the case
+2026-09-02T19:13:43.7939320Z psql:supabase/test/rls_test.sql:264: NOTICE:  PASS  over max: with nothing weighed it falls back to the recipe, which is under
+2026-09-02T19:13:43.7940306Z psql:supabase/test/rls_test.sql:264: NOTICE:  PASS  prep: ...and the loaded CBTO is unaffected by that
+2026-09-02T19:13:43.7941157Z DO
+2026-09-02T19:13:43.7944525Z psql:supabase/test/rls_test.sql:276: NOTICE:  PASS  es_to_sigma: 5-shot
+2026-09-02T19:13:43.7945724Z psql:supabase/test/rls_test.sql:276: NOTICE:  PASS  es_to_sigma: a 10-shot ES of 26.5 matches a 5-shot ES of 20
+2026-09-02T19:13:43.7947996Z psql:supabase/test/rls_test.sql:276: NOTICE:  PASS  es_to_sigma: n<2 is undefined
+2026-09-02T19:13:43.7949191Z DO
+2026-09-02T19:13:43.7953308Z psql:supabase/test/rls_test.sql:292: NOTICE:  PASS  constraint: a recipe with no source and no acknowledgement is rejected
+2026-09-02T19:13:43.7956756Z psql:supabase/test/rls_test.sql:292: NOTICE:  PASS  constraint: self_developed = true is accepted
+2026-09-02T19:13:43.7957748Z DO
+2026-09-02T19:13:43.7960658Z  as_user 
+2026-09-02T19:13:43.7960964Z ---------
+2026-09-02T19:13:43.7961228Z  
+2026-09-02T19:13:43.7961408Z (1 row)
+2026-09-02T19:13:43.7961530Z 
+2026-09-02T19:13:43.7965708Z INSERT 0 1
+2026-09-02T19:13:43.7971211Z INSERT 0 1
+2026-09-02T19:13:43.7973651Z psql:supabase/test/rls_test.sql:307: NOTICE:  PASS  isolation: two users may hold the same serial
+2026-09-02T19:13:43.7979437Z DO
+2026-09-02T19:13:43.7980087Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot select A's batch
+2026-09-02T19:13:43.7982598Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B sees only their own batch
+2026-09-02T19:13:43.7985081Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot select A's shots
+2026-09-02T19:13:43.7987145Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot select A's groups
+2026-09-02T19:13:43.7989876Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot update A's batch
+2026-09-02T19:13:43.7991712Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot delete A's batch
+2026-09-02T19:13:43.7994184Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B cannot insert a row owned by A
+2026-09-02T19:13:43.8004234Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: v_ballistic_profiles does not leak A's batch to B
+2026-09-02T19:13:43.8013159Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: v_batch_performance does not leak A's batch to B
+2026-09-02T19:13:43.8021763Z psql:supabase/test/rls_test.sql:358: NOTICE:  PASS  RLS: B sees exactly their own profile row
+2026-09-02T19:13:43.8022475Z DO
+2026-09-02T19:13:43.8024928Z  as_user 
+2026-09-02T19:13:43.8025245Z ---------
+2026-09-02T19:13:43.8025748Z  
+2026-09-02T19:13:43.8025947Z (1 row)
+2026-09-02T19:13:43.8026157Z 
+2026-09-02T19:13:43.8045479Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: bullet weight reaches Zero
+2026-09-02T19:13:43.8046615Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: G7 BC reaches Zero
+2026-09-02T19:13:43.8047688Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: muzzle velocity reaches Zero
+2026-09-02T19:13:43.8048721Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: velocity ES reaches Zero
+2026-09-02T19:13:43.8049664Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: ES is also exposed as a comparable sigma
+2026-09-02T19:13:43.8050617Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: sight height reaches Zero
+2026-09-02T19:13:43.8051487Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: zero range reaches Zero
+2026-09-02T19:13:43.8052350Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: batch is not flagged untested
+2026-09-02T19:13:43.8053245Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: charge is under published max
+2026-09-02T19:13:43.8054097Z psql:supabase/test/rls_test.sql:377: NOTICE:  PASS  view: quarantine flag exposed
+2026-09-02T19:13:43.8054709Z DO
+2026-09-02T19:13:43.8060701Z psql:supabase/test/rls_test.sql:388: NOTICE:  PASS  view: Bench sees Zero's group
+2026-09-02T19:13:43.8061839Z psql:supabase/test/rls_test.sql:388: NOTICE:  PASS  view: group ES in inches reaches Bench
+2026-09-02T19:13:43.8062788Z psql:supabase/test/rls_test.sql:388: NOTICE:  PASS  view: MOA uses 1.047 in/100 yd
+2026-09-02T19:13:43.8063444Z DO
+2026-09-02T19:13:43.8067885Z UPDATE 1
+2026-09-02T19:13:43.8078716Z psql:supabase/test/rls_test.sql:399: NOTICE:  PASS  cross-app: a Bench quarantine is visible to Zero
+2026-09-02T19:13:43.8079534Z DO
+2026-09-02T19:13:43.8083333Z UPDATE 1
+2026-09-02T19:13:43.8094338Z psql:supabase/test/rls_test.sql:413: NOTICE:  PASS  soft delete: removed from the view
+2026-09-02T19:13:43.8096956Z psql:supabase/test/rls_test.sql:413: NOTICE:  PASS  soft delete: row retained for sync propagation
+2026-09-02T19:13:43.8098104Z DO
+2026-09-02T19:13:43.8098417Z RESET
+2026-09-02T19:13:43.8098738Z 
+2026-09-02T19:13:43.8098876Z ALL ASSERTIONS PASSED
+2026-09-02T19:13:43.8146663Z == supabase/test/rls_test10.sql
+2026-09-02T19:13:43.8512029Z DO
+2026-09-02T19:13:43.8512308Z Pager usage is off.
+2026-09-02T19:13:43.8521630Z INSERT 0 2
+2026-09-02T19:13:43.8533777Z INSERT 0 2
+2026-09-02T19:13:43.8540824Z CREATE FUNCTION
+2026-09-02T19:13:43.8542436Z SET
+2026-09-02T19:13:43.8547906Z  as_user_aal 
+2026-09-02T19:13:43.8549118Z -------------
+2026-09-02T19:13:43.8549670Z  
+2026-09-02T19:13:43.8550036Z (1 row)
+2026-09-02T19:13:43.8550216Z 
+2026-09-02T19:13:43.8559815Z INSERT 0 1
+2026-09-02T19:13:43.8564183Z INSERT 0 1
+2026-09-02T19:13:43.8570308Z psql:supabase/test/rls_test10.sql:79: NOTICE:  PASS  an ordinary aal1 session still records events — the aal2 rule is scoped to select
+2026-09-02T19:13:43.8575491Z psql:supabase/test/rls_test10.sql:79: NOTICE:  PASS  ...and still cannot read any of them back
+2026-09-02T19:13:43.8576286Z DO
+2026-09-02T19:13:43.8577597Z  as_user_aal 
+2026-09-02T19:13:43.8577919Z -------------
+2026-09-02T19:13:43.8578222Z  
+2026-09-02T19:13:43.8578633Z (1 row)
+2026-09-02T19:13:43.8578813Z 
+2026-09-02T19:13:43.8583370Z psql:supabase/test/rls_test10.sql:97: NOTICE:  PASS  a password-only admin is still an admin — the dashboard needs to know that to ask for a code
+2026-09-02T19:13:43.8585298Z psql:supabase/test/rls_test10.sql:97: NOTICE:  PASS  ...but has not cleared the second factor
+2026-09-02T19:13:43.8587544Z psql:supabase/test/rls_test10.sql:97: NOTICE:  PASS  so the analytics read nothing on a password-only session
+2026-09-02T19:13:43.8592623Z psql:supabase/test/rls_test10.sql:97: NOTICE:  PASS  ...including through the rollups
+2026-09-02T19:13:43.8593324Z DO
+2026-09-02T19:13:43.8594785Z  as_user_aal 
+2026-09-02T19:13:43.8595095Z -------------
+2026-09-02T19:13:43.8595346Z  
+2026-09-02T19:13:43.8595534Z (1 row)
+2026-09-02T19:13:43.8595709Z 
+2026-09-02T19:13:43.8599979Z psql:supabase/test/rls_test10.sql:112: NOTICE:  PASS  with a verified factor the admin clears both tests
+2026-09-02T19:13:43.8603247Z psql:supabase/test/rls_test10.sql:112: NOTICE:  PASS  and the analytics open up
+2026-09-02T19:13:43.8607901Z psql:supabase/test/rls_test10.sql:112: NOTICE:  PASS  ...through the rollups too
+2026-09-02T19:13:43.8608672Z DO
+2026-09-02T19:13:43.8609532Z  as_user_aal 
+2026-09-02T19:13:43.8609828Z -------------
+2026-09-02T19:13:43.8610106Z  
+2026-09-02T19:13:43.8610377Z (1 row)
+2026-09-02T19:13:43.8610543Z 
+2026-09-02T19:13:43.8617602Z psql:supabase/test/rls_test10.sql:125: NOTICE:  PASS  a second factor on a non-admin account grants nothing — it is an AND, not an OR
+2026-09-02T19:13:43.8618897Z psql:supabase/test/rls_test10.sql:125: NOTICE:  PASS  ...and reads nothing
+2026-09-02T19:13:43.8619367Z DO
+2026-09-02T19:13:43.8619551Z RESET
+2026-09-02T19:13:43.8624730Z psql:supabase/test/rls_test10.sql:131: ERROR:  new row for relation "recipes" violates check constraint "recipe_cites_a_source"
+2026-09-02T19:13:43.8630464Z DETAIL:  Failing row contains (d0000000-0000-0000-0000-0000000000cc, e0000000-0000-0000-0000-00000000000e, Shooter load, 308 Win, null, null, null, null, 41.500, null, null, null, null, null, null, null, null, null, null, null, f, workup, null, 2026-09-02 19:13:43.861841+00, 2026-09-02 19:13:43.861841+00, null).
+2026-09-02T19:13:43.8673146Z == supabase/test/rls_test2.sql
+2026-09-02T19:13:43.9045326Z DO
+2026-09-02T19:13:43.9045603Z Pager usage is off.
+2026-09-02T19:13:43.9046605Z SET
+2026-09-02T19:13:43.9053263Z  as_user 
+2026-09-02T19:13:43.9053747Z ---------
+2026-09-02T19:13:43.9054055Z  
+2026-09-02T19:13:43.9054311Z (1 row)
+2026-09-02T19:13:43.9054481Z 
+2026-09-02T19:13:43.9079228Z INSERT 0 1
+2026-09-02T19:13:43.9085891Z INSERT 0 1
+2026-09-02T19:13:43.9094244Z psql:supabase/test/rls_test2.sql:72: NOTICE:  PASS  constraint: a 10-shot 700 is rejected as implausible
+2026-09-02T19:13:43.9097902Z psql:supabase/test/rls_test2.sql:72: NOTICE:  PASS  constraint: more X's than shots is rejected
+2026-09-02T19:13:43.9100700Z psql:supabase/test/rls_test2.sql:72: NOTICE:  PASS  constraint: handle shape is enforced
+2026-09-02T19:13:43.9101384Z DO
+2026-09-02T19:13:43.9103287Z  as_user 
+2026-09-02T19:13:43.9103579Z ---------
+2026-09-02T19:13:43.9104011Z  
+2026-09-02T19:13:43.9104306Z (1 row)
+2026-09-02T19:13:43.9104677Z 
+2026-09-02T19:13:43.9128384Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  public read: B sees A's leaderboard entry via the table
+2026-09-02T19:13:43.9130021Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  public read: B sees A's entry with A's handle via the view
+2026-09-02T19:13:43.9131429Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  isolation: the open leaderboard changed nothing for private tables
+2026-09-02T19:13:43.9132708Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  write guard: B cannot rewrite A's score
+2026-09-02T19:13:43.9134581Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  write guard: B cannot delete A's entry
+2026-09-02T19:13:43.9135957Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  write guard: B cannot rename A
+2026-09-02T19:13:43.9137114Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  write guard: B cannot plant an entry under A's account
+2026-09-02T19:13:43.9139550Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  handles: case-insensitive uniqueness (JAXON = Jaxon)
+2026-09-02T19:13:43.9150789Z psql:supabase/test/rls_test2.sql:134: NOTICE:  PASS  the class view now holds both shooters' entries
+2026-09-02T19:13:43.9151913Z DO
+2026-09-02T19:13:43.9155235Z  as_user 
+2026-09-02T19:13:43.9155610Z ---------
+2026-09-02T19:13:43.9155940Z  
+2026-09-02T19:13:43.9156247Z (1 row)
+2026-09-02T19:13:43.9156461Z 
+2026-09-02T19:13:43.9159836Z DELETE 1
+2026-09-02T19:13:43.9161606Z  as_user 
+2026-09-02T19:13:43.9161897Z ---------
+2026-09-02T19:13:43.9162180Z  
+2026-09-02T19:13:43.9162456Z (1 row)
+2026-09-02T19:13:43.9162613Z 
+2026-09-02T19:13:43.9170611Z psql:supabase/test/rls_test2.sql:160: NOTICE:  PASS  retraction: a withdrawn entry leaves the leaderboard for everyone
+2026-09-02T19:13:43.9172134Z psql:supabase/test/rls_test2.sql:160: NOTICE:  PASS  retraction: ...and off the raw table too, which every account can read
+2026-09-02T19:13:43.9173095Z DO
+2026-09-02T19:13:43.9173384Z RESET
+2026-09-02T19:13:43.9173793Z 
+2026-09-02T19:13:43.9173967Z LEADERBOARD ASSERTIONS PASSED
+2026-09-02T19:13:43.9174366Z SET
+2026-09-02T19:13:43.9179374Z psql:supabase/test/rls_test2.sql:181: NOTICE:  PASS  keepalive: callable by the anon role (the scheduled ping is unauthenticated)
+2026-09-02T19:13:43.9180759Z psql:supabase/test/rls_test2.sql:181: NOTICE:  PASS  keepalive: granting anon EXECUTE did not open any table to anon
+2026-09-02T19:13:43.9181564Z DO
+2026-09-02T19:13:43.9182026Z RESET
+2026-09-02T19:13:43.9236212Z == supabase/test/rls_test3.sql
+2026-09-02T19:13:43.9682610Z DO
+2026-09-02T19:13:43.9683290Z Pager usage is off.
+2026-09-02T19:13:43.9694855Z INSERT 0 2
+2026-09-02T19:13:43.9695999Z SET
+2026-09-02T19:13:43.9704249Z  as_user 
+2026-09-02T19:13:43.9704703Z ---------
+2026-09-02T19:13:43.9705005Z  
+2026-09-02T19:13:43.9705267Z (1 row)
+2026-09-02T19:13:43.9705433Z 
+2026-09-02T19:13:43.9748160Z psql:supabase/test/rls_test3.sql:57: NOTICE:  PASS  code is 4 chars from the unambiguous, vowel-free alphabet: SCGV
+2026-09-02T19:13:43.9749250Z psql:supabase/test/rls_test3.sql:57: NOTICE:  PASS  the relay starts live
+2026-09-02T19:13:43.9750716Z psql:supabase/test/rls_test3.sql:57: NOTICE:  PASS  the relay has an expiry
+2026-09-02T19:13:43.9756265Z psql:supabase/test/rls_test3.sql:57: NOTICE:  PASS  the host joins their own relay automatically
+2026-09-02T19:13:43.9769743Z DO
+2026-09-02T19:13:43.9793599Z psql:supabase/test/rls_test3.sql:67: NOTICE:  PASS  the host can log shots into the relay
+2026-09-02T19:13:43.9794775Z DO
+2026-09-02T19:13:43.9809559Z psql:supabase/test/rls_test3.sql:80: NOTICE:  PASS  going live again ends the previous relay -- one live relay per shooter
+2026-09-02T19:13:43.9813811Z DO
+2026-09-02T19:13:43.9833715Z DO
+2026-09-02T19:13:43.9836524Z  as_user 
+2026-09-02T19:13:43.9836826Z ---------
+2026-09-02T19:13:43.9837110Z  
+2026-09-02T19:13:43.9837378Z (1 row)
+2026-09-02T19:13:43.9837546Z 
+2026-09-02T19:13:43.9843369Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a stranger cannot list relays at all
+2026-09-02T19:13:43.9846353Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a stranger cannot read the relay even knowing its id
+2026-09-02T19:13:43.9849914Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a stranger cannot read the shot string
+2026-09-02T19:13:43.9852499Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a stranger cannot enumerate participants
+2026-09-02T19:13:43.9854774Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a stranger cannot self-insert a participant row -- join_relay is the only door
+2026-09-02T19:13:43.9868271Z psql:supabase/test/rls_test3.sql:123: NOTICE:  PASS  a bad code is refused
+2026-09-02T19:13:43.9869555Z DO
+2026-09-02T19:13:43.9881646Z psql:supabase/test/rls_test3.sql:137: NOTICE:  PASS  repeated wrong codes trip the per-user throttle
+2026-09-02T19:13:43.9882499Z DO
+2026-09-02T19:13:43.9884166Z RESET
+2026-09-02T19:13:43.9888101Z psql:supabase/test/rls_test3.sql:150: NOTICE:  PASS  failed attempts persist (a RAISE would have rolled every one of them back)
+2026-09-02T19:13:43.9889179Z DO
+2026-09-02T19:13:43.9889469Z SET
+2026-09-02T19:13:43.9891424Z  as_user 
+2026-09-02T19:13:43.9891714Z ---------
+2026-09-02T19:13:43.9892007Z  
+2026-09-02T19:13:43.9892281Z (1 row)
+2026-09-02T19:13:43.9892458Z 
+2026-09-02T19:13:43.9893373Z  as_user 
+2026-09-02T19:13:43.9893666Z ---------
+2026-09-02T19:13:43.9893871Z  
+2026-09-02T19:13:43.9894115Z (1 row)
+2026-09-02T19:13:43.9894265Z 
+2026-09-02T19:13:43.9909407Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  a valid code joins the relay
+2026-09-02T19:13:43.9910232Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  ...and returns that relay
+2026-09-02T19:13:43.9914931Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  the coach now sees the full shot string
+2026-09-02T19:13:43.9920903Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  the code is accepted lowercase and padded
+2026-09-02T19:13:43.9926800Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  rejoining in the same role still works — that is a dropped signal, not a collision
+2026-09-02T19:13:43.9952696Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  relay_state returns the shots
+2026-09-02T19:13:43.9953763Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  relay_state lists both people
+2026-09-02T19:13:43.9954600Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  relay_state reports status
+2026-09-02T19:13:43.9961157Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  the coach can post to the feed
+2026-09-02T19:13:43.9967998Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  a coach cannot log shots -- only the host writes the string
+2026-09-02T19:13:43.9970445Z psql:supabase/test/rls_test3.sql:207: NOTICE:  PASS  only the host can end the relay
+2026-09-02T19:13:43.9972824Z DO
+2026-09-02T19:13:44.0501855Z psql:supabase/test/rls_test3.sql:233: NOTICE:  PASS  polling with a cursor returns only the new shot
+2026-09-02T19:13:44.0519263Z psql:supabase/test/rls_test3.sql:233: NOTICE:  PASS  two shots sharing one timestamp both arrive (a strict > cursor loses them)
+2026-09-02T19:13:44.0520924Z DO
+2026-09-02T19:13:44.0523922Z  as_user 
+2026-09-02T19:13:44.0524214Z ---------
+2026-09-02T19:13:44.0524576Z  
+2026-09-02T19:13:44.0524813Z (1 row)
+2026-09-02T19:13:44.0525038Z 
+2026-09-02T19:13:44.0532146Z psql:supabase/test/rls_test3.sql:250: NOTICE:  PASS  the host can end the relay
+2026-09-02T19:13:44.0534053Z psql:supabase/test/rls_test3.sql:250: NOTICE:  PASS  the code stops working once the relay ends
+2026-09-02T19:13:44.0538003Z DO
+2026-09-02T19:13:44.0541057Z  as_user 
+2026-09-02T19:13:44.0541372Z ---------
+2026-09-02T19:13:44.0541667Z  
+2026-09-02T19:13:44.0541935Z (1 row)
+2026-09-02T19:13:44.0542102Z 
+2026-09-02T19:13:44.0555064Z psql:supabase/test/rls_test3.sql:263: NOTICE:  PASS  an expired relay is not joinable even while marked live
+2026-09-02T19:13:44.0556112Z DO
+2026-09-02T19:13:44.0558397Z  as_user 
+2026-09-02T19:13:44.0558920Z ---------
+2026-09-02T19:13:44.0559179Z  
+2026-09-02T19:13:44.0559366Z (1 row)
+2026-09-02T19:13:44.0559477Z 
+2026-09-02T19:13:44.0566479Z psql:supabase/test/rls_test3.sql:287: NOTICE:  PASS  an anonymous device cannot publish to the leaderboard
+2026-09-02T19:13:44.0571774Z psql:supabase/test/rls_test3.sql:287: NOTICE:  PASS  ...while a permanent account still can
+2026-09-02T19:13:44.0573040Z DO
+2026-09-02T19:13:44.0579468Z RESET
+2026-09-02T19:13:44.0580455Z 
+2026-09-02T19:13:44.0580700Z RELAY ASSERTIONS PASSED
+2026-09-02T19:13:44.0634676Z == supabase/test/rls_test4.sql
+2026-09-02T19:13:44.1005515Z DO
+2026-09-02T19:13:44.1005885Z Pager usage is off.
+2026-09-02T19:13:44.1014180Z INSERT 0 3
+2026-09-02T19:13:44.1015816Z SET
+2026-09-02T19:13:44.1022061Z  as_user 
+2026-09-02T19:13:44.1022465Z ---------
+2026-09-02T19:13:44.1022804Z  
+2026-09-02T19:13:44.1023070Z (1 row)
+2026-09-02T19:13:44.1023229Z 
+2026-09-02T19:13:44.1072623Z psql:supabase/test/rls_test4.sql:56: NOTICE:  PASS  the shooter who starts the relay takes firing point 1
+2026-09-02T19:13:44.1099268Z DO
+2026-09-02T19:13:44.1103637Z  as_user 
+2026-09-02T19:13:44.1103863Z ---------
+2026-09-02T19:13:44.1104069Z  
+2026-09-02T19:13:44.1104249Z (1 row)
+2026-09-02T19:13:44.1104363Z 
+2026-09-02T19:13:44.1140003Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  a partner can join as a shooter
+2026-09-02T19:13:44.1141578Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  ...and is given firing point 2
+2026-09-02T19:13:44.1142467Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  ...with the shooter role
+2026-09-02T19:13:44.1147076Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  the partner sees the first shooter's string
+2026-09-02T19:13:44.1164610Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  both shooters number their shots 1 and 2 without colliding
+2026-09-02T19:13:44.1168371Z psql:supabase/test/rls_test4.sql:84: NOTICE:  PASS  four shots on the relay, two strings of two
+2026-09-02T19:13:44.1170637Z DO
+2026-09-02T19:13:44.1181490Z psql:supabase/test/rls_test4.sql:115: NOTICE:  PASS  a shooter cannot write their partner's string
+2026-09-02T19:13:44.1186094Z psql:supabase/test/rls_test4.sql:115: NOTICE:  PASS  the two rows about to be attacked are visible to the attacker
+2026-09-02T19:13:44.1189107Z psql:supabase/test/rls_test4.sql:115: NOTICE:  PASS  a shooter cannot rewrite their partner's shots
+2026-09-02T19:13:44.1191396Z psql:supabase/test/rls_test4.sql:115: NOTICE:  PASS  a shooter cannot delete their partner's shots
+2026-09-02T19:13:44.1192130Z DO
+2026-09-02T19:13:44.1194449Z  as_user 
+2026-09-02T19:13:44.1194734Z ---------
+2026-09-02T19:13:44.1194929Z  
+2026-09-02T19:13:44.1195113Z (1 row)
+2026-09-02T19:13:44.1195222Z 
+2026-09-02T19:13:44.1209743Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  the coach joins with the same code
+2026-09-02T19:13:44.1210707Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  ...and takes no firing point
+2026-09-02T19:13:44.1249964Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  firing point 1 carries its own distance
+2026-09-02T19:13:44.1252118Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  ...and firing point 2 carries a different one
+2026-09-02T19:13:44.1253565Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  a coach, who fires nothing, falls back to the relay distance
+2026-09-02T19:13:44.1269752Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  the coach sees both strings in one round trip
+2026-09-02T19:13:44.1271007Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  the coach sees all three people
+2026-09-02T19:13:44.1275058Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  every relayed shot carries the firing point that fired it
+2026-09-02T19:13:44.1277248Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  ...and the name of the shooter, so the coach reads names not numbers
+2026-09-02T19:13:44.1280271Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  the shooter's called position travels with the shot
+2026-09-02T19:13:44.1281549Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  no auth user id is exposed to co-participants
+2026-09-02T19:13:44.1282606Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  none of the shots are the coach's own
+2026-09-02T19:13:44.1291859Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  a coach cannot log shots for anybody
+2026-09-02T19:13:44.1298112Z psql:supabase/test/rls_test4.sql:192: NOTICE:  PASS  the coach can call wind to both shooters at once
+2026-09-02T19:13:44.1300398Z DO
+2026-09-02T19:13:44.1303644Z  as_user 
+2026-09-02T19:13:44.1303940Z ---------
+2026-09-02T19:13:44.1304251Z  
+2026-09-02T19:13:44.1304522Z (1 row)
+2026-09-02T19:13:44.1304698Z 
+2026-09-02T19:13:44.1318193Z psql:supabase/test/rls_test4.sql:213: NOTICE:  PASS  a shooter can pick out their own two shots
+2026-09-02T19:13:44.1320705Z psql:supabase/test/rls_test4.sql:213: NOTICE:  PASS  ...and their partner's two, to draw in another colour
+2026-09-02T19:13:44.1327779Z psql:supabase/test/rls_test4.sql:213: NOTICE:  PASS  the coach's wind call reaches the shooter
+2026-09-02T19:13:44.1328688Z DO
+2026-09-02T19:13:44.1329182Z  as_user 
+2026-09-02T19:13:44.1329655Z ---------
+2026-09-02T19:13:44.1329935Z  
+2026-09-02T19:13:44.1330189Z (1 row)
+2026-09-02T19:13:44.1330342Z 
+2026-09-02T19:13:44.1332621Z psql:supabase/test/rls_test4.sql:225: NOTICE:  PASS  rejoining after a dropped signal keeps the same firing point
+2026-09-02T19:13:44.1333732Z DO
+2026-09-02T19:13:44.1336220Z  as_user 
+2026-09-02T19:13:44.1336512Z ---------
+2026-09-02T19:13:44.1336699Z  
+2026-09-02T19:13:44.1336909Z (1 row)
+2026-09-02T19:13:44.1337015Z 
+2026-09-02T19:13:44.1345974Z psql:supabase/test/rls_test4.sql:253: NOTICE:  PASS  a third shooter takes firing point 3
+2026-09-02T19:13:44.1351329Z psql:supabase/test/rls_test4.sql:253: NOTICE:  PASS  an account that is already shooting cannot be flipped to coach out from under itself
+2026-09-02T19:13:44.1352997Z psql:supabase/test/rls_test4.sql:253: NOTICE:  PASS  ...and is told why, rather than being granted it silently
+2026-09-02T19:13:44.1353791Z DO
+2026-09-02T19:13:44.1359953Z psql:supabase/test/rls_test4.sql:265: NOTICE:  PASS  the live participant row is untouched — still shooting, still on the same firing point
+2026-09-02T19:13:44.1360599Z DO
+2026-09-02T19:13:44.1363419Z  as_user 
+2026-09-02T19:13:44.1363657Z ---------
+2026-09-02T19:13:44.1363860Z  
+2026-09-02T19:13:44.1364108Z (1 row)
+2026-09-02T19:13:44.1364257Z 
+2026-09-02T19:13:44.1369780Z psql:supabase/test/rls_test4.sql:274: NOTICE:  PASS  a shooter can leave the relay
+2026-09-02T19:13:44.1372593Z DO
+2026-09-02T19:13:44.1373533Z  as_user 
+2026-09-02T19:13:44.1381649Z ---------
+2026-09-02T19:13:44.1382050Z  
+2026-09-02T19:13:44.1382328Z (1 row)
+2026-09-02T19:13:44.1382489Z 
+2026-09-02T19:13:44.1382965Z psql:supabase/test/rls_test4.sql:290: NOTICE:  PASS  the vacated firing point is reused rather than numbering climbing forever
+2026-09-02T19:13:44.1384582Z psql:supabase/test/rls_test4.sql:290: NOTICE:  PASS  ...and a coach may still pick up a rifle — the refusal is one-directional on purpose
+2026-09-02T19:13:44.1385233Z DO
+2026-09-02T19:13:44.1386148Z  as_user 
+2026-09-02T19:13:44.1386581Z ---------
+2026-09-02T19:13:44.1386851Z  
+2026-09-02T19:13:44.1387034Z (1 row)
+2026-09-02T19:13:44.1387287Z 
+2026-09-02T19:13:44.1392393Z psql:supabase/test/rls_test4.sql:304: NOTICE:  PASS  only the shooter who started it can end the relay
+2026-09-02T19:13:44.1393170Z DO
+2026-09-02T19:13:44.1394014Z  as_user 
+2026-09-02T19:13:44.1394312Z ---------
+2026-09-02T19:13:44.1394541Z  
+2026-09-02T19:13:44.1394723Z (1 row)
+2026-09-02T19:13:44.1394847Z 
+2026-09-02T19:13:44.1406100Z psql:supabase/test/rls_test4.sql:324: NOTICE:  PASS  an ended relay accepts no further shots from anyone
+2026-09-02T19:13:44.1409180Z psql:supabase/test/rls_test4.sql:324: NOTICE:  PASS  the strings already fired survive the relay ending
+2026-09-02T19:13:44.1410449Z DO
+2026-09-02T19:13:44.1411568Z RESET
+2026-09-02T19:13:44.1411730Z 
+2026-09-02T19:13:44.1411893Z PAIR ASSERTIONS PASSED
+2026-09-02T19:13:44.1460139Z == supabase/test/rls_test5.sql
+2026-09-02T19:13:44.1834317Z DO
+2026-09-02T19:13:44.1834697Z Pager usage is off.
+2026-09-02T19:13:44.1840036Z INSERT 0 0
+2026-09-02T19:13:44.1841379Z SET
+2026-09-02T19:13:44.1847019Z  as_user 
+2026-09-02T19:13:44.1847344Z ---------
+2026-09-02T19:13:44.1847636Z  
+2026-09-02T19:13:44.1847899Z (1 row)
+2026-09-02T19:13:44.1848066Z 
+2026-09-02T19:13:44.1862503Z psql:supabase/test/rls_test5.sql:82: NOTICE:  PASS  a firearm carries barrel life and a starting count
+2026-09-02T19:13:44.1864674Z psql:supabase/test/rls_test5.sql:82: NOTICE:  PASS  barrel life must be positive or absent, never zero
+2026-09-02T19:13:44.1867418Z psql:supabase/test/rls_test5.sql:82: NOTICE:  PASS  the starting round count cannot be negative
+2026-09-02T19:13:44.1873154Z psql:supabase/test/rls_test5.sql:82: NOTICE:  PASS  barrel life defaults to unknown and the starting count to zero
+2026-09-02T19:13:44.1883636Z DO
+2026-09-02T19:13:44.1898123Z psql:supabase/test/rls_test5.sql:121: NOTICE:  PASS  Bench's geometry landed
+2026-09-02T19:13:44.1899249Z psql:supabase/test/rls_test5.sql:121: NOTICE:  PASS  and Zero's barrel life survived a write that never mentioned it
+2026-09-02T19:13:44.1905053Z psql:supabase/test/rls_test5.sql:121: NOTICE:  PASS  Zero's rebarrel landed
+2026-09-02T19:13:44.1906516Z psql:supabase/test/rls_test5.sql:121: NOTICE:  PASS  and Bench's geometry survived in turn — neither app can erase the other
+2026-09-02T19:13:44.1907749Z DO
+2026-09-02T19:13:44.2018016Z psql:supabase/test/rls_test5.sql:134: NOTICE:  PASS  updated_at is moved by the server on every write — it is what the pull cursor reads
+2026-09-02T19:13:44.2019142Z DO
+2026-09-02T19:13:44.2022706Z  as_user 
+2026-09-02T19:13:44.2023133Z ---------
+2026-09-02T19:13:44.2023444Z  
+2026-09-02T19:13:44.2023721Z (1 row)
+2026-09-02T19:13:44.2023996Z 
+2026-09-02T19:13:44.2028689Z psql:supabase/test/rls_test5.sql:148: NOTICE:  PASS  another account cannot read this firearm
+2026-09-02T19:13:44.2032909Z psql:supabase/test/rls_test5.sql:148: NOTICE:  PASS  nor rename it — RLS is what makes one shared table safe
+2026-09-02T19:13:44.2033553Z DO
+2026-09-02T19:13:44.2034782Z  as_user 
+2026-09-02T19:13:44.2035070Z ---------
+2026-09-02T19:13:44.2035352Z  
+2026-09-02T19:13:44.2035609Z (1 row)
+2026-09-02T19:13:44.2035771Z 
+2026-09-02T19:13:44.2040992Z psql:supabase/test/rls_test5.sql:182: NOTICE:  PASS  an upsert carrying only {id, deleted_at} is refused: the insert branch has no name
+2026-09-02T19:13:44.2044526Z psql:supabase/test/rls_test5.sql:182: NOTICE:  PASS  a delete is a tombstone the other app can pull, not a row that vanishes
+2026-09-02T19:13:44.2046472Z psql:supabase/test/rls_test5.sql:182: NOTICE:  PASS  and it does not disturb the rest of the row
+2026-09-02T19:13:44.2047985Z DO
+2026-09-02T19:13:44.2059266Z RESET
+2026-09-02T19:13:44.2059521Z 
+2026-09-02T19:13:44.2059756Z FIREARM SHARING ASSERTIONS PASSED
+2026-09-02T19:13:44.2098903Z == supabase/test/rls_test6.sql
+2026-09-02T19:13:44.2465400Z DO
+2026-09-02T19:13:44.2465764Z Pager usage is off.
+2026-09-02T19:13:44.2475457Z INSERT 0 2
+2026-09-02T19:13:44.2477409Z SET
+2026-09-02T19:13:44.2483234Z  as_user 
+2026-09-02T19:13:44.2483559Z ---------
+2026-09-02T19:13:44.2483786Z  
+2026-09-02T19:13:44.2484087Z (1 row)
+2026-09-02T19:13:44.2484207Z 
+2026-09-02T19:13:44.2518242Z psql:supabase/test/rls_test6.sql:64: NOTICE:  PASS  the starter's own target is recorded on their participant row, not only on the relay
+2026-09-02T19:13:44.2530727Z DO
+2026-09-02T19:13:44.2533656Z  as_user 
+2026-09-02T19:13:44.2533957Z ---------
+2026-09-02T19:13:44.2534258Z  
+2026-09-02T19:13:44.2534529Z (1 row)
+2026-09-02T19:13:44.2534697Z 
+2026-09-02T19:13:44.2562245Z psql:supabase/test/rls_test6.sql:86: NOTICE:  PASS  the partner joins
+2026-09-02T19:13:44.2569184Z psql:supabase/test/rls_test6.sql:86: NOTICE:  PASS  their own target and distance are stored
+2026-09-02T19:13:44.2580079Z psql:supabase/test/rls_test6.sql:86: NOTICE:  PASS  a rejoin that omits them keeps what was already known
+2026-09-02T19:13:44.2580939Z DO
+2026-09-02T19:13:44.2583585Z  as_user 
+2026-09-02T19:13:44.2583861Z ---------
+2026-09-02T19:13:44.2584087Z  
+2026-09-02T19:13:44.2584275Z (1 row)
+2026-09-02T19:13:44.2584392Z 
+2026-09-02T19:13:44.2590533Z psql:supabase/test/rls_test6.sql:111: NOTICE:  PASS  the face is refused to anyone not in the relay
+2026-09-02T19:13:44.2596665Z psql:supabase/test/rls_test6.sql:111: NOTICE:  PASS  the coach joins
+2026-09-02T19:13:44.2601294Z psql:supabase/test/rls_test6.sql:111: NOTICE:  PASS  a participant gets the ring geometry — the whole point of the overlay
+2026-09-02T19:13:44.2602421Z psql:supabase/test/rls_test6.sql:111: NOTICE:  PASS  ...and the name of the paper
+2026-09-02T19:13:44.2603184Z psql:supabase/test/rls_test6.sql:111: NOTICE:  PASS  ...and the relay distance
+2026-09-02T19:13:44.2603793Z DO
+2026-09-02T19:13:44.2605921Z  as_user 
+2026-09-02T19:13:44.2606252Z ---------
+2026-09-02T19:13:44.2606485Z  
+2026-09-02T19:13:44.2606743Z (1 row)
+2026-09-02T19:13:44.2606863Z 
+2026-09-02T19:13:44.2611294Z psql:supabase/test/rls_test6.sql:125: NOTICE:  PASS  a stranger holding the id is still refused the face
+2026-09-02T19:13:44.2612051Z DO
+2026-09-02T19:13:44.2613218Z  as_user 
+2026-09-02T19:13:44.2613496Z ---------
+2026-09-02T19:13:44.2613759Z  
+2026-09-02T19:13:44.2614020Z (1 row)
+2026-09-02T19:13:44.2614189Z 
+2026-09-02T19:13:44.2649711Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  every participant reports a target — the coach inherits the relay's
+2026-09-02T19:13:44.2650810Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  the feed carries the message
+2026-09-02T19:13:44.2652843Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  and NOT the author's auth id — the one payload here that used to leak it
+2026-09-02T19:13:44.2654239Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  the author name is the one recorded with the line
+2026-09-02T19:13:44.2655859Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  is_self is what a device uses to pick out its own lines, instead of an id
+2026-09-02T19:13:44.2657344Z psql:supabase/test/rls_test6.sql:159: NOTICE:  PASS  the poll still does not carry the rings — that is what relay_face is for
+2026-09-02T19:13:44.2657876Z DO
+2026-09-02T19:13:44.2658055Z  as_user 
+2026-09-02T19:13:44.2658242Z ---------
+2026-09-02T19:13:44.2658427Z  
+2026-09-02T19:13:44.2658839Z (1 row)
+2026-09-02T19:13:44.2658957Z 
+2026-09-02T19:13:44.2664949Z psql:supabase/test/rls_test6.sql:170: NOTICE:  PASS  the rejoin succeeds
+2026-09-02T19:13:44.2665542Z DO
+2026-09-02T19:13:44.2667700Z  as_user 
+2026-09-02T19:13:44.2668003Z ---------
+2026-09-02T19:13:44.2668288Z  
+2026-09-02T19:13:44.2668915Z (1 row)
+2026-09-02T19:13:44.2669075Z 
+2026-09-02T19:13:44.2685177Z psql:supabase/test/rls_test6.sql:184: NOTICE:  PASS  the shooters now report two different targets, which is what the coach's plot reads to decide it cannot draw one face
+2026-09-02T19:13:44.2686353Z DO
+2026-09-02T19:13:44.2687906Z RESET
+2026-09-02T19:13:44.2688075Z 
+2026-09-02T19:13:44.2688223Z RELAY FACE ASSERTIONS PASSED
+2026-09-02T19:13:44.2737175Z == supabase/test/rls_test7.sql
+2026-09-02T19:13:44.3100545Z DO
+2026-09-02T19:13:44.3100939Z Pager usage is off.
+2026-09-02T19:13:44.3109647Z INSERT 0 2
+2026-09-02T19:13:44.3111215Z SET
+2026-09-02T19:13:44.3116981Z  as_user 
+2026-09-02T19:13:44.3117293Z ---------
+2026-09-02T19:13:44.3117569Z  
+2026-09-02T19:13:44.3117755Z (1 row)
+2026-09-02T19:13:44.3117873Z 
+2026-09-02T19:13:44.3134013Z INSERT 0 1
+2026-09-02T19:13:44.3140634Z psql:supabase/test/rls_test7.sql:66: NOTICE:  PASS  a snapshot is stored
+2026-09-02T19:13:44.3143921Z psql:supabase/test/rls_test7.sql:66: NOTICE:  PASS  and is attributed to the account that wrote it, without being told
+2026-09-02T19:13:44.3144668Z DO
+2026-09-02T19:13:44.3149991Z psql:supabase/test/rls_test7.sql:80: NOTICE:  PASS  a second row in the same slot is refused: the slot IS the bound
+2026-09-02T19:13:44.3151232Z DO
+2026-09-02T19:13:44.3158352Z UPDATE 1
+2026-09-02T19:13:44.3163590Z psql:supabase/test/rls_test7.sql:90: NOTICE:  PASS  writing the slot again replaces it in place
+2026-09-02T19:13:44.3164356Z DO
+2026-09-02T19:13:44.3169863Z INSERT 0 2
+2026-09-02T19:13:44.3174104Z psql:supabase/test/rls_test7.sql:102: NOTICE:  PASS  app and slot are part of the key, so they do not collide
+2026-09-02T19:13:44.3174623Z DO
+2026-09-02T19:13:44.3180168Z psql:supabase/test/rls_test7.sql:120: NOTICE:  PASS  the slot vocabulary is fixed, so the row count per account is fixed
+2026-09-02T19:13:44.3183333Z psql:supabase/test/rls_test7.sql:120: NOTICE:  PASS  and so is a snapshot claiming to be from an app that does not exist
+2026-09-02T19:13:44.3184299Z DO
+2026-09-02T19:13:44.3641280Z psql:supabase/test/rls_test7.sql:133: NOTICE:  PASS  the 8 MiB ceiling is enforced here, not merely in the client that is trying to exceed it
+2026-09-02T19:13:44.3642880Z DO
+2026-09-02T19:13:44.3648868Z  as_user 
+2026-09-02T19:13:44.3649264Z ---------
+2026-09-02T19:13:44.3649576Z  
+2026-09-02T19:13:44.3649835Z (1 row)
+2026-09-02T19:13:44.3649997Z 
+2026-09-02T19:13:44.3653403Z psql:supabase/test/rls_test7.sql:155: NOTICE:  PASS  another account sees none of A's backups
+2026-09-02T19:13:44.3658904Z psql:supabase/test/rls_test7.sql:155: NOTICE:  PASS  nor through the listing view — security_invoker, so it is not a way around the policy
+2026-09-02T19:13:44.3661501Z psql:supabase/test/rls_test7.sql:155: NOTICE:  PASS  and cannot overwrite A's snapshot
+2026-09-02T19:13:44.3664557Z psql:supabase/test/rls_test7.sql:155: NOTICE:  PASS  ...or delete it
+2026-09-02T19:13:44.3665086Z DO
+2026-09-02T19:13:44.3670689Z psql:supabase/test/rls_test7.sql:168: NOTICE:  PASS  a backup cannot be written into someone else's account
+2026-09-02T19:13:44.3671824Z DO
+2026-09-02T19:13:44.3672430Z  as_user 
+2026-09-02T19:13:44.3673141Z ---------
+2026-09-02T19:13:44.3673438Z  
+2026-09-02T19:13:44.3673714Z (1 row)
+2026-09-02T19:13:44.3673875Z 
+2026-09-02T19:13:44.3680367Z psql:supabase/test/rls_test7.sql:184: NOTICE:  PASS  an anonymous relay device cannot store a backup — the endpoint is not free storage
+2026-09-02T19:13:44.3681336Z DO
+2026-09-02T19:13:44.3682638Z  as_user 
+2026-09-02T19:13:44.3683012Z ---------
+2026-09-02T19:13:44.3683448Z  
+2026-09-02T19:13:44.3683872Z (1 row)
+2026-09-02T19:13:44.3684213Z 
+2026-09-02T19:13:44.3687798Z psql:supabase/test/rls_test7.sql:200: NOTICE:  PASS  A still has its three rows after all of that
+2026-09-02T19:13:44.3692604Z psql:supabase/test/rls_test7.sql:200: NOTICE:  PASS  ...with its snapshot unmodified
+2026-09-02T19:13:44.3696267Z psql:supabase/test/rls_test7.sql:200: NOTICE:  PASS  the listing view reports a size for every backup
+2026-09-02T19:13:44.3697202Z DO
+2026-09-02T19:13:44.3709726Z RESET
+2026-09-02T19:13:44.3710160Z 
+2026-09-02T19:13:44.3710669Z ACCOUNT BACKUP ASSERTIONS PASSED
+2026-09-02T19:13:44.3753430Z == supabase/test/rls_test8.sql
+2026-09-02T19:13:44.4129030Z DO
+2026-09-02T19:13:44.4129414Z Pager usage is off.
+2026-09-02T19:13:44.4137153Z INSERT 0 2
+2026-09-02T19:13:44.4139127Z SET
+2026-09-02T19:13:44.4146504Z  as_user 
+2026-09-02T19:13:44.4146802Z ---------
+2026-09-02T19:13:44.4147090Z  
+2026-09-02T19:13:44.4147340Z (1 row)
+2026-09-02T19:13:44.4147498Z 
+2026-09-02T19:13:44.4170386Z INSERT 0 1
+2026-09-02T19:13:44.4177423Z psql:supabase/test/rls_test8.sql:60: NOTICE:  PASS  the paper travels with the session — a hole at (0.4,-1.1) means nothing without it
+2026-09-02T19:13:44.4178025Z DO
+2026-09-02T19:13:44.4187430Z psql:supabase/test/rls_test8.sql:85: NOTICE:  PASS  a target face that is not {rings:[…]} is refused at the write
+2026-09-02T19:13:44.4192350Z psql:supabase/test/rls_test8.sql:85: NOTICE:  PASS  ...as is one whose rings are not an array
+2026-09-02T19:13:44.4194430Z psql:supabase/test/rls_test8.sql:85: NOTICE:  PASS  and null is still legal — an undescribed target is not an error
+2026-09-02T19:13:44.4195589Z DO
+2026-09-02T19:13:44.4219298Z INSERT 0 10
+2026-09-02T19:13:44.4225480Z INSERT 0 2
+2026-09-02T19:13:44.4231354Z psql:supabase/test/rls_test8.sql:119: NOTICE:  PASS  the whole string is stored, sighters included — they came out of the batch
+2026-09-02T19:13:44.4233155Z psql:supabase/test/rls_test8.sql:119: NOTICE:  PASS  and the two sighters are marked as such
+2026-09-02T19:13:44.4235521Z psql:supabase/test/rls_test8.sql:119: NOTICE:  PASS  a sighter is NOT an excluded shot — the two mean different things
+2026-09-02T19:13:44.4238449Z psql:supabase/test/rls_test8.sql:119: NOTICE:  PASS  the call travels with the shot — the gap between it and the hole is what a coach reads
+2026-09-02T19:13:44.4239437Z DO
+2026-09-02T19:13:44.4244375Z psql:supabase/test/rls_test8.sql:139: NOTICE:  PASS  a second device's shot with the same ordinal is accepted, not dead-lettered forever
+2026-09-02T19:13:44.4246170Z psql:supabase/test/rls_test8.sql:139: NOTICE:  PASS  a wind call is L or R or nothing at all
+2026-09-02T19:13:44.4247283Z DO
+2026-09-02T19:13:44.4254945Z INSERT 0 1
+2026-09-02T19:13:44.4263037Z INSERT 0 5
+2026-09-02T19:13:44.4271654Z UPDATE 1
+2026-09-02T19:13:44.4277708Z psql:supabase/test/rls_test8.sql:163: NOTICE:  PASS  a shot string with no velocities does NOT blank the chronograph summary beside it
+2026-09-02T19:13:44.4278677Z DO
+2026-09-02T19:13:44.4300679Z UPDATE 5
+2026-09-02T19:13:44.4307651Z UPDATE 1
+2026-09-02T19:13:44.4312442Z psql:supabase/test/rls_test8.sql:178: NOTICE:  PASS  but a string that carries velocities still overrules whatever the client sent
+2026-09-02T19:13:44.4313209Z DO
+2026-09-02T19:13:44.4325135Z UPDATE 5
+2026-09-02T19:13:44.4329289Z psql:supabase/test/rls_test8.sql:193: NOTICE:  PASS  and deleting the velocities off a string DOES clear what was derived from them
+2026-09-02T19:13:44.4330383Z DO
+2026-09-02T19:13:44.4331474Z  as_user 
+2026-09-02T19:13:44.4331723Z ---------
+2026-09-02T19:13:44.4332009Z  
+2026-09-02T19:13:44.4332278Z (1 row)
+2026-09-02T19:13:44.4332444Z 
+2026-09-02T19:13:44.4339910Z psql:supabase/test/rls_test8.sql:209: NOTICE:  PASS  another account sees none of it
+2026-09-02T19:13:44.4348965Z psql:supabase/test/rls_test8.sql:209: NOTICE:  PASS  nor through the plot view — security_invoker again
+2026-09-02T19:13:44.4350230Z psql:supabase/test/rls_test8.sql:209: NOTICE:  PASS  and cannot move a hole in it
+2026-09-02T19:13:44.4350886Z DO
+2026-09-02T19:13:44.4353294Z  as_user 
+2026-09-02T19:13:44.4353597Z ---------
+2026-09-02T19:13:44.4353870Z  
+2026-09-02T19:13:44.4354140Z (1 row)
+2026-09-02T19:13:44.4354311Z 
+2026-09-02T19:13:44.4361354Z INSERT 0 1
+2026-09-02T19:13:44.4369900Z psql:supabase/test/rls_test8.sql:230: NOTICE:  PASS  the plot view names the paper
+2026-09-02T19:13:44.4371368Z psql:supabase/test/rls_test8.sql:230: NOTICE:  PASS  ...and carries its rings
+2026-09-02T19:13:44.4372309Z psql:supabase/test/rls_test8.sql:230: NOTICE:  PASS  ...joined to the group that was measured on it
+2026-09-02T19:13:44.4373624Z psql:supabase/test/rls_test8.sql:230: NOTICE:  PASS  ...and says how many holes are on file, so a client knows whether a plot is drawable
+2026-09-02T19:13:44.4374405Z DO
+2026-09-02T19:13:44.4386918Z psql:supabase/test/rls_test8.sql:268: NOTICE:  PASS  five rows written in one statement share one updated_at — so it cannot page on its own
+2026-09-02T19:13:44.4408274Z psql:supabase/test/rls_test8.sql:268: NOTICE:  PASS  every synced table has an ascending (updated_at, id) index for the keyset to walk
+2026-09-02T19:13:44.4416899Z psql:supabase/test/rls_test8.sql:268: NOTICE:  PASS  ...tie-broken by the primary key, which is the only total order available
+2026-09-02T19:13:44.4425890Z psql:supabase/test/rls_test8.sql:268: NOTICE:  PASS  and the descending indexes are kept — the keyset is an addition, not a swap
+2026-09-02T19:13:44.4434097Z DO
+2026-09-02T19:13:44.4435534Z RESET
+2026-09-02T19:13:44.4435711Z 
+2026-09-02T19:13:44.4435864Z SHOT STRING ASSERTIONS PASSED
+2026-09-02T19:13:44.4486420Z == supabase/test/rls_test9.sql
+2026-09-02T19:13:44.4851970Z DO
+2026-09-02T19:13:44.4852364Z Pager usage is off.
+2026-09-02T19:13:44.4860805Z INSERT 0 3
+2026-09-02T19:13:44.4872437Z INSERT 0 3
+2026-09-02T19:13:44.4873810Z SET
+2026-09-02T19:13:44.4879968Z  as_user 
+2026-09-02T19:13:44.4880275Z ---------
+2026-09-02T19:13:44.4880600Z  
+2026-09-02T19:13:44.4880837Z (1 row)
+2026-09-02T19:13:44.4880963Z 
+2026-09-02T19:13:44.4888439Z INSERT 0 1
+2026-09-02T19:13:44.4894418Z psql:supabase/test/rls_test9.sql:82: NOTICE:  PASS  an event cannot be attributed to another user
+2026-09-02T19:13:44.4895182Z DO
+2026-09-02T19:13:44.4898683Z psql:supabase/test/rls_test9.sql:95: NOTICE:  PASS  nor recorded with no owner at all
+2026-09-02T19:13:44.4899408Z DO
+2026-09-02T19:13:44.4903691Z psql:supabase/test/rls_test9.sql:108: NOTICE:  PASS  source_app is lower-case only, as it has been since 0006
+2026-09-02T19:13:44.4904522Z DO
+2026-09-02T19:13:44.4910402Z psql:supabase/test/rls_test9.sql:117: NOTICE:  PASS  a user cannot read back even the event they just wrote — there is no select policy for an owner
+2026-09-02T19:13:44.4911023Z DO
+2026-09-02T19:13:44.4916372Z psql:supabase/test/rls_test9.sql:132: NOTICE:  PASS  a user cannot rewrite an event
+2026-09-02T19:13:44.4917238Z psql:supabase/test/rls_test9.sql:132: NOTICE:  PASS  ...nor delete one, which is what makes the record evidence
+2026-09-02T19:13:44.4917839Z DO
+2026-09-02T19:13:44.4921173Z  as_user 
+2026-09-02T19:13:44.4921468Z ---------
+2026-09-02T19:13:44.4921739Z  
+2026-09-02T19:13:44.4921994Z (1 row)
+2026-09-02T19:13:44.4922154Z 
+2026-09-02T19:13:44.4926152Z INSERT 0 1
+2026-09-02T19:13:44.4933323Z psql:supabase/test/rls_test9.sql:143: ERROR:  new row for relation "recipes" violates check constraint "recipe_cites_a_source"
+2026-09-02T19:13:44.4997851Z ##[error]SQL suites failed
+2026-09-02T19:13:44.5008091Z ##[error]Process completed with exit code 1.
+2026-09-02T19:13:44.5162372Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-02T19:13:44.5163955Z Post job cleanup.
+2026-09-02T19:13:44.6040745Z [command]/usr/bin/git version
+2026-09-02T19:13:44.6085653Z git version 2.55.0
+2026-09-02T19:13:44.6125235Z Temporarily overriding HOME='/home/runner/work/_temp/8cbddafa-321f-4353-933e-69b92960db1e' before making global git config changes
+2026-09-02T19:13:44.6126653Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-02T19:13:44.6131468Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/Zero-Bench/Zero-Bench
+2026-09-02T19:13:44.6178400Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-02T19:13:44.6221639Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-02T19:13:44.6513136Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-02T19:13:44.6547009Z http.https://github.com/.extraheader
+2026-09-02T19:13:44.6559281Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-09-02T19:13:44.6601999Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-02T19:13:44.6889123Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-02T19:13:44.6935574Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-02T19:13:44.7333427Z Print service container logs: 2e0cd14c213f4b169c2e08a3aa5fd275_postgres16_3808ff
+2026-09-02T19:13:44.7337951Z ##[command]/usr/bin/docker logs --details 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:44.7481868Z  initdb: warning: enabling "trust" authentication for local connections
+2026-09-02T19:13:44.7483115Z  The files belonging to this database system will be owned by user "postgres".
+2026-09-02T19:13:44.7483964Z  initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-09-02T19:13:44.7485255Z  2026-09-02 19:13:28.542 UTC [1] LOG:  starting PostgreSQL 16.15 (Debian 16.15-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-02T19:13:44.7486006Z  2026-09-02 19:13:28.542 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-09-02T19:13:44.7486556Z  2026-09-02 19:13:28.542 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-09-02T19:13:44.7487070Z  2026-09-02 19:13:28.543 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-02T19:13:44.7487624Z  2026-09-02 19:13:28.546 UTC [62] LOG:  database system was shut down at 2026-09-02 19:13:28 UTC
+2026-09-02T19:13:44.7488112Z  2026-09-02 19:13:28.550 UTC [1] LOG:  database system is ready to accept connections
+2026-09-02T19:13:44.7488793Z  2026-09-02 19:13:37.709 UTC [73] FATAL:  role "root" does not exist
+2026-09-02T19:13:44.7489340Z  2026-09-02 19:13:43.862 UTC [95] ERROR:  new row for relation "recipes" violates check constraint "recipe_cites_a_source"
+2026-09-02T19:13:44.7490668Z  2026-09-02 19:13:43.862 UTC [95] DETAIL:  Failing row contains (d0000000-0000-0000-0000-0000000000cc, e0000000-0000-0000-0000-00000000000e, Shooter load, 308 Win, null, null, null, null, 41.500, null, null, null, null, null, null, null, null, null, null, null, f, workup, null, 2026-09-02 19:13:43.861841+00, 2026-09-02 19:13:43.861841+00, null).
+2026-09-02T19:13:44.7491996Z  2026-09-02 19:13:43.862 UTC [95] STATEMENT:  insert into public.recipes (id, user_id, name, cartridge, charge_gr)
+2026-09-02T19:13:44.7492531Z  	values ('d0000000-0000-0000-0000-0000000000cc',
+2026-09-02T19:13:44.7492944Z  	        'e0000000-0000-0000-0000-00000000000e', 'Shooter load', '308 Win', 41.5);
+2026-09-02T19:13:44.7493563Z  2026-09-02 19:13:44.493 UTC [103] ERROR:  new row for relation "recipes" violates check constraint "recipe_cites_a_source"
+2026-09-02T19:13:44.7494245Z  2026-09-02 19:13:44.493 UTC [103] STATEMENT:  insert into public.recipes (id, user_id, name, cartridge, charge_gr)
+2026-09-02T19:13:44.7494727Z  	values ('e0000000-0000-0000-0000-0000000000bb',
+2026-09-02T19:13:44.7495109Z  	        'b0000000-0000-0000-0000-00000000000b', 'Other load', '6.5 CM', 41.0);
+2026-09-02T19:13:44.7495520Z  This user must also own the server process.
+2026-09-02T19:13:44.7495857Z  
+2026-09-02T19:13:44.7496487Z  The database cluster will be initialized with locale "en_US.utf8".
+2026-09-02T19:13:44.7497211Z  The default database encoding has accordingly been set to "UTF8".
+2026-09-02T19:13:44.7497829Z  The default text search configuration will be set to "english".
+2026-09-02T19:13:44.7498228Z  
+2026-09-02T19:13:44.7498438Z  Data page checksums are disabled.
+2026-09-02T19:13:44.7498870Z  
+2026-09-02T19:13:44.7499186Z  fixing permissions on existing directory /var/lib/postgresql/data ... ok
+2026-09-02T19:13:44.7499586Z  creating subdirectories ... ok
+2026-09-02T19:13:44.7499908Z  selecting dynamic shared memory implementation ... posix
+2026-09-02T19:13:44.7500273Z  selecting default max_connections ... 100
+2026-09-02T19:13:44.7500572Z  selecting default shared_buffers ... 128MB
+2026-09-02T19:13:44.7500867Z  selecting default time zone ... Etc/UTC
+2026-09-02T19:13:44.7501154Z  creating configuration files ... ok
+2026-09-02T19:13:44.7501427Z  running bootstrap script ... ok
+2026-09-02T19:13:44.7501724Z  performing post-bootstrap initialization ... ok
+2026-09-02T19:13:44.7502312Z  syncing data to disk ... ok
+2026-09-02T19:13:44.7502552Z  
+2026-09-02T19:13:44.7502729Z  
+2026-09-02T19:13:44.7502966Z  Success. You can now start the database server using:
+2026-09-02T19:13:44.7503265Z  
+2026-09-02T19:13:44.7503505Z      pg_ctl -D /var/lib/postgresql/data -l logfile start
+2026-09-02T19:13:44.7503804Z  
+2026-09-02T19:13:44.7504603Z  waiting for server to start....2026-09-02 19:13:28.302 UTC [48] LOG:  starting PostgreSQL 16.15 (Debian 16.15-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-09-02T19:13:44.7505455Z  2026-09-02 19:13:28.302 UTC [48] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-09-02T19:13:44.7505994Z  2026-09-02 19:13:28.305 UTC [51] LOG:  database system was shut down at 2026-09-02 19:13:28 UTC
+2026-09-02T19:13:44.7506480Z  2026-09-02 19:13:28.308 UTC [48] LOG:  database system is ready to accept connections
+2026-09-02T19:13:44.7506849Z   done
+2026-09-02T19:13:44.7507049Z  server started
+2026-09-02T19:13:44.7507249Z  
+2026-09-02T19:13:44.7507577Z  /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+2026-09-02T19:13:44.7508003Z  
+2026-09-02T19:13:44.7508259Z  2026-09-02 19:13:28.419 UTC [48] LOG:  received fast shutdown request
+2026-09-02T19:13:44.7508965Z  waiting for server to shut down....2026-09-02 19:13:28.420 UTC [48] LOG:  aborting any active transactions
+2026-09-02T19:13:44.7509638Z  2026-09-02 19:13:28.422 UTC [48] LOG:  background worker "logical replication launcher" (PID 54) exited with exit code 1
+2026-09-02T19:13:44.7510155Z  2026-09-02 19:13:28.423 UTC [49] LOG:  shutting down
+2026-09-02T19:13:44.7510537Z  2026-09-02 19:13:28.423 UTC [49] LOG:  checkpoint starting: shutdown immediate
+2026-09-02T19:13:44.7511544Z  2026-09-02 19:13:28.425 UTC [49] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/14F2AE8, redo lsn=0/14F2AE8
+2026-09-02T19:13:44.7512514Z  2026-09-02 19:13:28.429 UTC [48] LOG:  database system is shut down
+2026-09-02T19:13:44.7512837Z   done
+2026-09-02T19:13:44.7513021Z  server stopped
+2026-09-02T19:13:44.7513219Z  
+2026-09-02T19:13:44.7513460Z  PostgreSQL init process complete; ready for start up.
+2026-09-02T19:13:44.7513757Z  
+2026-09-02T19:13:44.7519541Z Stop and remove container: 2e0cd14c213f4b169c2e08a3aa5fd275_postgres16_3808ff
+2026-09-02T19:13:44.7524668Z ##[command]/usr/bin/docker rm --force 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:44.8902927Z 6ac529635575231e97cbb9fda7026e51412fc575ffc6e0bc6f01e6ef5b5d0afe
+2026-09-02T19:13:44.8930773Z Remove container network: github_network_54e47743e9eb4f0e97abe235d01d0b77
+2026-09-02T19:13:44.8936044Z ##[command]/usr/bin/docker network rm github_network_54e47743e9eb4f0e97abe235d01d0b77
+2026-09-02T19:13:45.0016117Z github_network_54e47743e9eb4f0e97abe235d01d0b77
+2026-09-02T19:13:45.0095774Z Cleaning up orphan processes
+2026-09-02T19:13:45.0464886Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

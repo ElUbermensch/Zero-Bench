@@ -138,9 +138,14 @@ insert into public.analytics_event (user_id, source_app, event_name, usage_sessi
 values ('b0000000-0000-0000-0000-00000000000b', 'zero', 'sign_up',
         '22222222-0000-0000-0000-000000000002');
 
-insert into public.recipes (id, user_id, name, cartridge, charge_gr)
+/* source_name is not optional decoration: 0001's recipe_cites_a_source refuses
+ * a recipe that neither cites a manual nor is explicitly marked
+ * self-developed. The safety model is the point of that constraint, so the
+ * fixture satisfies it rather than working around it. */
+insert into public.recipes (id, user_id, name, cartridge, charge_gr, source_name)
 values ('e0000000-0000-0000-0000-0000000000bb',
-        'b0000000-0000-0000-0000-00000000000b', 'Other load', '6.5 CM', 41.0);
+        'b0000000-0000-0000-0000-00000000000b', 'Other load', '6.5 CM', 41.0,
+        'Hodgdon Annual 2025');
 
 do $$
 declare n integer;

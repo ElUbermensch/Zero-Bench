@@ -126,9 +126,12 @@ end $$;
 
 -- An admin with a factor still has no business in anyone's reloading records.
 reset role;
-insert into public.recipes (id, user_id, name, cartridge, charge_gr)
+-- source_name because 0001's recipe_cites_a_source demands a citation or an
+-- explicit self-developed acknowledgment.
+insert into public.recipes (id, user_id, name, cartridge, charge_gr, source_name)
 values ('d0000000-0000-0000-0000-0000000000cc',
-        'e0000000-0000-0000-0000-00000000000e', 'Shooter load', '308 Win', 41.5);
+        'e0000000-0000-0000-0000-00000000000e', 'Shooter load', '308 Win', 41.5,
+        'Sierra 6th Edition');
 
 set role authenticated;
 select test.as_user_aal('d0000000-0000-0000-0000-00000000000d', 'aal2');

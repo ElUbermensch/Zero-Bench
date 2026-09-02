@@ -415,6 +415,13 @@ paths. The reasoning, which cannot live in the file itself:
   returning user is pinned to an old build indefinitely with no way to tell.
 - **`/(index.html)?`** and **`/bench/(index.html)?`** — the shells name the bundle,
   so a stale shell points at a stale bundle. Same failure, one step removed.
+- **`/admin/(index.html)?`** — for the opposite reason to the other two, and it is
+  the one that would have been missed. The dashboard is a single self-contained
+  file: no worker, no hashed bundle name, nothing downstream to invalidate it. So
+  there is no second chance — cache that page and the owner reads an old dashboard
+  with no way to tell, which for a page whose entire job is reporting numbers is the
+  worst possible failure. `/admin` also gets the trailing-slash redirect `/bench`
+  has, or Vercel answers the slashless form with a 404.
 
 JSON has no comments. An earlier version of this file carried `"//"` keys inside the
 `headers` entries as a comment convention; Vercel validates `vercel.json` against a

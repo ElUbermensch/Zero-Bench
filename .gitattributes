@@ -15,3 +15,21 @@
 # psql, both of which are entitled to be annoyed by CRLF.
 *.sh    text eol=lf
 *.sql   text eol=lf
+
+# JavaScript, for a subtler reason than being annoyed.
+#
+# tools/embed-core.mjs splices zero-core.js into Zero.jsx and strips the CommonJS
+# export on the way, by replacing the literal
+# "...module.exports = ZeroCore;\n". Checked out with CRLF that string is not
+# there, the replace quietly does nothing, and the export line is embedded into
+# a browser bundle that has no `module`. Worse, the same mismatch makes the
+# check PASS on the machine that did it -- both sides were generated the same
+# wrong way -- and fail only in CI, which is the one place the LF originals are
+# what gets read.
+#
+# So the guard that exists to stop the embedded copy drifting was itself
+# defeated by a line ending. Pin the whole family rather than the two files
+# involved today.
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.jsx   text eol=lf

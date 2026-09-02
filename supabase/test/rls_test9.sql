@@ -30,8 +30,11 @@ end $$;
 --      telemetry a user can delete is not evidence of anything
 --   3. nobody updates or deletes, admin included: the table is append-only,
 --      and 0001's blanket grant to authenticated is inert without a policy
---   4. an admin reads everything, is_admin() is what decides, and clearing the
---      flag closes the door again with no policy change anywhere
+--   4. an admin reads everything, the is_admin flag is what decides, and
+--      clearing it closes the door again with no policy change anywhere.
+--      (Since 0017 an admin READ also needs aal2, which is why the owner is
+--      impersonated at that level below. rls_test10 is where that is the
+--      thing under test rather than a precondition.)
 --   5. the rollup views inherit that. security_invoker is the load-bearing
 --      word in 0016: an owner-rights view would hand the whole event stream to
 --      whoever asked.
@@ -48,6 +51,24 @@ insert into auth.users (id, email) values
   ('b0000000-0000-0000-0000-00000000000b', 'other@example.com'),
   ('c0000000-0000-0000-0000-00000000000c', 'owner@example.com')
 on conflict do nothing;
+
+/* as_user() from rls_test.sql always claims aal1, and since 0017 reading the
+ * analytics also demands aal2 -- so every admin READ below has to say which
+ * assurance level it asks at. A separate function rather than a third
+ * parameter on as_user(): an optional argument would make every existing
+ * single-argument call ambiguous against the old signature.
+ *
+ * rls_test10 is where aal2 is itself under test. Here it is a precondition,
+ * stated out loud so this suite goes on testing what it is about -- who may
+ * read the analytics -- instead of quietly becoming a second test of 0017. */
+create or replace function test.as_user_aal(u uuid, lvl text) returns void
+language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', u::text, false);
+  perform set_config('request.jwt.claims',
+    jsonb_build_object('sub', u::text, 'role', 'authenticated',
+                       'is_anonymous', false, 'aal', lvl)::text, false);
+end $$;
 
 -- Written as postgres, before any role is assumed: there is deliberately no
 -- in-app path that can set is_admin, so there is none here either.
@@ -156,7 +177,7 @@ end $$;
 
 -- ====================================================== 4. the admin reads
 set role authenticated;
-select test.as_user('c0000000-0000-0000-0000-00000000000c');
+select test.as_user_aal('c0000000-0000-0000-0000-00000000000c', 'aal2');
 
 do $$
 declare n integer;
@@ -180,7 +201,7 @@ update public.profiles set is_admin = false
  where id = 'c0000000-0000-0000-0000-00000000000c';
 
 set role authenticated;
-select test.as_user('c0000000-0000-0000-0000-00000000000c');
+select test.as_user_aal('c0000000-0000-0000-0000-00000000000c', 'aal2');
 
 do $$
 declare n integer;
@@ -196,7 +217,7 @@ update public.profiles set is_admin = true
 
 -- ======================================================= 5. the rollup views
 set role authenticated;
-select test.as_user('c0000000-0000-0000-0000-00000000000c');
+select test.as_user_aal('c0000000-0000-0000-0000-00000000000c', 'aal2');
 
 do $$
 declare n integer;
@@ -249,7 +270,7 @@ values ('a0000000-0000-0000-0000-00000000000a', 'bench', 'app_background',
         '11111111-0000-0000-0000-000000000001', '{"duration_ms":"not-a-number"}'::jsonb);
 
 set role authenticated;
-select test.as_user('c0000000-0000-0000-0000-00000000000c');
+select test.as_user_aal('c0000000-0000-0000-0000-00000000000c', 'aal2');
 
 do $$
 declare n integer;

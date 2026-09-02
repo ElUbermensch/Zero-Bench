@@ -43,17 +43,10 @@ insert into public.profiles (id, display_name, is_admin) values
   ('e0000000-0000-0000-0000-00000000000e', 'MFA Shooter', false)
 on conflict (id) do update set is_admin = excluded.is_admin;
 
-/* as_user() from rls_test.sql always claims aal1. A separate function rather
- * than a third parameter on that one: adding an optional argument would make
- * every existing single-argument call ambiguous against the old signature. */
-create or replace function test.as_user_aal(u uuid, lvl text) returns void
-language plpgsql as $$
-begin
-  perform set_config('request.jwt.claim.sub', u::text, false);
-  perform set_config('request.jwt.claims',
-    jsonb_build_object('sub', u::text, 'role', 'authenticated',
-                       'is_anonymous', false, 'aal', lvl)::text, false);
-end $$;
+/* test.as_user_aal() comes from rls_test9, the first suite that needed to name
+ * an assurance level -- the same way as_user() itself is defined once in
+ * rls_test.sql and used by every suite after it. The runner walks these files
+ * in order against one database. */
 
 -- ============================================== 4. writing is untouched, aal1
 set role authenticated;

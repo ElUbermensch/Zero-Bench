@@ -4412,8 +4412,6 @@ const ZeroCore = (() => {
 
   return { create, EVENTS, TABLES, defaultStorage };
 })();
-
-if (typeof module !== 'undefined' && module.exports) module.exports = ZeroCore;
 //#endregion zero-core
 
 

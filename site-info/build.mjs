@@ -40,102 +40,110 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SRC = path.join(HERE, 'index.html');
 const DIST = path.join(HERE, 'dist');
 
-/* Refuse to publish an empty page rather than deploying a blank origin. The
- * number is deliberately far below the real page (~35 KB) -- it is a smoke
- * alarm for a truncated write or an accidental `> index.html`, not a size
- * assertion that has to be maintained. */
-if (!fs.existsSync(SRC)) {
-  /* Spelled out rather than left to statSync's ENOENT, because build:site calls
-   * this and a stack trace here would be the last thing in the APP's deploy log. */
-  console.error('site-info/build: site-info/index.html is missing — nothing to publish.');
-  process.exit(1);
-}
-const bytes = fs.statSync(SRC).size;
-if (bytes < 1024) {
-  console.error(`site-info/build: refusing to publish ${bytes} bytes — `
-    + 'site-info/index.html looks empty or truncated.');
-  process.exit(1);
-}
-
-/* ── the document wrapper, and why this build adds it ─────────────────────
- *
- * The page has TWO hosts, and they disagree about who owns the document.
- *
- * As a Claude Artifact it is WRAPPED at publish time: the host supplies the
- * doctype, <html>, <head>, the charset and the viewport meta, and the source
- * is explicitly required NOT to carry its own — a second <html> or <head> in
- * the body is a parse error waiting to happen.
- *
- * Served as a plain file from a static host there is no wrapper at all, and
- * each missing line is a visible defect rather than a nicety:
- *
- *   <!doctype html>   without it the browser renders in QUIRKS MODE
- *   charset=utf-8     the copy is not ASCII; without a declared encoding the
- *                     page is at the mercy of the server's Content-Type
- *   viewport          without it a phone lays the page out at 980px and zooms
- *                     out — on a marketing page, the whole point, unreadable
- *
- * So the source cannot satisfy both, and the wrapper is not an editorial
- * decision the next person should have to remember: it is the difference
- * between the two hosts. This build supplies it, exactly once, and refuses
- * to double it if the source ever grows one of its own. The source stays
- * Artifact-shaped, which is also the shape it is easiest to preview in. */
-const raw = fs.readFileSync(SRC, 'utf8');
-const all = raw.toLowerCase();
-/* doctype, charset and viewport have to be near the TOP to do their job -- a
- * charset declared past the first kilobyte is one the parser has already
- * guessed around -- so those are looked for in the opening slice. <html> and
- * <body> only have to EXIST, and the source's stylesheet is tens of kilobytes
- * long, so a nested <body> would sit far past any slice. Scanning the whole
- * file for those two is what makes the refusal below a real guard rather than
- * a guard against the first 4 KB. */
-const head = raw.slice(0, 1024).toLowerCase();
-const has = (re) => re.test(head);
-
-if (/<html[\s>]/.test(all) || /<body[\s>]/.test(all)) {
-  console.error('site-info/build: the source carries its own <html>/<body>. '
-    + 'It must stay Artifact-shaped — remove them, or teach this script to '
-    + 'stop wrapping.');
-  process.exit(1);
-}
-
-/* The source is head content (<title>, the font <link>, one <style>) followed
- * by body content, with no marker between them. `</style>` is that marker:
- * there is exactly one style block and everything after it is flow content.
- * Asserted rather than assumed, because a second <style> added later would
- * put the whole page inside <head> and render a blank white document. */
-const styleEnd = raw.indexOf('</style>');
-if (styleEnd < 0 || raw.indexOf('</style>', styleEnd + 1) >= 0) {
-  console.error('site-info/build: expected exactly one </style> to mark the '
-    + `head/body boundary, found ${raw.split('</style>').length - 1}. `
-    + 'Split the document explicitly rather than letting this guess.');
-  process.exit(1);
-}
-const headSrc = raw.slice(0, styleEnd + '</style>'.length);
-const bodySrc = raw.slice(styleEnd + '</style>'.length);
-
-const out = [
-  has(/<!doctype\s+html/) ? null : '<!doctype html>',
-  '<html lang="en">',
-  '<head>',
-  has(/charset\s*=\s*["']?utf-8/) ? null : '<meta charset="utf-8">',
-  has(/name\s*=\s*["']viewport["']/) ? null
-    : '<meta name="viewport" content="width=device-width, initial-scale=1">',
-  headSrc.trimStart(),
-  '</head>',
-  '<body>',
-  bodySrc.trim(),
-  '</body>',
-  '</html>',
-  '',
-].filter(l => l !== null).join('\n');
+/* The site is two pages: the overview at the root and the manual one level
+ * down, so the manual's URL is /manual/ and the two can link to each other
+ * with a plain relative href that works on any host. */
+const PAGES = [
+  { src: 'index.html',  out: 'index.html' },
+  { src: 'manual.html', out: path.join('manual', 'index.html') },
+];
 
 fs.rmSync(DIST, { recursive: true, force: true });
 fs.mkdirSync(DIST, { recursive: true });
-fs.writeFileSync(path.join(DIST, 'index.html'), out);
 
-console.log(`site-info/dist assembled — index.html, ${out.length} bytes `
-  + `(${bytes} of source + document wrapper)`);
+const built = [];
+for (const page of PAGES) {
+  const SRC = path.join(HERE, page.src);
+
+  /* Refuse to publish an empty page rather than deploying a blank origin. The
+   * number is deliberately far below the real pages -- it is a smoke alarm for
+   * a truncated write or an accidental `> index.html`, not a size assertion
+   * that has to be maintained. */
+  if (!fs.existsSync(SRC)) {
+    /* Spelled out rather than left to statSync's ENOENT, because build:site
+     * calls this and a stack trace here would be the last thing in the APP's
+     * deploy log. */
+    console.error(`site-info/build: site-info/${page.src} is missing — nothing to publish.`);
+    process.exit(1);
+  }
+  const bytes = fs.statSync(SRC).size;
+  if (bytes < 1024) {
+    console.error(`site-info/build: refusing to publish ${bytes} bytes — `
+      + `site-info/${page.src} looks empty or truncated.`);
+    process.exit(1);
+  }
+
+  /* ── the document wrapper, and why this build adds it ───────────────────
+   *
+   * Each page has TWO hosts, and they disagree about who owns the document.
+   *
+   * As a Claude Artifact a page is WRAPPED at publish time: the host supplies
+   * the doctype, <html>, <head>, the charset and the viewport meta, and the
+   * source is explicitly required NOT to carry its own — a second <html> or
+   * <head> in the body is a parse error waiting to happen.
+   *
+   * Served as a plain file from a static host there is no wrapper at all, and
+   * each missing line is a visible defect rather than a nicety:
+   *
+   *   <!doctype html>   without it the browser renders in QUIRKS MODE
+   *   charset=utf-8     the copy is not ASCII; without a declared encoding the
+   *                     page is at the mercy of the server's Content-Type
+   *   viewport          without it a phone lays the page out at 980px and
+   *                     zooms out — on a marketing page, the whole point
+   *
+   * So the source cannot satisfy both, and the wrapper is not an editorial
+   * decision the next person should have to remember: it is the difference
+   * between the two hosts. This build supplies it, exactly once, and refuses
+   * to double it if a source ever grows one of its own. */
+  const raw = fs.readFileSync(SRC, 'utf8');
+  const all = raw.toLowerCase();
+  const head = raw.slice(0, 1024).toLowerCase();
+  const has = (re) => re.test(head);
+
+  if (/<html[\s>]/.test(all) || /<body[\s>]/.test(all)) {
+    console.error(`site-info/build: ${page.src} carries its own <html>/<body>. `
+      + 'It must stay Artifact-shaped — remove them, or teach this script to '
+      + 'stop wrapping.');
+    process.exit(1);
+  }
+
+  /* Each source is head content (<title>, the font <link>, one <style>)
+   * followed by body content, with no marker between them. `</style>` is that
+   * marker: there is exactly one style block and everything after it is flow
+   * content. Asserted rather than assumed, because a second <style> added
+   * later would put the whole page inside <head> and render blank. */
+  const styleEnd = raw.indexOf('</style>');
+  if (styleEnd < 0 || raw.indexOf('</style>', styleEnd + 1) >= 0) {
+    console.error(`site-info/build: expected exactly one </style> in ${page.src} to `
+      + `mark the head/body boundary, found ${raw.split('</style>').length - 1}. `
+      + 'Split the document explicitly rather than letting this guess.');
+    process.exit(1);
+  }
+  const headSrc = raw.slice(0, styleEnd + '</style>'.length);
+  const bodySrc = raw.slice(styleEnd + '</style>'.length);
+
+  const out = [
+    has(/<!doctype\s+html/) ? null : '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    has(/charset\s*=\s*["']?utf-8/) ? null : '<meta charset="utf-8">',
+    has(/name\s*=\s*["']viewport["']/) ? null
+      : '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    headSrc.trimStart(),
+    '</head>',
+    '<body>',
+    bodySrc.trim(),
+    '</body>',
+    '</html>',
+    '',
+  ].filter(l => l !== null).join('\n');
+
+  const dest = path.join(DIST, page.out);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, out);
+  built.push(`${page.out} ${out.length}B`);
+}
+
+console.log(`site-info/dist assembled — ${built.join(', ')}`);

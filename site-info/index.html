@@ -431,17 +431,28 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
 .close-in .sec-sub { max-width: 56ch; }
 #limits h2 { font-size: clamp(26px, 3vw, 36px); }
 
+/* A single inline aside on the marketing page, for the one thing a reader
+   needs to know before they can use the feature they just read about. */
+.note-inline { margin-top: clamp(28px, 3.4vw, 44px); border: 1px solid var(--line);
+               border-left: 2px solid var(--acc); border-radius: 3px;
+               background: var(--surface); padding: 17px 19px; max-width: 74ch; }
+.note-inline p { color: var(--dim); font-size: 15px; line-height: 1.65; }
+.note-inline strong { color: var(--ink); font-weight: 600; }
+.note-inline a { color: var(--acc); text-decoration: none; white-space: nowrap; }
+.note-inline a:hover { text-decoration: underline; }
+#start .steps { max-width: 74ch; }
+
 </style>
 
 <header class="topbar">
   <div class="wrap topbar-in">
     <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span> Zero <span class="amp">&amp;</span> Bench</a>
     <nav class="topnav">
+      <a href="#zero">Zero</a>
+      <a href="#bench">Bench</a>
       <a href="#solver">The solver</a>
-      <a href="#targets">Targets</a>
-      <a href="#inside">What's inside</a>
-      <a href="#start">Get started</a>
-      <a href="#about">About</a>
+      <a href="#together">Together</a>
+      <a href="manual/">Manual</a>
     </nav>
     <button id="themeBtn" class="themetoggle" type="button" aria-label="Switch theme">Paper</button>
   </div>
@@ -452,19 +463,20 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
   <div class="wrap hero-grid">
     <div>
       <p class="eyebrow">A shooting log that does arithmetic</p>
-      <h1 class="display">Your data book<br>already knows<br>where 800 is.</h1>
-      <p class="lede">Zero records every shot, every condition and every confirmed zero. Then it fits a real drag model <strong>to your rifle</strong> — not to a number off a box — and tells you the come-up for the distances you have never fired.</p>
+      <h1 class="display">Every shot,<br>every load,<br>one record.</h1>
+      <p class="lede">Zero logs what the rifle did. Bench logs what was in the round that did it. They share one account, so the group that opened up at 600 can be traced to the lot of powder it was loaded with &mdash; and the come-up for a distance you have never fired is fitted to <strong>your</strong> confirmed zeros, not to a number off a box.</p>
 
       <div class="cta-row">
         <a class="btn" href="https://zero-wine-one.vercel.app">Open Zero</a>
         <a class="btn ghost" href="https://zero-wine-one.vercel.app/bench/">Open Bench</a>
+        <a class="btn ghost" href="manual/">Read the manual</a>
       </div>
-      <p class="finealt mono">Installs to the home screen · works with no signal on the line</p>
+      <p class="finealt mono">Installs to the home screen &middot; works with no signal on the line</p>
     </div>
 
     <div>
       <div class="faceplate">
-        <svg viewBox="0 0 400 400" role="img" aria-label="An NRA SR target face at true ring proportions, with a ten-shot group scoring 99 with five X's">
+        <svg viewBox="0 0 400 400" role="img" aria-label="An NRA SR target face at true ring proportions, with a ten-shot group scoring 99 with six X's">
           <!-- SR: X 3", 10 at 7", 9 at 13" (edge of the aiming black), 8 at 19",
                7 at 25", 6 at 31", 5 at 37". Drawn at 10 units per inch. -->
           <circle cx="200" cy="200" r="185" fill="none" stroke="var(--line)" stroke-width="1"/>
@@ -483,25 +495,25 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
           </g>
 
           <g class="grp" fill="var(--acc)">
-            <circle cx="196" cy="191" r="4.5" style="--i:0"/>
-            <circle cx="206" cy="186" r="4.5" style="--i:1"/>
-            <circle cx="189" cy="202" r="4.5" style="--i:2"/>
-            <circle cx="202" cy="207" r="4.5" style="--i:3"/>
-            <circle cx="213" cy="197" r="4.5" style="--i:4"/>
-            <circle cx="193" cy="181" r="4.5" style="--i:5"/>
-            <circle cx="209" cy="215" r="4.5" style="--i:6"/>
-            <circle cx="184" cy="194" r="4.5" style="--i:7"/>
-            <circle cx="201" cy="196" r="4.5" style="--i:8"/>
-            <circle cx="239" cy="185" r="4.5" style="--i:9"/>
+            <circle cx="196" cy="191" r="2" style="--i:0"/>
+            <circle cx="206" cy="186" r="2" style="--i:1"/>
+            <circle cx="189" cy="202" r="2" style="--i:2"/>
+            <circle cx="202" cy="207" r="2" style="--i:3"/>
+            <circle cx="213" cy="197" r="2" style="--i:4"/>
+            <circle cx="193" cy="181" r="2" style="--i:5"/>
+            <circle cx="209" cy="215" r="2" style="--i:6"/>
+            <circle cx="184" cy="194" r="2" style="--i:7"/>
+            <circle cx="201" cy="196" r="2" style="--i:8"/>
+            <circle cx="239" cy="185" r="2" style="--i:9"/>
           </g>
         </svg>
       </div>
       <div class="readout" aria-label="String summary">
-        <div><div class="k">Score</div><div class="v">99&#8209;5X</div></div>
+        <div><div class="k">Score</div><div class="v">99&#8209;6X</div></div>
         <div><div class="k">Group</div><div class="v">2.7 <span class="u">MOA</span></div></div>
-        <div><div class="k">Center off</div><div class="v">0.6 <span class="u">IN</span></div></div>
+        <div><div class="k">Offset</div><div class="v">0.6 <span class="u">IN</span></div></div>
       </div>
-      <p class="facecap mono">SR at 200 yd &middot; center 0.5&#8243; high, 0.3&#8243; right</p>
+      <p class="facecap mono">SR at 200 yd &middot; centre 0.5&#8243; high, 0.3&#8243; right</p>
     </div>
   </div>
 </div>
@@ -509,39 +521,136 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
 <section id="what">
   <div class="wrap">
     <div class="sec-head"><p class="eyebrow">Two apps, one account</p></div>
-    <h2 class="display">A log and a bench, on the same database.</h2>
-    <p class="sec-sub">Most shooters keep two records that never speak to each other: a data book at the range and a loading log at home. The whole point of keeping both is the line between them — which load shot that score, in what air.</p>
+    <h2 class="display">A data book and a loading room, on the same database.</h2>
+    <p class="sec-sub">Most shooters keep two records that never speak to each other: a notebook in the range bag and a spreadsheet at home. The whole value of keeping both is the line between them &mdash; which load shot that score, in what air, out of brass on its fifth firing.</p>
 
     <div class="cards two">
       <div class="card">
-        <span class="tag">Zero — at the range</span>
+        <span class="tag">Zero &mdash; at the range</span>
         <h3>The data book</h3>
-        <p>Shots plotted on a real target face, scored on the ring they touch. Sessions carry position, distance, wind, temperature and light. Matches, courses of fire, classification pace. Pair fire, so a coach's phone and a shooter's phone show the same string as it is fired.</p>
+        <p>Shots placed on a real target face and scored on the ring they touch. Sessions carry position, distance, wind, temperature and light. Matches and courses of fire, DOPE, a trajectory solver fitted to your own zeros, and pair fire so a coach&rsquo;s phone and a shooter&rsquo;s phone show the same string as it is fired.</p>
       </div>
       <div class="card">
-        <span class="tag">Bench — at home</span>
+        <span class="tag">Bench &mdash; at home</span>
         <h3>The loading room</h3>
-        <p>Components, recipes, batches, brass and its firing history. Every round that leaves the bench is attached to a batch, so when a string goes into Zero the count comes back down and the batch knows what it has left.</p>
+        <p>Component lots, cited recipes, loaded batches, and brass with its whole history &mdash; firings, trim, annealing, culls. Stock is derived from what your batches actually drew, never typed. Labels with a QR code back to the record.</p>
       </div>
     </div>
-    <p class="afterCards">One account, one sync. Both install to the home screen and both keep working with the phone in airplane mode, which is the state a phone is usually in at a match.</p>
+    <p class="afterCards">Both install to the home screen. Both keep working with the phone in airplane mode, which is the state a phone is usually in at a match.</p>
+  </div>
+</section>
+
+<section id="zero">
+  <div class="wrap">
+    <div class="sec-head"><p class="eyebrow">Inside Zero</p></div>
+    <h2 class="display">What it records, and what it works out.</h2>
+    <p class="sec-sub">Everything below except pair fire runs on the device, with no account and no signal.</p>
+
+    <div class="cards three">
+      <div class="card">
+        <span class="tag">The shot</span>
+        <h3>Hold, call, impact</h3>
+        <p>Tap where the sights were when the trigger broke, then where the round actually went. The gap between the two is the shot you did not know you threw &mdash; and it is scored, tracked and charted over a season.</p>
+      </div>
+      <div class="card">
+        <span class="tag">The string</span>
+        <h3>Scored as a scorer would</h3>
+        <p>Score and X count on the ring each hole touches. Extreme spread and mean radius in MOA and inches, with a confidence band, because a five-shot group is a small sample and the app says how small.</p>
+      </div>
+      <div class="card">
+        <span class="tag">The diagnosis</span>
+        <h3>Dispersion or position</h3>
+        <p>Points lost to the group being big, split from points lost to it sitting off centre. That is the difference between needing to shoot better and needing to move your sights, and it is the first thing worth knowing after a string.</p>
+      </div>
+      <div class="card">
+        <span class="tag">DOPE</span>
+        <h3>Filed the way you shoot</h3>
+        <p>Confirmed zeros by firearm, then range, then distance and position &mdash; recorded from the sight setting you finished each string on. Drift warnings when a zero moves. A printable card sized to tape to a stock.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Conditions</span>
+        <h3>Wind, called and scored</h3>
+        <p>Speed, direction on a clock face, and the hold you predicted. Over time the app tells you how good your wind calls actually are, and whether you are biased in one direction.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Trends</span>
+        <h3>Analytics that answer something</h3>
+        <p>Does your first cold shot go somewhere different? When you dial a correction, does the group move by what you dialled &mdash; and how often does it move the wrong way? Group size by position and distance, with a flag for whether a change is real or inside the noise.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Matches</span>
+        <h3>Courses of fire, prebuilt</h3>
+        <p>Pick the National Match Course or a Regional / XTC and every stage is created in firing order with its target, distance, position and fire mode set. Shoot the day and fill in the shots. Classification pace is computed against your record.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Pair fire</span>
+        <h3>Two phones, one string</h3>
+        <p>A four-character code puts a partner and a coach on the same relay. Each shooter&rsquo;s string draws over the other&rsquo;s target in their own colour, with a feed for wind calls. No account needed to join.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Targets</span>
+        <h3>Forty-two NRA faces</h3>
+        <p>High Power, Smallbore, Pistol, F-Class and Long Range, with every ring diameter transcribed from the rule book. Pin the three you shoot to the top of the picker and draw your own for steel.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="bench">
+  <div class="wrap">
+    <div class="sec-head"><p class="eyebrow">Inside Bench</p></div>
+    <h2 class="display">What you have, what you made, what it has been through.</h2>
+    <p class="sec-sub">Bench records no shots of its own &mdash; those belong to the app where the trigger was pulled. It records everything that led up to them.</p>
+
+    <div class="cards three">
+      <div class="card">
+        <span class="tag">Inventory</span>
+        <h3>Lots, not products</h3>
+        <p>Bullets, powder and primers by lot number, with cost and vendor. Remaining stock is derived from what your batches drew, not typed, so it cannot drift. Powder reports how many more rounds of a given recipe it will make.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Recipes</span>
+        <h3>A cited source is mandatory</h3>
+        <p>Cartridge, components, charge, COAL, CBTO &mdash; and where the data came from, which is a required field. The app records load data. It never suggests, interpolates or extrapolates a charge, and it ships with none.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Batches</span>
+        <h3>It refuses to over-draw</h3>
+        <p>A live preview shows exactly what comes off the shelf as you type the round count. Short on primers and it names the lot, the shortfall, and how many rounds you can actually make. Cartridge mismatches and worn-out brass are refused outright.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Brass</span>
+        <h3>A case knows its life</h3>
+        <p>Firings, trim length, annealing with a nag interval, weight-sort band, cost amortised per round. Cull three split cases and the survivors&rsquo; firing average is untouched &mdash; they have been fired exactly as often as they had been a moment ago.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Identify</span>
+        <h3>Which lot is this case?</h3>
+        <p>Tap the colours you can see on the case head and neck, leave the ones you cannot as unknown, and it narrows to the matching lots while drawing the case. Or scan the serial off a label.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Workup</span>
+        <h3>A ladder, side by side</h3>
+        <p>Every batch on one recipe against the axis you actually varied, with velocity, SD, ES, group and pressure signs per rung. It points out the flattest step and is explicit that this is an observation, not a recommendation.</p>
+      </div>
+    </div>
   </div>
 </section>
 
 <section id="solver">
   <div class="wrap">
     <div class="sec-head"><p class="eyebrow">The feature</p></div>
-    <h2 class="display">A solver that trues to your DOPE.</h2>
-    <p class="sec-sub">Every ballistic app asks for a muzzle velocity and a BC and gives you a curve. Both numbers are usually wrong — the box velocity is measured from a longer barrel, and a published G1 BC is a marketing number that varies with the speed it was measured at. The curve is wrong by an amount you cannot see at 200 and cannot miss at 1000.</p>
+    <h2 class="display">A solver that trues to your own DOPE.</h2>
+    <p class="sec-sub">Every ballistics app asks for a muzzle velocity and a BC and gives you a curve. Both numbers are usually wrong &mdash; box velocity is measured from a longer barrel than yours, and a published G1 BC is a marketing figure that varies with the speed it was measured at. The curve is wrong by an amount you cannot see at 200 and cannot miss at 1000.</p>
 
     <div class="prose stack">
       <p>Zero starts from the other end. It already holds your confirmed zeros, so it uses them: it runs a G7 drag integration and searches for the velocity and drag scale whose trajectory passes <em>through the distances you have actually fired</em>. The rifle it finds is the rifle you own.</p>
-      <p>This is the difference between fitting a curve and fitting <em>a rifle</em>. A polynomial through three points also passes through three points, and then diverges everywhere else — which is exactly the failure a shooter cannot detect until they are on the line at 1000 with no time to diagnose it. A drag model constrained by physics cannot do that; the only freedom it has is which rifle it is describing.</p>
+      <p>This is the difference between fitting a curve and fitting <em>a rifle</em>. A polynomial through three points also passes through three points, and then diverges everywhere else &mdash; which is exactly the failure a shooter cannot detect until they are on the line at 1000 with no time to diagnose it. A drag model constrained by physics cannot do that; the only freedom it has is which rifle it is describing.</p>
     </div>
 
     <div class="book">
       <div class="book-head">
-        <div><span class="eyebrow">Test fixture</span><div class="bh-title mono">.308 · true 2712 fps / .259 G7 · box says 2800 / .243</div></div>
+        <div><span class="eyebrow">Test fixture</span><div class="bh-title mono">.308 &middot; true 2712 fps / .259 G7 &middot; box says 2800 / .243</div></div>
         <div class="mono bh-note">Anchors: 200, 300, 600</div>
       </div>
       <div class="tablewrap">
@@ -550,16 +659,16 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
             <tr><th>Distance</th><th></th><th class="n">Solver</th><th class="n">Truth</th><th class="n">Solver off by</th><th class="n">Box off by</th></tr>
           </thead>
           <tbody>
-            <tr><td>200 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">1.66</td><td class="n">1.66</td><td class="n ci">fit</td><td class="n">0.14</td></tr>
-            <tr><td>300 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">4.18</td><td class="n">4.18</td><td class="n ci">fit</td><td class="n">0.29</td></tr>
-            <tr><td>600 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">14.15</td><td class="n">14.15</td><td class="n ci">fit</td><td class="n">0.70</td></tr>
-            <tr><td>500 yd</td><td><span class="pill pred">Predicted</span></td><td class="n">10.45</td><td class="n">10.44</td><td class="n">0.01</td><td class="n">0.57</td></tr>
-            <tr><td>800 yd</td><td><span class="pill pred">Predicted</span></td><td class="n">22.90</td><td class="n">22.93</td><td class="n">0.03</td><td class="n">0.91</td></tr>
-            <tr><td>1000 yd</td><td><span class="pill warn">Transonic</span></td><td class="n">33.91</td><td class="n">34.04</td><td class="n">0.12</td><td class="n">1.01</td></tr>
+            <tr><td>200 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">1.68</td><td class="n">1.68</td><td class="n ci">fit</td><td class="n">0.14</td></tr>
+            <tr><td>300 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">4.22</td><td class="n">4.22</td><td class="n ci">fit</td><td class="n">0.29</td></tr>
+            <tr><td>600 yd</td><td><span class="pill good">Confirmed</span></td><td class="n">14.37</td><td class="n">14.36</td><td class="n ci">fit</td><td class="n">0.69</td></tr>
+            <tr><td>500 yd</td><td><span class="pill pred">Predicted</span></td><td class="n">10.58</td><td class="n">10.57</td><td class="n">&lt;0.01</td><td class="n">0.56</td></tr>
+            <tr><td>800 yd</td><td><span class="pill pred">Predicted</span></td><td class="n">23.40</td><td class="n">23.41</td><td class="n">0.01</td><td class="n">0.90</td></tr>
+            <tr><td>1000 yd</td><td><span class="pill warn">Transonic</span></td><td class="n">34.96</td><td class="n">34.99</td><td class="n">0.03</td><td class="n">0.96</td></tr>
           </tbody>
         </table>
       </div>
-      <div class="book-foot mono">Elevation in MOA. Through the three anchors the trued curve fits to 0.010 MOA RMS. It recovered 2706 fps against a true 2712, having been handed 2800.</div>
+      <div class="book-foot mono">Elevation in MOA. Through the three anchors the trued curve fits to 0.003 MOA RMS. It recovered 2711 fps against a true 2712, having been handed 2800.</div>
     </div>
 
     <div class="cards three tight">
@@ -571,7 +680,7 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
       <div class="card">
         <span class="tag">It widens</span>
         <h3>An interval, not a decimal</h3>
-        <p>Between your anchors the prediction is interpolation and the interval is tight — &plusmn;0.15 MOA, floored there because a confirmed zero was read off paper by a person. Past the furthest anchor it is extrapolation and the interval grows with the distance: &plusmn;1.38 MOA at 1000 off a 600&nbsp;yd anchor.</p>
+        <p>Between your anchors the prediction is interpolation and the interval is tight. Past the furthest one it is extrapolation, the interval grows with the distance, and the table says how far past your furthest zero each row is reaching.</p>
       </div>
       <div class="card">
         <span class="tag">It flags</span>
@@ -584,65 +693,51 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
       <div>
         <p class="eyebrow">And the part nobody solves for you</p>
         <h3 class="display sub">Positions have their own zero.</h3>
-        <p class="sec-sub">Prone, sitting and standing do not shoot to the same place, and the difference is yours — it comes from your cheek weld, your sling tension and how much the rifle cants when your elbow is not under it. No table has that number.</p>
-        <p class="sec-sub">So Zero learns it. Where you have fired two positions at the same distance and the same range, it pairs them, takes the difference in elevation and windage, and averages it across every pair it has. It reports the spread alongside it, so a single strange relay is visible rather than absorbed. A position with no partner at a distance contributes nothing — it is not extrapolated into existence.</p>
+        <p class="sec-sub">Prone, sitting and standing do not shoot to the same place, and the difference is yours &mdash; it comes from your cheek weld, your sling tension and how much the rifle cants when your elbow is not under it. No table has that number.</p>
+        <p class="sec-sub">So Zero learns it. Where you have fired two positions at the same distance and the same range, it pairs them, takes the difference in elevation and windage, and averages it across every pair it has. It reports the spread alongside, so a single strange relay is visible rather than absorbed. A position with no partner at a distance contributes nothing &mdash; it is not extrapolated into existence.</p>
       </div>
       <div class="book compact">
-        <div class="book-head"><span class="eyebrow">Learned offsets · prone as reference</span></div>
+        <div class="book-head"><span class="eyebrow">Learned offsets &middot; prone as reference</span></div>
         <div class="tablewrap">
           <table>
-            <thead><tr><th>Position</th><th class="n">Elev</th><th class="n">Wind</th><th class="n">Obs</th></tr></thead>
+            <thead><tr><th>From &rarr; to</th><th class="n">Elev</th><th class="n">Wind</th></tr></thead>
             <tbody>
-              <tr><td>Prone</td><td class="n ci">reference</td><td class="n ci">&mdash;</td><td class="n ci">&mdash;</td></tr>
-              <tr><td>Sitting</td><td class="n">+0.55</td><td class="n">&minus;0.75</td><td class="n">2</td></tr>
-              <tr><td>Standing</td><td class="n ci">no pair</td><td class="n ci">&mdash;</td><td class="n">0</td></tr>
+              <tr><td>Prone &rarr; Sitting</td><td class="n">+0.55</td><td class="n">&minus;0.75</td></tr>
+              <tr><td>Prone &rarr; Kneeling</td><td class="n">+0.30</td><td class="n">&minus;0.20</td></tr>
             </tbody>
           </table>
         </div>
-        <div class="book-foot mono">+0.55 up is the mean of +0.5 and +0.6, and the spread is reported with it.</div>
+        <div class="book-foot mono">Each row carries the number of observations behind it and the spread across them, so one strange relay is visible rather than absorbed. A position with no partner at a distance is not listed at all.</div>
       </div>
+    </div>
+
+    <div class="note-inline">
+      <p><strong>What it needs from you:</strong> two confirmed zeros at least a hundred yards apart, on the same firearm, in the same position, at the same range. A confirmed zero is not something you mark &mdash; it is the sight setting you finished a string on. Dial your sights on screen as you dial them on the rifle and you are already recording them. <a href="manual/#z-dope">How that works, in detail &rarr;</a></p>
     </div>
   </div>
 </section>
 
-<section id="targets">
+<section id="together">
   <div class="wrap">
-    <div class="sec-head"><p class="eyebrow">The library</p></div>
-    <h2 class="display">Forty&#8209;two NRA faces, transcribed from the rule book.</h2>
-    <p class="sec-sub">Every ring diameter is typed from the published dimensions, not derived from a reduction formula. The formula is close and it is wrong: it puts the B&#8209;19's rings at 1.80, 3.60, 5.40, 7.20 inches where the book says 1.78, 3.58, 5.38, 7.18. Four hundredths of an inch is the difference between a 10 and a 9 on a scored shot.</p>
+    <div class="sec-head"><p class="eyebrow">Together</p></div>
+    <h2 class="display">The join the two apps exist for.</h2>
+    <p class="sec-sub">Load a batch in Bench. Shoot it in Zero. The session, the group and every individual shot cross over, Bench works out what is left, and the count comes back &mdash; without anybody typing a number twice. Then the batch&rsquo;s own screen draws the target and the whole string, in the order it was fired.</p>
+    <p class="sec-sub">That is the question neither half can answer alone: <em>this group, from this batch, from these component lots, on brass at this firing.</em></p>
 
-    <div class="disc-grid">
-      <div class="disc"><div class="dn mono">11</div><div class="dl">High Power</div><div class="dd">SR, SR&#8209;3, MR&#8209;1, MR&#8209;63, MR&#8209;65 and their reductions</div></div>
-      <div class="disc"><div class="dn mono">13</div><div class="dl">Smallbore</div><div class="dd">A&#8209;17 through A&#8209;51, 50&nbsp;ft to 100&nbsp;yd, plus USAS&#8209;50</div></div>
-      <div class="disc"><div class="dn mono">13</div><div class="dl">Pistol</div><div class="dd">B&#8209;2 to B&#8209;40 — slow, timed and rapid fire</div></div>
-      <div class="disc"><div class="dn mono">3</div><div class="dl">F&#8209;Class</div><div class="dd">MR&#8209;63, MR&#8209;65 and MR&#8209;1 with the F&#8209;Class scoring rings</div></div>
-      <div class="disc"><div class="dn mono">2</div><div class="dl">Long Range</div><div class="dd">The 1000&nbsp;yd face, scored as zones with a square outer</div></div>
-    </div>
-
-    <div class="split">
-      <div>
-        <h3 class="display sub">Pin the ones you shoot.</h3>
-        <p class="sec-sub">A High Power shooter needs three faces and will never open the other thirty&#8209;nine. Pinned targets sit at the top of the picker, in your order, and they ride your backup — file, cloud and crash rescue — so they come with you to a new phone. Everything else stays one scroll away.</p>
+    <div class="book">
+      <div class="book-head"><span class="eyebrow">What actually crosses, and which way</span></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Record</th><th>Zero &rarr; Bench</th><th>Bench &rarr; Zero</th></tr></thead>
+          <tbody>
+            <tr><td>Firearms</td><td>both ways</td><td>both ways</td></tr>
+            <tr><td>Sessions, groups, shots</td><td>yes</td><td class="ci">&mdash;</td></tr>
+            <tr><td>Batches, as loads</td><td class="ci">&mdash;</td><td>when you import them</td></tr>
+            <tr><td>Component lots, recipes, brass</td><td class="ci">&mdash;</td><td class="ci">not yet</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div>
-        <h3 class="display sub">Rectangles score correctly.</h3>
-        <p class="sec-sub">Zone targets with rectangular or offset scoring areas used to be measured against a bounding circle, which meant a shot could come back up to eleven inches from where it was fired. The boundary is now solved along the shot's own bearing, so a shot placed on paper and read back off paper lands in the same hole.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="inside">
-  <div class="wrap">
-    <div class="sec-head"><p class="eyebrow">What's inside</p></div>
-    <h2 class="display">The rest of it.</h2>
-    <div class="cards three">
-      <div class="card"><span class="tag">Pair fire</span><h3>Two phones, one string</h3><p>A coach and a shooter join the same relay. Shots appear on both faces as they are called, numbered once and only once, and a second device cannot take a live shooter's role out from under them.</p></div>
-      <div class="card"><span class="tag">Offline</span><h3>Signal is optional</h3><p>Both apps are installable and both work with no network. Everything queues; the queue survives being closed, being killed, and being reopened three days later on a different network.</p></div>
-      <div class="card"><span class="tag">Sync</span><h3>Every device, one record</h3><p>Changes walk up and down on a keyset cursor, so a page boundary cannot skip a row or replay one forever. A row the server refuses is held and can be sent again rather than silently dropped.</p></div>
-      <div class="card"><span class="tag">Conditions</span><h3>Air is part of the record</h3><p>Temperature, pressure altitude and light are kept with the string, and the solver uses air density — thin summer air needs about 3.7 MOA less at 1000 than dense winter air on the same load.</p></div>
-      <div class="card"><span class="tag">Brass</span><h3>A case knows its life</h3><p>Firings, trim length, annealing, and which batch it went into. When a batch is fired in Zero, the count comes back to Bench without anybody typing it twice.</p></div>
-      <div class="card"><span class="tag">Matches</span><h3>Courses of fire</h3><p>Build a match from a template, shoot it stage by stage, and keep the aggregate. Classification pace is computed against your record rather than estimated.</p></div>
+      <div class="book-foot mono">Firearms are the only record that syncs both ways. Everything else is deliberate and one-directional.</div>
     </div>
   </div>
 </section>
@@ -650,47 +745,22 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
 <section id="start">
   <div class="wrap">
     <div class="sec-head"><p class="eyebrow">Getting started</p></div>
-    <h2 class="display">Three walkthroughs. None of them is long.</h2>
-    <p class="sec-sub">If you keep a data book already, you know all of this — it is the same sequence, with the arithmetic done for you.</p>
+    <h2 class="display">Five steps, then you are logging.</h2>
+    <p class="sec-sub">No setup wizard, and nothing here needs an account or a signal &mdash; except importing a batch from Bench in step two, which needs both. If you keep a data book already this is the same sequence, with the arithmetic done for you.</p>
 
-    <div class="tut">
-      <div class="tut-tabs" role="tablist" aria-label="Walkthroughs">
-        <button class="tut-tab" role="tab" aria-selected="true"  aria-controls="tut-zero"   id="tab-zero"   data-t="zero">In Zero &mdash; your first string</button>
-        <button class="tut-tab" role="tab" aria-selected="false" aria-controls="tut-bench"  id="tab-bench"  data-t="bench">In Bench &mdash; your first batch</button>
-        <button class="tut-tab" role="tab" aria-selected="false" aria-controls="tut-solver" id="tab-solver" data-t="solver">The solver &mdash; your first come-up</button>
-      </div>
+    <ol class="steps">
+      <li><b>Add your firearm.</b> Name and chambering. Barrel life if you track it.</li>
+      <li><b>Add the load you shoot</b> &mdash; or import the batch from Bench, which brings its chronographed velocity and BC across with it.</li>
+      <li><b>Create a session.</b> Target, distance, position, and the name of the range, which is part of how your DOPE is filed.</li>
+      <li><b>Log the string.</b> Tap each shot where it went, and dial your sights on screen as you dial them on the rifle.</li>
+      <li><b>Read it back.</b> Score, group, centre and diagnosis are already computed.</li>
+    </ol>
 
-      <div class="tut-panel" role="tabpanel" id="tut-zero" aria-labelledby="tab-zero" data-p="zero">
-        <ol class="steps">
-          <li><b>Add the rifle.</b> <span class="path">More &rarr; Firearms</span> Name, cartridge, sight height above bore, and the distance it is zeroed at. Sight height matters more than people expect &mdash; it is what makes the near end of the trajectory come out right.</li>
-          <li><b>Add the load.</b> Under the rifle. If you loaded it yourself, pull the batch across instead <span class="path">More &rarr; Bench</span> and the round count stays honest on both sides.</li>
-          <li><b>Start the session.</b> <span class="path">Home &rarr; New session</span> Date, target face, distance, position, rifle and load &mdash; then the conditions: wind speed and direction, temperature, light. The conditions are two taps now and the only thing that explains a strange string six months from now.</li>
-          <li><b>Fire, and place the shots.</b> Tap each hole where it went on the face. It is scored on the ring it touches, the way a scorer does it. Transcribing an old paper target instead? Enter ring and clock and it lands in the same place.</li>
-          <li><b>Read the string.</b> Score, X count, group size and where the group centre sits are computed as you go. Nothing to add up at the end.</li>
-          <li><b>Mark the confirmed zero.</b> That is the one step people skip, and it is the one that feeds everything downstream &mdash; the DOPE card, the position offsets, and the solver.</li>
-        </ol>
-      </div>
-
-      <div class="tut-panel" role="tabpanel" id="tut-bench" aria-labelledby="tab-bench" data-p="bench" hidden>
-        <ol class="steps">
-          <li><b>Enter your component lots.</b> Powder, primer, bullet. A <em>lot</em>, not a type &mdash; a lot number is what lets you explain a group that opened up in October.</li>
-          <li><b>Enter the brass.</b> Headstamp, serial, count. Firings, trim length and annealing accrue against that lot for the rest of its life.</li>
-          <li><b>Write the recipe.</b> Charge, seating depth, and which lots it draws on. A ladder can hang off it if you are still working the load up.</li>
-          <li><b>Load a batch.</b> A recipe plus a brass lot plus a date plus a count. That is the object that actually leaves the bench.</li>
-          <li><b>Fire it in Zero.</b> Pick the batch on the session. The rounds come off it without anybody typing a number twice, and the brass gets its firing.</li>
-        </ol>
-      </div>
-
-      <div class="tut-panel" role="tabpanel" id="tut-solver" aria-labelledby="tab-solver" data-p="solver" hidden>
-        <ol class="steps">
-          <li><b>Collect two confirmed zeros.</b> Same rifle, same position, at least 100 yards apart. Three is better. Four is what protects you from a single mistyped one, because three zeros against two unknowns leaves nothing in the residuals to see.</li>
-          <li><b>Open it.</b> <span class="path">More &rarr; Solver</span> Pick the rifle and the position you are solving for. It shows you which zeros it is using.</li>
-          <li><b>Give it today's air.</b> Temperature, and station pressure &mdash; the number off the meter, not the sea-level figure a weather app shows you. Thin air at altitude is worth several MOA at 1000.</li>
-          <li><b>Read the come-ups.</b> Distances you have confirmed are marked as confirmed. Everything else carries an interval that widens the further past your furthest zero it reaches, and the transonic band is flagged where a drag model is doing its worst work.</li>
-          <li><b>Believe the refusals.</b> If it will not solve, it says which zero disagrees with the others, or that two zeros fifty yards apart cannot separate velocity from drag. That is the solver protecting you from a confident wrong number.</li>
-        </ol>
-      </div>
+    <div class="cta-row">
+      <a class="btn" href="manual/">Read the manual</a>
+      <a class="btn ghost" href="https://zero-wine-one.vercel.app">Open Zero</a>
     </div>
+    <p class="finealt mono">The manual covers every screen in both apps, plus troubleshooting.</p>
   </div>
 </section>
 
@@ -699,9 +769,9 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     <div class="sec-head"><p class="eyebrow">About</p></div>
     <h2 class="display">Built by somebody who shoots it.</h2>
     <div class="prose stack">
-      <p>Zero and Bench exist because the two records that matter most to a precision shooter — what the rifle did, and what was in the round that did it — are almost always kept in two places that cannot be joined. A spiral notebook in a range bag and a spreadsheet at home cannot tell you that the group that opened up at 600 was the batch you loaded with the new lot of powder. One database can.</p>
-      <p>The design rule is that the app never invents a number. A score comes from the ring the shot touched. A round count comes from a batch that was actually fired. A come-up comes from a drag model fitted to zeros you confirmed, with an interval on it, and when the data cannot support a solution the app says so instead of producing one. That rule is why the solver refuses single anchors and why the B&#8209;27 is missing.</p>
-      <p>It is held to that by test rather than by intention: <span class="mono">1,019</span> assertions across the geometry, the solver, the sync engine, the relay and both apps, plus a separate suite that runs against the database's own access rules. Every fix carries a test that fails without it. That is the only way to know a fix is a fix.</p>
+      <p>Zero and Bench exist because the two records that matter most to a precision shooter &mdash; what the rifle did, and what was in the round that did it &mdash; are almost always kept in two places that cannot be joined. A notebook in a range bag and a spreadsheet at home cannot tell you that the group which opened up at 600 was the batch loaded with the new lot of powder. One database can.</p>
+      <p>The design rule is that the app never invents a number. A score comes from the ring the shot touched. A round count comes from a batch that was actually fired. A come-up comes from a drag model fitted to zeros you confirmed, with an interval on it, and when the data cannot support a solution the app says so instead of producing one. That rule is why the solver refuses single anchors, why a recipe cannot be saved without citing its source, and why the B&#8209;27 is missing from the target library.</p>
+      <p>It is held to that by test rather than by intention: <span class="mono">1,256</span> assertions across the geometry, the solver, the sync engine, the relay and both apps, plus a separate suite that runs against the database&rsquo;s own access rules. Every fix carries a test that fails without it. That is the only way to know a fix is a fix.</p>
     </div>
   </div>
 </section>
@@ -713,10 +783,12 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     <p class="sec-sub">Written down here rather than discovered on the line.</p>
 
     <div class="limits">
-      <div class="limit"><div class="what">It does not call the wind</div><div class="why">There is no wind solver. Wind is recorded with the string and it is part of what you review afterwards, but the number on the knob is still yours. A wind call from an app that cannot see the flags is theatre.</div></div>
-      <div class="limit"><div class="what">Two zeros, 100 yd apart</div><div class="why">Below that the solver will not true, because those anchors cannot separate velocity from drag. It says so rather than fitting something. One confirmed zero gets you a curve from the box numbers, marked as such.</div></div>
+      <div class="limit"><div class="what">It does not call the wind</div><div class="why">There is no wind solver. Wind is recorded with the string, your predicted hold is scored against your impacts, and you get told how good your calls are &mdash; but the number on the knob is still yours. A wind call from an app that cannot see the flags is theatre.</div></div>
+      <div class="limit"><div class="what">Two zeros, 100 yd apart</div><div class="why">Below that the solver will not true, because those anchors cannot separate velocity from drag. It says so rather than fitting something. With less than that you get the load&rsquo;s own numbers, marked as a starting point rather than as your rifle.</div></div>
+      <div class="limit"><div class="what">Only linked sessions cross</div><div class="why">A Zero session reaches Bench only if its load is linked to a Bench batch, with at least two record shots and a distance. A session shot with factory ammo stays on your device &mdash; fully logged and fully analysed, just not shared with the bench.</div></div>
+      <div class="limit"><div class="what">Most of Bench syncs one way</div><div class="why">Firearms move both ways, shot data flows to Bench, and batches come to Zero when you import them. Component lots, recipes and brass go up but do not come back down &mdash; each needs a defensible merge rule first. Cloud backup covers moving a whole bench to a new device meanwhile.</div></div>
+      <div class="limit"><div class="what">A cloud restore merges</div><div class="why">It adds what the backup has and this device does not. It never deletes or overwrites, which means an edit made on one device does not reach the other by restoring. To make two devices match exactly there is a separate replace, behind two confirmations.</div></div>
       <div class="limit"><div class="what">The B&#8209;27 series is absent</div><div class="why">Its scoring rings are ovals, and the geometry engine works in circles, rectangles and polygons. A B&#8209;27 drawn with round rings would score wrong at the 9 and 8 line, so it is not in the library rather than in it and lying.</div></div>
-      <div class="limit"><div class="what">Bench syncs one direction</div><div class="why">Firearms, sessions and groups come down to every device. Component lots, recipes, batches and brass go up but not yet down — each needs a defensible merge before it can, and cloud backup covers moving a bench to a new device meanwhile.</div></div>
       <div class="limit"><div class="what">Transonic is a caution</div><div class="why">Past about Mach 1.2 the drag model is doing its worst work and a real bullet may do something no model predicts. The prediction is still shown, marked, with a wider interval. Confirm it on paper.</div></div>
     </div>
   </div>
@@ -729,13 +801,14 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     <div class="cta-row">
       <a class="btn" href="https://zero-wine-one.vercel.app">Open Zero</a>
       <a class="btn ghost" href="https://zero-wine-one.vercel.app/bench/">Open Bench</a>
+      <a class="btn ghost" href="manual/">Manual</a>
     </div>
   </div>
 </section>
 
 <footer>
   <div class="wrap foot-grid">
-    <div><span class="mono">Zero &amp; Bench</span> — a precision shooting log and a hand&#8209;loading bench, on one account.</div>
+    <div><span class="mono">Zero &amp; Bench</span> &mdash; a precision shooting log and a hand&#8209;loading bench, on one account.</div>
     <div class="mono">zero&#8209;wine&#8209;one.vercel.app</div>
   </div>
 </footer>
@@ -759,27 +832,6 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     try { localStorage.setItem('zb-theme', next); } catch (e) {}
     label();
   });
-  try {
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label);
-  } catch (e) {}
-}());
-(function () {
-  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tut-tab'));
-  var panels = Array.prototype.slice.call(document.querySelectorAll('.tut-panel'));
-  if (!tabs.length) return;
-  function show(name) {
-    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.t === name)); });
-    panels.forEach(function (p) { p.hidden = p.dataset.p !== name; });
-  }
-  tabs.forEach(function (t, i) {
-    t.addEventListener('click', function () { show(t.dataset.t); });
-    t.addEventListener('keydown', function (e) {
-      var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-      if (!d) return;
-      e.preventDefault();
-      var next = tabs[(i + d + tabs.length) % tabs.length];
-      next.focus(); show(next.dataset.t);
-    });
-  });
+  try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label); } catch (e) {}
 }());
 </script>

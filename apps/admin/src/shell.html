@@ -106,7 +106,10 @@ tr:last-child td{border-bottom:none}
 .chip{display:inline-block; font-size:11px; font-family:var(--fm);
       padding:2px 7px; border-radius:20px; border:1px solid var(--line)}
 
-.banner{border-radius:var(--r); padding:13px 15px; margin-bottom:16px; font-size:13px}
+/* pre-line so a message can carry a line break and a line of SQL, instead of
+   running the recovery instructions into one paragraph. */
+.banner{border-radius:var(--r); padding:13px 15px; margin-bottom:16px; font-size:13px;
+        white-space:pre-line}
 .banner.bad{background:rgba(240,96,96,.1); border:1px solid rgba(240,96,96,.4)}
 .banner.warn{background:rgba(232,163,23,.1); border:1px solid rgba(232,163,23,.4)}
 

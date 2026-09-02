@@ -455,13 +455,36 @@ async function startMfa() {
     UI.error = 'Could not check this account for a second factor.';
     UI.busy = false; return render();
   }
+  /* No challenge is started here, in either branch.
+   *
+   * A challenge expires, and this screen is one a person reads: they fetch a
+   * phone, open an app, scan a code, wait for the digits to roll over. One
+   * minted now is stale by the time it is used, and the failure it produces is
+   * indistinguishable on screen from a wrong code. The submit handler takes a
+   * fresh one per attempt instead. */
   if (f.verified.length) {
     /* Already enrolled: challenge the existing factor. No QR -- showing one
      * again would enrol a SECOND factor and leave the first as a way in. */
-    const c = await CORE.mfaChallenge(f.verified[0].id);
-    UI.mfa = { factorId: f.verified[0].id, challengeId: c.ok ? c.challengeId : null };
-    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+    UI.mfa = { factorId: f.verified[0].id, challengeId: null };
   } else {
+    /* Clear any half-finished enrolment before starting a new one.
+     *
+     * An enrolment that was never verified is worthless by definition: nobody
+     * has proved they hold its secret. But GoTrue refuses to issue a second
+     * UNVERIFIED factor, so leaving one behind meant the next attempt got a
+     * 422 -- and the only way out was deleting a row by hand in SQL. A failed
+     * scan is an ordinary thing to happen once; it must not turn into a
+     * database chore.
+     *
+     * Deleted rather than reused, because it cannot be reused: the secret and
+     * the otpauth URI come back from `enroll` and are never retrievable again,
+     * so there is no way to put the QR back on screen for an existing factor.
+     * A fresh enrolment with a fresh secret is the only honest recovery, and
+     * it is also what the user expects after a scan that did not take. */
+    for (const stale of f.factors.filter(x => x.status !== 'verified')) {
+      await CORE.mfaUnenroll(stale.id);
+    }
+
     /* Enrolment runs on the password-only session, deliberately: an admin who
      * has never enrolled has no way to reach aal2, so requiring it here would
      * lock the only admin out with no path back. */
@@ -469,14 +492,14 @@ async function startMfa() {
     if (!e.ok) {
       UI.view = 'error';
       UI.error = e.status === 422
-        ? 'This account already has an unverified factor. Remove it in the Supabase dashboard and try again.'
+        ? 'Supabase is still holding a half-finished enrolment for this account and would '
+          + 'not replace it. Run this once in the Supabase SQL editor, then reload:\n\n'
+          + 'delete from auth.mfa_factors where status <> \'verified\';'
         : 'Could not start enrolment.';
       UI.busy = false; return render();
     }
-    const c = await CORE.mfaChallenge(e.factorId);
     UI.mfa = { factorId: e.factorId, qr: e.qr, secret: e.secret, uri: e.uri,
-               challengeId: c.ok ? c.challengeId : null, fresh: true };
-    if (!c.ok) UI.error = 'Could not start the check. Try again.';
+               challengeId: null, fresh: true };
   }
   UI.view = 'mfa';
   UI.busy = false;
@@ -561,8 +584,16 @@ document.addEventListener('submit', async (e) => {
     UI.mfa = { ...m, challengeId: null };
     if (!v.ok) {
       UI.busy = false;
+      /* Naming the clock is worth the extra sentence. A TOTP code is derived
+       * from the time, so a phone whose clock is set by hand and drifts by a
+       * minute produces codes that are always wrong -- and every other symptom
+       * is identical to mistyping, so people retype instead of looking at the
+       * one setting that would fix it. */
       UI.error = v.status === 422 || v.status === 401
-        ? 'That code was not accepted. Codes last about thirty seconds — wait for the next one and try again.'
+        ? 'That code was not accepted. Codes last about thirty seconds, so wait for the '
+          + 'next one and enter it fresh. If they keep failing, check your phone\'s clock '
+          + 'is set automatically — a code is computed from the time, and a clock that is '
+          + 'off by a minute produces codes that never work.'
         : 'Could not check the code. Try again.';
       return render();
     }

@@ -118,6 +118,76 @@ const Store = (() => {
   };
 })();
 
+/* --------------------------------------------------------------------------
+ * Theme. Day, night, or whatever the phone says.
+ *
+ * The colours themselves live entirely in CSS -- :root is the paper palette,
+ * a prefers-color-scheme block is the night one, and [data-theme] on <html>
+ * overrides both. So all this has to do is set or clear one attribute, and
+ * the app repaints without re-rendering a thing.
+ *
+ * Kept OUT of the database on purpose. DB.meta rides the cloud sync and every
+ * export, and a theme is a fact about the screen in your hand: forcing the
+ * phone you use at the range after dark to match the laptop you load beside is
+ * the wrong answer, and restoring a backup should not repaint the device you
+ * restored it onto. Its own key, its own lifetime.
+ *
+ * <head> already applied this before the first paint; the duplication is the
+ * point, because by the time this file runs the page has been painted.
+ * ------------------------------------------------------------------------*/
+const Theme = (() => {
+  const KEY = 'theme.Bench';
+  const VALID = ['system', 'light', 'dark'];
+  /* Night when the browser has no opinion: matchMedia is absent in some
+   * embedded webviews, and this app shipped dark. */
+  const systemIsDark = () => {
+    try { return !(window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches); }
+    catch (e) { return true; }
+  };
+  const read = () => {
+    try { const v = localStorage.getItem(KEY); return VALID.includes(v) ? v : 'system'; }
+    catch (e) { return 'system'; }
+  };
+  const apply = (pref) => {
+    const el = document.documentElement;
+    if (pref === 'system') el.removeAttribute('data-theme');
+    else el.setAttribute('data-theme', pref);
+    const dark = pref === 'system' ? systemIsDark() : pref === 'dark';
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', dark ? '#0f1117' : '#e4e1d8');
+    return dark;
+  };
+  const api = {
+    get pref() { return read(); },
+    get effective() { const p = read(); return p === 'system' ? (systemIsDark() ? 'dark' : 'light') : p; },
+    systemIsDark,
+    set(pref) {
+      if (!VALID.includes(pref)) return true;
+      /* A theme that cannot be saved must not be offered as if it were: the
+       * attribute is applied either way, so the screen is right for this
+       * session, and the caller is told the choice will not survive a reload
+       * -- the same honesty Store already gives the bench itself. */
+      let saved = true;
+      try { if (pref === 'system') localStorage.removeItem(KEY); else localStorage.setItem(KEY, pref); }
+      catch (e) { saved = false; }
+      apply(pref);
+      return saved;
+    },
+  };
+  /* Following the system means following it while the app is OPEN. macOS and
+   * Android both flip at dusk, and a phone left on the bench through it would
+   * otherwise stay in yesterday's theme until relaunch. The CSS repaints
+   * itself; this is here for the status-bar colour and for the caption on the
+   * Appearance screen, which names the theme currently in force. */
+  try {
+    const mq = window.matchMedia && matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if (read() === 'system') { apply('system'); render(); } };
+    if (mq && mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq && mq.addListener) mq.addListener(onChange);
+  } catch (e) { /* no matchMedia: the boot default stands */ }
+  return api;
+})();
+
 /* Ask the browser not to evict this origin.
  *
  * WebKit caps script-writable storage at seven days for a site that is not on
@@ -961,13 +1031,13 @@ function caseSvg(marks, opts) {
 
   const ticks = o.mini ? '' : bandPos.map(p => {
     const x = bandX(p);
-    return `<line x1="${x}" y1="78" x2="${x}" y2="88" stroke="#6c7480" stroke-width="1"/>`
-      + `<text x="${x}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${esc(p.label)}</text>`;
+    return `<line x1="${x}" y1="78" x2="${x}" y2="88" stroke="var(--ink3)" stroke-width="1"/>`
+      + `<text x="${x}" y="99" fill="var(--ink2)" font-size="11" text-anchor="middle">${esc(p.label)}</text>`;
   }).join('') + (heads.length && !o.mini
     // Under the head, not beside it: a label centred to the right of the case
     // runs off the edge of the viewBox and gets clipped.
-    ? `<line x1="${(g.baseX0 + g.baseX1) / 2}" y1="78" x2="${(g.baseX0 + g.baseX1) / 2}" y2="88" stroke="#6c7480" stroke-width="1"/>`
-      + `<text x="${(g.baseX0 + g.baseX1) / 2}" y="99" fill="#9aa3b0" font-size="11" text-anchor="middle">${
+    ? `<line x1="${(g.baseX0 + g.baseX1) / 2}" y1="78" x2="${(g.baseX0 + g.baseX1) / 2}" y2="88" stroke="var(--ink3)" stroke-width="1"/>`
+      + `<text x="${(g.baseX0 + g.baseX1) / 2}" y="99" fill="var(--ink2)" font-size="11" text-anchor="middle">${
           esc(heads.length === 1 ? heads[0].label : 'Case head')}</text>`
     : '');
   return `<svg class="case${o.mini ? ' casemini' : ''}" viewBox="0 0 300 ${o.mini ? 88 : 106}"
@@ -1555,6 +1625,7 @@ const TITLES = {
   cartridges: ['Cartridges', 'case shape and head'],
   scanned: ['Scanned label', 'opened in a browser'],
   settings: ['Marking scheme', ''],
+  appearance: ['Appearance', 'day, night, or follow the device'],
   data: ['Data', 'backup and reset'],
   sync: ['Cloud sync', 'shared with Zero'],
   form: ['', ''],
@@ -2223,6 +2294,9 @@ VIEWS.more = () => [
   ['settings', 'Marking scheme', `${scheme().positions.length} positions · ${schemeCapacity()} codes`],
   ...(CORE ? [['sync', 'Cloud sync',
     CORE.isSignedIn() ? `signed in as ${CORE.getUser()?.email || 'you'}` : 'not signed in']] : []),
+  ['appearance', 'Appearance', Theme.pref === 'system'
+    ? `follows this device — ${Theme.effective === 'dark' ? 'night' : 'day'} right now`
+    : Theme.pref === 'dark' ? 'night, always' : 'day, always'],
   ['data', 'Data', Store.persistent ? 'saved on this device' : 'not persisting — export to keep'],
   /* Reachable from the menu, not only from #/diag. A home-screen app has no
    * address bar, so the URL route was unreachable on exactly the device whose
@@ -2770,6 +2844,32 @@ async function loadCloudInfo() {
   } catch (e) { /* leave the card in its "nothing yet" state */ }
   if (cur().v === 'data') render();
 }
+
+/* ------------------------------------------------------------- Appearance */
+VIEWS.appearance = () => {
+  const pref = Theme.pref;
+  const now = Theme.effective;
+  const OPTS = [
+    ['system', 'Follow this device',
+     `Whatever the phone or laptop is set to, including a schedule that flips it at dusk. Right now that is ${now === 'dark' ? 'night' : 'day'}.`],
+    ['light', 'Day',
+     'Target paper: the grey-green stock an SR face is printed on, with the same warm black sitting on it.'],
+    ['dark', 'Night',
+     'The cool blue-black this app shipped in, for a bench or a line after dark.'],
+  ];
+  return `<div class="card"><h2>Theme</h2>
+    <p class="small muted mb12">A setting for THIS device, not for your account.
+      It is not exported and it does not sync — the phone you take to the range
+      and the laptop you load beside can disagree, and usually should.</p>
+    ${OPTS.map(([v, t, note]) => `<button class="listitem" data-act="setTheme" data-arg="${v}">
+      <span class="grow"><span class="ttl">${t}</span><span class="sub">${esc(note)}</span></span>
+      <span class="chev" style="${pref === v ? 'color:var(--brass)' : 'visibility:hidden'}">✓</span>
+    </button>`).join('')}
+  </div>
+  <div class="card tight"><div class="tiny dim">Zero has the same setting under
+    More › Appearance. Both apps read the same system preference but keep their
+    own override, so switching one does not move the other.</div></div>`;
+};
 
 VIEWS.data = () => {
   /* Fired off rather than awaited: the view is synchronous, and a card that
@@ -3416,6 +3516,12 @@ const ACTIONS = {
 
   adjustRounds: (a) => { UI.cartNew = {}; go('form', { kind: 'adjust', batch: a }); },
   workup: (a) => go('workup', a),
+
+  setTheme: (a) => {
+    const saved = Theme.set(a);
+    render();
+    if (saved === false) toast('Theme applied, but this browser will not remember it.');
+  },
   ladder: (a) => { UI.cartNew = {}; go('form', { kind: 'ladder', recipe: a }); },
   unadjust: (a) => {
     const [bid, aid] = String(a).split(':');

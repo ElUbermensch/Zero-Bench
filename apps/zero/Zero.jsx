@@ -2082,6 +2082,57 @@ function dopeCardText(byFirearm) {
   return lines.join('\n');
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+ * THEME — day, night, or whatever the device says.
+ *
+ * The colours are entirely in S below: :root is the paper palette, a
+ * prefers-color-scheme block is the night one, and [data-theme] on <html>
+ * beats both. So this sets or clears ONE attribute and the app repaints with
+ * no re-render at all -- which is why none of it is React state beyond the
+ * radio button that shows the current choice.
+ *
+ * Deliberately outside window.storage and therefore outside the backup, the
+ * export and the cloud sync. A theme describes the screen in your hand: the
+ * phone you carry to a line after dark and the laptop you review DOPE on
+ * should be allowed to disagree, and restoring a backup must not repaint the
+ * device you restored it onto. Read synchronously, because the answer is
+ * needed before the first paint and localStorage is the only store here that
+ * can answer that fast -- <head> already did exactly this.
+ * ══════════════════════════════════════════════════════════════════════════ */
+const THEME_KEY = 'theme_v1';
+const THEMES = ['system', 'light', 'dark'];
+
+/* Night when the browser has no opinion: matchMedia is missing in some
+ * embedded webviews, and dark is what Zero shipped. */
+function systemIsDark() {
+  try { return !(window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches); }
+  catch { return true; }
+}
+function readThemePref() {
+  try { const v = localStorage.getItem(THEME_KEY); return THEMES.includes(v) ? v : 'system'; }
+  catch { return 'system'; }
+}
+function effectiveTheme(pref) {
+  return pref === 'system' ? (systemIsDark() ? 'dark' : 'light') : pref;
+}
+/* Applies, and reports whether the choice was SAVED. A quota-blocked or
+ * private-mode browser still gets the theme it asked for this session; it is
+ * told the truth rather than shown a setting that silently forgets. */
+function applyTheme(pref) {
+  const el = document.documentElement;
+  if (pref === 'system') el.removeAttribute('data-theme');
+  else el.setAttribute('data-theme', pref);
+  try {
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', effectiveTheme(pref) === 'dark' ? '#0f1117' : '#e4e1d8');
+  } catch {}
+  try {
+    if (pref === 'system') localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, pref);
+  } catch { return false; }
+  return true;
+}
+
 const S = `
 /* The @font-face rules are injected into index.html at build time from
  * packages/fonts, shared with Bench.
@@ -2101,17 +2152,77 @@ const S = `
   --safe-b:env(safe-area-inset-bottom,0px);
   --safe-l:env(safe-area-inset-left,0px);
   --safe-r:env(safe-area-inset-right,0px);
+  /* ── Day and night ─────────────────────────────────────────────────────
+   *
+   * Two grounds, one product, and the same pair the information site is
+   * painted in. Night is the palette Zero has always shipped: a cool
+   * blue-black, because that is what a phone on a line after dark should be.
+   * Day is not an inversion of it -- it is TARGET PAPER, the grey-green stock
+   * an SR face is printed on, with the same warm black sitting on it.
+   *
+   * Light is the bare :root because that is what a browser with no opinion
+   * gets; the media query below hands the system-preference case back to
+   * night, and [data-theme] on <html> is the user's own override, which has to
+   * beat the media query in BOTH directions -- hence the third block. Set from
+   * More > Appearance, and applied in the <head> before the first paint.
+   *
+   * What does not move: a target face. The rings, the aiming black and every
+   * plot canvas they sit on stay exactly as they are under both lights,
+   * because a target is an object rather than chrome -- and because a shot
+   * plot has to look the same on the phone you plotted it on and the laptop
+   * you review it on. That is also why every #ffffff overlay drawn ON a face
+   * below is still a literal: it is correct on both, and always was.
+   *
+   * The day accent is one step deeper than the night one (#e8943a -> #96500b).
+   * On paper the lighter amber is 2.4:1, which is a decorative colour rather
+   * than a legible one, and this app spends it on 9px uppercase labels. */
+  color-scheme:light;
+  --bg:#e4e1d8;--surf:#efede6;--surf2:#f7f6f1;--bdr:#c9c5b8;
+  --ink:#1a1814;--dim:#5f5a4c;--acc:#96500b;
+  --red:#b4472e;--green:#2e7d52;
+  --blue:#1a5fb4;--blue-bg:#1a5fb41f;--blue-line:#1a5fb466;
+  --pink:#c2185b;--gold:#8a6a08;--trace:#5a6472;
+  --on-acc:#fff7ee;--tint-acc:#96500b1f;--tint-red:#b4472e1f;
+  --grid:#1a181414;--field:#ffffff;
+  --pos-prone:#1d6b44;--pos-sitting:#1a5fb4;--pos-kneeling:#7b3ca0;--pos-standing:#96500b;
+  --pos-twohand:#16697a;--pos-stronghand:#7a463b;--pos-weakhand:#b03225;
+  --pos-bench:#566270;--pos-unsupported:#745c0e;--pos-unspecified:#5f6472;
+  --fh:'DM Sans',sans-serif;--fm:'Space Mono',monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0f1117;--surf:#1a1d27;--surf2:#252836;--bdr:#353848;
+    --ink:#f0f2f8;--dim:#9099b0;--acc:#e8943a;
+    --red:#f06060;--green:#3db87a;
+    --blue:#4a9eff;--blue-bg:#4a9eff22;--blue-line:#4a9eff66;
+    --pink:#e91e63;--gold:#e8c840;--trace:#8d9aaa;
+    --on-acc:#0f1117;--tint-acc:#e8943a22;--tint-red:#f0606022;
+    --grid:#ffffff10;--field:#1e2235;
+    --pos-prone:#3db87a;--pos-sitting:#4a9eff;--pos-kneeling:#b87adb;--pos-standing:#e8943a;
+    --pos-twohand:#2e8a9e;--pos-stronghand:#a0685c;--pos-weakhand:#f06060;
+    --pos-bench:#8d9aaa;--pos-unsupported:#d4af37;--pos-unspecified:#7a7f96;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
   --bg:#0f1117;--surf:#1a1d27;--surf2:#252836;--bdr:#353848;
   --ink:#f0f2f8;--dim:#9099b0;--acc:#e8943a;
   --red:#f06060;--green:#3db87a;
-  --fh:'DM Sans',sans-serif;--fm:'Space Mono',monospace;
+  --blue:#4a9eff;--blue-bg:#4a9eff22;--blue-line:#4a9eff66;
+  --pink:#e91e63;--gold:#e8c840;--trace:#8d9aaa;
+  --on-acc:#0f1117;--tint-acc:#e8943a22;--tint-red:#f0606022;
+  --grid:#ffffff10;--field:#1e2235;
+  --pos-prone:#3db87a;--pos-sitting:#4a9eff;--pos-kneeling:#b87adb;--pos-standing:#e8943a;
+  --pos-twohand:#2e8a9e;--pos-stronghand:#a0685c;--pos-weakhand:#f06060;
+  --pos-bench:#8d9aaa;--pos-unsupported:#d4af37;--pos-unspecified:#7a7f96;
 }
 body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;-webkit-font-smoothing:antialiased}
 .app{max-width:430px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
 .hdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:calc(11px + var(--safe-t)) calc(15px + var(--safe-r)) 11px calc(15px + var(--safe-l));display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
 .htitle{font-family:var(--fh);font-size:17px;font-weight:700;letter-spacing:.01em}
 .hsub{font-family:var(--fm);font-size:9px;color:var(--dim);letter-spacing:.12em;margin-top:1px}
-.badd{background:var(--acc);color:#0f1117;border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}
+.badd{background:var(--acc);color:var(--on-acc);border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}
 .bback{background:none;border:none;color:var(--acc);font-family:var(--fh);font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:3px;letter-spacing:.01em}
 /* Every screen starts the same distance below the header. It used to be
    whatever the first element happened to bring with it, which was 12px on
@@ -2138,13 +2249,13 @@ body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;
 .field{display:flex;flex-direction:column;gap:5px}
 .lbl{font-family:var(--fm);font-size:9px;color:var(--acc);letter-spacing:.1em;text-transform:uppercase}
 .inp{background:var(--surf2);border:1.5px solid var(--bdr);border-radius:5px;padding:9px 11px;color:var(--ink);font-family:var(--fm);font-size:13px;outline:none;width:100%;transition:border-color .15s;-webkit-appearance:none}
-.inp:focus{border-color:var(--acc);background:#1e2235}
+.inp:focus{border-color:var(--acc);background:var(--field)}
 select.inp{cursor:pointer}
 .row2{display:flex;gap:9px}
 .row2 .field{flex:1}
-.bprim{background:var(--acc);color:#0f1117;border:none;border-radius:5px;padding:12px;font-family:var(--fh);font-size:15px;font-weight:700;cursor:pointer;width:100%}
+.bprim{background:var(--acc);color:var(--on-acc);border:none;border-radius:5px;padding:12px;font-family:var(--fh);font-size:15px;font-weight:700;cursor:pointer;width:100%}
 .bprim:active{filter:brightness(.88)}
-.bgreen{background:var(--green);color:#0f1117;border:none;border-radius:5px;padding:12px;font-family:var(--fh);font-size:15px;font-weight:700;cursor:pointer;width:100%}
+.bgreen{background:var(--green);color:var(--on-acc);border:none;border-radius:5px;padding:12px;font-family:var(--fh);font-size:15px;font-weight:700;cursor:pointer;width:100%}
 .bgreen:active{filter:brightness(.88)}
 .bsec{background:transparent;color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:11px;font-family:var(--fh);font-size:14px;cursor:pointer;width:100%;margin-top:3px}
 .bdel{background:none;border:none;color:var(--red);font-family:var(--fm);font-size:10px;cursor:pointer;letter-spacing:.05em}
@@ -6155,6 +6266,32 @@ function App() {
   const [liveSess, setLiveSess] = useState(null);
   const [relayName, setRelayName] = useState('');
   const [showJoin, setShowJoin] = useState(false);
+  /* Read synchronously rather than in the boot loader with everything else:
+   * <head> has already applied it, and this is only the copy the radio button
+   * is drawn from. `themeSaveFailed` is null until a choice is actually made,
+   * so a browser that cannot store it says nothing until it has something to
+   * be honest about. */
+  const [themePref, setThemePref] = useState(readThemePref);
+  const [themeSaveFailed, setThemeSaveFailed] = useState(false);
+
+  /* Following the device means following it while the app is OPEN -- phones
+   * flip at dusk, and one left on the bench through it would otherwise stay in
+   * yesterday's theme until relaunch. The stylesheet repaints itself off the
+   * media query; this exists for the status-bar colour and for the line on the
+   * Appearance screen that names the theme in force. */
+  useEffect(() => {
+    if (themePref !== 'system') return;
+    let mq;
+    try { mq = window.matchMedia && matchMedia('(prefers-color-scheme: dark)'); } catch { return; }
+    if (!mq) return;
+    const onChange = () => { applyTheme('system'); setThemePref('system'); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', onChange);
+      else if (mq.removeListener) mq.removeListener(onChange);
+    };
+  }, [themePref]);
 
   /* Which collections could not be READ at boot.
    *
@@ -6713,6 +6850,9 @@ function App() {
       core.isSignedIn() ? `signed in as ${core.getUser()?.email || 'you'}` : 'not signed in']] : []),
     ['backup', 'Backup & data',
       backupNudge ? 'needs attention' : 'cloud and file'],
+    ['appearance', 'Appearance', themePref === 'system'
+      ? `follows this device — ${effectiveTheme('system') === 'dark' ? 'night' : 'day'} right now`
+      : themePref === 'dark' ? 'night, always' : 'day, always'],
   ];
 
   if (!ready) return <><style>{S}</style><div style={{padding:40,fontFamily:'var(--fm)',fontSize:11,color:'var(--dim)'}}>loading...</div></>;
@@ -7021,6 +7161,10 @@ function App() {
                   firearms={firearms} onFirearmsUpdated={saveFirearms}
                   onGoToAmmo={()=>setMore('firearms')} />
               )}
+              {more==='appearance' && (
+                <AppearanceCard pref={themePref} failedToSave={themeSaveFailed}
+                  onPick={v=>{ setThemeSaveFailed(!applyTheme(v)); setThemePref(v); }} />
+              )}
               {more==='backup' && (
                 <>
                   <CloudBackupCard core={core} data={localData}
@@ -7205,7 +7349,7 @@ function SessionsList({ sessions, matches, getTarget, onOpenSession, onDelMatch,
               padding:'8px 11px',
               borderRadius:5,
               border:`1.5px solid ${activeFilterCount > 0 ? 'var(--acc)' : 'var(--bdr)'}`,
-              background: activeFilterCount > 0 ? '#e8943a22' : 'var(--surf2)',
+              background: activeFilterCount > 0 ? 'var(--tint-acc)' : 'var(--surf2)',
               color: activeFilterCount > 0 ? 'var(--acc)' : 'var(--dim)',
               fontFamily:'var(--fm)',fontSize:10,fontWeight:700,
               cursor:'pointer',whiteSpace:'nowrap',
@@ -7898,7 +8042,7 @@ function CallErrorChart({ shots, target, yards }) {
             const y = gy(f * maxDist);
             return (
               <g key={f}>
-                <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="#ffffff10" strokeWidth={1}/>
+                <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="var(--grid)" strokeWidth={1}/>
                 <text x={PL-3} y={y+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{(f*maxDist).toFixed(2)}"</text>
               </g>
             );
@@ -8038,7 +8182,7 @@ function ShotInspector({ shot, target }) {
       {/* Legend */}
       <div style={{display:'flex',justifyContent:'center',gap:14,marginTop:7,fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>
         {trace.length > 1 && (
-          <span><span style={{color:'#8d9aaa',fontWeight:700}}>━━</span> hold</span>
+          <span><span style={{color:'var(--trace)',fontWeight:700}}>━━</span> hold</span>
         )}
         {callXY && (
           <span><span style={{color:'#e8943a',fontWeight:700}}>⊕</span> call</span>
@@ -8081,10 +8225,10 @@ function ShotInspector({ shot, target }) {
               <div style={{display:'flex',alignItems:'center',gap:5}}>
                 <span style={{color:'var(--dim)'}}>W</span>
                 <span style={{
-                  color: shot.wind === 0 ? 'var(--dim)' : '#4a9eff',
+                  color: shot.wind === 0 ? 'var(--dim)' : 'var(--blue)',
                   fontWeight:700,minWidth:44,textAlign:'right',
                 }}>{fmtMoaSigned(shot.wind)}</span>
-                <span style={{color:shot.wind === 0 ? 'var(--bdr)' : '#4a9eff',fontSize:11,fontWeight:700}}>
+                <span style={{color:shot.wind === 0 ? 'var(--bdr)' : 'var(--blue)',fontSize:11,fontWeight:700}}>
                   {shot.wind > 0 ? '→' : shot.wind < 0 ? '←' : '·'}
                 </span>
               </div>
@@ -8101,7 +8245,7 @@ function ShotInspector({ shot, target }) {
           {typeof shot.windCallMoa === 'number' && (
             <div style={{display:'flex',alignItems:'center',gap:4}}>
               <span style={{color:'var(--dim)'}}>hold</span>
-              <span style={{color:'#4a9eff',fontWeight:700}}>
+              <span style={{color:'var(--blue)',fontWeight:700}}>
                 {shot.windCallMoa} MOA {shot.windCallDir}
               </span>
             </div>
@@ -8317,7 +8461,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
               <div style={{margin:'0 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{display:'flex',justifyContent:'space-between',gap:14,marginBottom:8}}>
                   <div style={{flex:1}}>
-                    <div style={{fontFamily:'var(--fm)',fontSize:10,color:'#4a9eff',fontWeight:700}}>{wa.absMeanErr.toFixed(2)} MOA</div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--blue)',fontWeight:700}}>{wa.absMeanErr.toFixed(2)} MOA</div>
                     <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>mean abs error</div>
                   </div>
                   <div style={{flex:1}}>
@@ -8355,9 +8499,9 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                   if (e.target.closest('.delx,button')) return;
                   setExpandedShot(prev => prev === sh.id ? null : sh.id);
                 }}>
-                <div className="sn" style={{color: sh.isSighter ? '#4a9eff' : 'var(--dim)'}}>{shotLabel(shots,i)}</div>
+                <div className="sn" style={{color: sh.isSighter ? 'var(--blue)' : 'var(--dim)'}}>{shotLabel(shots,i)}</div>
                 {sh.isSighter
-                  ? <div style={{fontFamily:'var(--fm)',fontSize:9,fontWeight:700,color:'#4a9eff',width:24,textAlign:'center',border:'1px solid #4a9eff44',borderRadius:3,padding:'1px 0'}}>S</div>
+                  ? <div style={{fontFamily:'var(--fm)',fontSize:9,fontWeight:700,color:'var(--blue)',width:24,textAlign:'center',border:'1px solid var(--blue-line)',borderRadius:3,padding:'1px 0'}}>S</div>
                   : <div className="sr-ring" style={{
                       color:'var(--ink)',
                       borderLeft:`3px solid ${ringColor(target, sh.ring)}`,
@@ -8368,7 +8512,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                 <div className="scall">{sh.isSighter ? 'sighter · ' : ''}{sh.clockH}:{String(sh.clockM).padStart(2,'0')}</div>
                 <div className="ssight">E{fmtMoaSigned(sh.elev)} W{fmtMoaSigned(sh.wind)}</div>
                 {typeof sh.windCallMoa === 'number' && (
-                  <div style={{fontFamily:'var(--fm)',fontSize:8,color:'#4a9eff',border:'1px solid #4a9eff66',borderRadius:3,padding:'1px 4px',letterSpacing:'.05em',flexShrink:0}}>
+                  <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--blue)',border:'1px solid var(--blue-line)',borderRadius:3,padding:'1px 4px',letterSpacing:'.05em',flexShrink:0}}>
                     wc {sh.windCallMoa}{sh.windCallDir}
                   </div>
                 )}
@@ -8386,7 +8530,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                   );
                 })()}
                 {sh.holdTrace && sh.holdTrace.length > 1 && (
-                  <div style={{fontFamily:'var(--fm)',fontSize:8,color:'#8d9aaa',border:'1px solid #8d9aaa66',borderRadius:3,padding:'1px 4px',letterSpacing:'.05em',flexShrink:0}} title="Hold trace recorded">
+                  <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--trace)',border:'1px solid var(--trace)',borderRadius:3,padding:'1px 4px',letterSpacing:'.05em',flexShrink:0}} title="Hold trace recorded">
                     trc
                   </div>
                 )}
@@ -8899,17 +9043,17 @@ function TapInput({
     hold: {
       label: 'Trace your hold',
       hint: 'Drag to trace your wobble path. Release to advance to call. Skip if you don\'t need to record sight movement.',
-      color: '#8d9aaa',
+      color: 'var(--trace)',
     },
     call: {
       label: 'Call your shot',
       hint: 'Tap where the sights were when the trigger broke. Auto-advances to shot. Re-tap to correct.',
-      color: '#e8943a',
+      color: 'var(--acc)',
     },
     shot: {
       label: 'Mark actual impact',
       hint: 'Tap where the round actually hit. Re-tap to correct.',
-      color: '#e91e63',
+      color: 'var(--pink)',
     },
   };
   const cfg = stepConfig[step];
@@ -8947,7 +9091,7 @@ function TapInput({
       )}
       {isRapid && (
         <div style={{
-          padding:'7px 10px',background:'#e8943a22',border:'1.5px solid var(--acc)',
+          padding:'7px 10px',background:'var(--tint-acc)',border:'1.5px solid var(--acc)',
           borderRadius:5,fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',
           fontWeight:700,letterSpacing:'.08em',textAlign:'center',
         }}>
@@ -9167,7 +9311,7 @@ function TapInput({
         const callDistIn = callXY ? Math.hypot(tapXY.x - callXY.x, tapXY.y - callXY.y) : null;
         return (
           <div style={{background:'var(--surf2)',border:'1px solid var(--bdr)',borderRadius:5,padding:'8px 11px',fontFamily:'var(--fm)',fontSize:10,color:'var(--ink)',display:'flex',gap:14,flexWrap:'wrap'}}>
-            <div><span style={{color:'var(--dim)'}}>shot </span><span style={{color: derived.ring==='M' ? '#c0392b' : '#e91e63',fontWeight:700}}>{derived.ring==='M' ? `MISS @ ${derived.clockH}:${String(derived.clockM).padStart(2,'0')}` : `${derived.ring} @ ${derived.clockH}:${String(derived.clockM).padStart(2,'0')}`}</span></div>
+            <div><span style={{color:'var(--dim)'}}>shot </span><span style={{color: derived.ring==='M' ? 'var(--red)' : 'var(--pink)',fontWeight:700}}>{derived.ring==='M' ? `MISS @ ${derived.clockH}:${String(derived.clockM).padStart(2,'0')}` : `${derived.ring} @ ${derived.clockH}:${String(derived.clockM).padStart(2,'0')}`}</span></div>
             {callDistIn !== null && (
               <div><span style={{color:'var(--dim)'}}>call err </span><span style={{color:'var(--acc)',fontWeight:700}}>{callDistIn.toFixed(2)}"</span></div>
             )}
@@ -9182,7 +9326,7 @@ function TapInput({
               return (
                 <div style={{flexBasis:'100%',marginTop:2,paddingTop:6,borderTop:'1px solid var(--bdr)',display:'flex',gap:14,flexWrap:'wrap'}}>
                   <span style={{color:'var(--dim)'}}>to center: </span>
-                  <span><span style={{color:'#4a9eff',fontWeight:700}}>{moaX.toFixed(2)} MOA {wDir}</span><span style={{color:'var(--dim)'}}> · {Math.round(moaX/MOA_PER_CLICK)} clk</span></span>
+                  <span><span style={{color:'var(--blue)',fontWeight:700}}>{moaX.toFixed(2)} MOA {wDir}</span><span style={{color:'var(--dim)'}}> · {Math.round(moaX/MOA_PER_CLICK)} clk</span></span>
                   <span><span style={{color:'var(--acc)',fontWeight:700}}>{moaY.toFixed(2)} MOA {eDir}</span><span style={{color:'var(--dim)'}}> · {Math.round(moaY/MOA_PER_CLICK)} clk</span></span>
                 </div>
               );
@@ -9623,7 +9767,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                   fontFamily:'var(--fm)',fontSize:10,color:'var(--ink)',
                 }}>
                   <div style={{color:'var(--acc)',fontWeight:700}}>E{fmtMoaSigned(elev)}</div>
-                  <div style={{color:'#4a9eff',fontWeight:700,marginTop:1}}>W{fmtMoaSigned(wind)}</div>
+                  <div style={{color:'var(--blue)',fontWeight:700,marginTop:1}}>W{fmtMoaSigned(wind)}</div>
                   <div style={{color:'var(--dim)',fontSize:7,letterSpacing:'.08em',marginTop:1}}>MOA</div>
                 </div>
                 <button
@@ -9681,7 +9825,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
             <div>
               <div className="lbl" style={{marginBottom:5,display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
                 <span>Wind <span style={{textTransform:'none',letterSpacing:0,color:'var(--dim)',fontWeight:400}}>· clock = direction FROM</span></span>
-                <span style={{fontFamily:'var(--fm)',fontSize:9,color:perShotWind!==''&&perShotWindDir!==null?'#4a9eff':'var(--dim)',textTransform:'none',letterSpacing:0,fontWeight:700}}>
+                <span style={{fontFamily:'var(--fm)',fontSize:9,color:perShotWind!==''&&perShotWindDir!==null?'var(--blue)':'var(--dim)',textTransform:'none',letterSpacing:0,fontWeight:700}}>
                   {perShotWind!=='' && perShotWindDir!==null
                     ? `${perShotWind}mph @ ${perShotWindDir}`
                     : 'tap to set'}
@@ -9716,19 +9860,19 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                         flex:1,minWidth:0,
                         padding:'5px 4px 4px',
                         borderRadius:5,
-                        border:`1.5px solid ${sel?'#4a9eff':'var(--bdr)'}`,
-                        background: sel?'#4a9eff22':'var(--surf2)',
-                        color: sel?'#4a9eff':'var(--dim)',
+                        border:`1.5px solid ${sel?'var(--blue)':'var(--bdr)'}`,
+                        background: sel?'var(--blue-bg)':'var(--surf2)',
+                        color: sel?'var(--blue)':'var(--dim)',
                         fontFamily:'var(--fm)',fontSize:8,fontWeight:700,
                         cursor:'pointer',
                         display:'flex',flexDirection:'column',alignItems:'center',gap:2,
                       }}>
                       <svg viewBox="0 0 24 22" width={22} height={20} style={{display:'block'}}>
                         {/* Pole */}
-                        <line x1={8} y1={2} x2={8} y2={20} stroke={sel?'#4a9eff':'var(--dim)'} strokeWidth={1.2} strokeLinecap="round"/>
+                        <line x1={8} y1={2} x2={8} y2={20} stroke={sel?'var(--blue)':'var(--dim)'} strokeWidth={1.2} strokeLinecap="round"/>
                         {/* Flag triangle */}
                         <path d={`M 8 ${baseAY} L ${tipX.toFixed(1)} ${tipY.toFixed(1)} L 8 ${baseBY} Z`}
-                          fill={sel?'#4a9eff':'var(--ink)'}
+                          fill={sel?'var(--blue)':'var(--ink)'}
                           opacity={p.angle===0?0.5:0.9}/>
                       </svg>
                       <span>{p.lbl}</span>
@@ -9755,9 +9899,9 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                         flex:1,minWidth:0,
                         padding:'8px 4px',
                         borderRadius:5,
-                        border:`1.5px solid ${sel?'#4a9eff':'var(--bdr)'}`,
-                        background: sel?'#4a9eff22':'var(--surf2)',
-                        color: sel?'#4a9eff':'var(--ink)',
+                        border:`1.5px solid ${sel?'var(--blue)':'var(--bdr)'}`,
+                        background: sel?'var(--blue-bg)':'var(--surf2)',
+                        color: sel?'var(--blue)':'var(--ink)',
                         fontFamily:'var(--fm)',fontSize:10,fontWeight:700,
                         cursor:'pointer',
                       }}>
@@ -9773,9 +9917,9 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                     width:42,
                     padding:'8px 6px',
                     borderRadius:5,
-                    border:`1.5px solid ${perShotWind && !['0','3','5','8','10','15','20'].includes(String(perShotWind)) ? '#4a9eff' : 'var(--bdr)'}`,
+                    border:`1.5px solid ${perShotWind && !['0','3','5','8','10','15','20'].includes(String(perShotWind)) ? 'var(--blue)' : 'var(--bdr)'}`,
                     background:'var(--surf2)',
-                    color: perShotWind && !['0','3','5','8','10','15','20'].includes(String(perShotWind)) ? '#4a9eff' : 'var(--ink)',
+                    color: perShotWind && !['0','3','5','8','10','15','20'].includes(String(perShotWind)) ? 'var(--blue)' : 'var(--ink)',
                     fontFamily:'var(--fm)',fontSize:10,fontWeight:700,
                     textAlign:'center',outline:'none',
                   }}/>
@@ -9836,8 +9980,8 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                         <>
                           <line x1={30} y1={30}
                             x2={30 + 22*Math.cos(rad)} y2={30 + 22*Math.sin(rad)}
-                            stroke="#4a9eff" strokeWidth={1.8} strokeLinecap="round"/>
-                          <circle cx={30} cy={30} r={2.5} fill="#4a9eff"/>
+                            stroke="var(--blue)" strokeWidth={1.8} strokeLinecap="round"/>
+                          <circle cx={30} cy={30} r={2.5} fill="var(--blue)"/>
                         </>
                       );
                     })()}
@@ -9862,9 +10006,9 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                       <button key={h} onClick={()=>setPerShotWindDir(h)}
                         style={{
                           padding:'7px 4px',borderRadius:4,
-                          border:`1.5px solid ${sel?'#4a9eff':'var(--bdr)'}`,
-                          background: sel?'#4a9eff22':'var(--surf)',
-                          color: sel?'#4a9eff':'var(--dim)',
+                          border:`1.5px solid ${sel?'var(--blue)':'var(--bdr)'}`,
+                          background: sel?'var(--blue-bg)':'var(--surf)',
+                          color: sel?'var(--blue)':'var(--dim)',
                           fontFamily:'var(--fm)',fontSize:9,fontWeight:700,
                           cursor:'pointer',
                         }}>{lbl}</button>
@@ -9888,10 +10032,10 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                 style={{
                   width:'100%',marginTop:5,
                   background:'none',
-                  border:`1px dashed ${showWindCall||windCallMoa?'#4a9eff':'var(--bdr)'}`,
+                  border:`1px dashed ${showWindCall||windCallMoa?'var(--blue)':'var(--bdr)'}`,
                   borderRadius:5,padding:'5px 9px',
                   fontFamily:'var(--fm)',fontSize:9,
-                  color:showWindCall||windCallMoa?'#4a9eff':'var(--dim)',
+                  color:showWindCall||windCallMoa?'var(--blue)':'var(--dim)',
                   cursor:'pointer',textAlign:'left',
                 }}>
                 {showWindCall
@@ -9921,9 +10065,9 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                       <button key={d} onClick={()=>setWindCallDir(d)}
                         style={{
                           padding:'4px 10px',borderRadius:4,
-                          border:`1.5px solid ${windCallDir===d?'#4a9eff':'var(--bdr)'}`,
-                          background:windCallDir===d?'#4a9eff22':'none',
-                          color:windCallDir===d?'#4a9eff':'var(--dim)',
+                          border:`1.5px solid ${windCallDir===d?'var(--blue)':'var(--bdr)'}`,
+                          background:windCallDir===d?'var(--blue-bg)':'none',
+                          color:windCallDir===d?'var(--blue)':'var(--dim)',
                           fontFamily:'var(--fm)',fontSize:10,fontWeight:700,cursor:'pointer',
                         }}>{d}</button>
                     ))}
@@ -9937,12 +10081,12 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
               <button onClick={()=>setIsSighter(v=>!v)}
                 style={{
                   flex:1,
-                  border:`1.5px solid ${isSighter?'#4a9eff':'var(--bdr)'}`,
+                  border:`1.5px solid ${isSighter?'var(--blue)':'var(--bdr)'}`,
                   borderRadius:5,padding:'7px 10px',
                   fontFamily:'var(--fm)',fontSize:10,
-                  color:isSighter?'#4a9eff':'var(--dim)',
+                  color:isSighter?'var(--blue)':'var(--dim)',
                   cursor:'pointer',textAlign:'center',
-                  background:isSighter?'#4a9eff18':'none',
+                  background:isSighter?'var(--blue-bg)':'none',
                 }}>
                 {isSighter ? '● Sighter' : '○ Sighter'}
               </button>
@@ -9984,19 +10128,29 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
 /* ── Analytics ── */
 
 // Stable colour assignment per position name. Returns CSS colour string.
+/* The firing positions, hue-coded. One hue per position, held across the
+ * legend, the series line, the summary rows and a card's left edge, so a
+ * colour learned once means the same thing everywhere it appears.
+ *
+ * Tokens rather than literals because these are read as TEXT at least as often
+ * as they are drawn as a line, and every one of those surfaces now has two
+ * grounds. The night column is the palette as it shipped; the day column is
+ * the same ten HUES taken down until each clears 4.5:1 on paper. The hue is
+ * what carries the meaning -- the lightness was only ever chosen for a dark
+ * ground, and on paper it was choosing illegibility. */
 const POSITION_COLORS = {
-  'Prone':       '#3db87a', // green — most stable position visually mirrors low-spread expectation
-  'Sitting':     '#4a9eff', // blue
-  'Kneeling':    '#b87adb', // purple
-  'Standing':    '#e8943a', // amber — the high-variance offhand line is the "headline"
-  'Two-hand':    '#2e8a9e', // teal — was #3db87a, identical to Prone; distinct hue+lightness from all others here
-  'Strong-hand': '#a0685c', // brown — was #e8943a, identical to Standing
-  'Weak-hand':   '#f06060',
-  'Bench':       '#8d9aaa', // grey-blue (rested = baseline)
-  'Unsupported': '#d4af37',
-  'Unspecified': '#7a7f96', // dim
+  'Prone':       'var(--pos-prone)',       // green — the steadiest position gets the low-spread colour
+  'Sitting':     'var(--pos-sitting)',     // blue
+  'Kneeling':    'var(--pos-kneeling)',    // purple
+  'Standing':    'var(--pos-standing)',    // amber — the high-variance offhand line is the "headline"
+  'Two-hand':    'var(--pos-twohand)',     // teal — distinct in hue AND lightness from every other here
+  'Strong-hand': 'var(--pos-stronghand)',  // brown
+  'Weak-hand':   'var(--pos-weakhand)',
+  'Bench':       'var(--pos-bench)',       // grey-blue (rested = baseline)
+  'Unsupported': 'var(--pos-unsupported)',
+  'Unspecified': 'var(--pos-unspecified)', // dim
 };
-function positionColor(p) { return POSITION_COLORS[p] || '#7a7f96'; }
+function positionColor(p) { return POSITION_COLORS[p] || 'var(--pos-unspecified)'; }
 
 // Course-of-fire ordering (stability order), not alphabetical: prone → sitting →
 // kneeling → standing for rifle, then pistol holds, then rests, unspecified last.
@@ -10730,7 +10884,7 @@ function SolverTab({ sessions, firearms, ammo }) {
                 </span>
                 <span style={{ fontFamily: 'var(--fm)', fontSize: 11, fontWeight: 700 }}>
                   <span style={{ color: 'var(--acc)' }}>E {o.elevMoa >= 0 ? '+' : ''}{o.elevMoa.toFixed(2)}</span>
-                  <span style={{ color: '#4a9eff', marginLeft: 8 }}>W {o.windMoa >= 0 ? '+' : ''}{o.windMoa.toFixed(2)}</span>
+                  <span style={{ color: 'var(--blue)', marginLeft: 8 }}>W {o.windMoa >= 0 ? '+' : ''}{o.windMoa.toFixed(2)}</span>
                 </span>
               </div>
               <div style={{ ...note, marginTop: 4 }}>
@@ -10824,7 +10978,7 @@ function DopeTab({ sessions, firearms, getTarget }) {
       {e.noDope ? <span style={{color:'var(--dim)',fontWeight:400,fontSize:11}}>no dial logged</span> : <>
         <span style={{color:'var(--acc)'}}>E {fmtMoaSigned(e.elev)}</span>
         <span style={{color:'var(--dim)',fontWeight:400}}> {e.elev>0?'↑':e.elev<0?'↓':'·'}  </span>
-        <span style={{color:'#4a9eff'}}>W {fmtMoaSigned(e.wind)}</span>
+        <span style={{color:'var(--blue)'}}>W {fmtMoaSigned(e.wind)}</span>
         <span style={{color:'var(--dim)',fontWeight:400}}> {e.wind>0?'→':e.wind<0?'←':'·'}</span>
       </>}
     </span>
@@ -11176,11 +11330,11 @@ function SeasonBudgetCard({ sessions, getTarget }) {
               <span style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)'}}>{r.sessions} sess</span>
             </div>
             <div style={{display:'flex',height:4,borderRadius:2,overflow:'hidden',marginTop:3,background:'var(--bg)'}}>
-              <div style={{width:`${(r.dPer10/maxTotal)*100}%`,background:'#4a9eff'}}/>
+              <div style={{width:`${(r.dPer10/maxTotal)*100}%`,background:'var(--blue)'}}/>
               <div style={{width:`${(r.oPer10/maxTotal)*100}%`,background:'var(--acc)'}}/>
             </div>
             <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',marginTop:2}}>
-              <span style={{color:'#4a9eff'}}>dispersion −{r.dPer10.toFixed(1)}</span>
+              <span style={{color:'var(--blue)'}}>dispersion −{r.dPer10.toFixed(1)}</span>
               <span> · </span>
               <span style={{color:'var(--acc)'}}>offset −{r.oPer10.toFixed(1)}</span>
             </div>
@@ -11356,7 +11510,7 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
       <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:6}}>Lifetime wind call · {rollingWindAcc.n} shots</div>
       <div style={{display:'flex',gap:18}}>
         <div>
-          <div style={{fontFamily:'var(--fm)',fontSize:14,color:'#4a9eff',fontWeight:700}}>{rollingWindAcc.absMean.toFixed(2)}</div>
+          <div style={{fontFamily:'var(--fm)',fontSize:14,color:'var(--blue)',fontWeight:700}}>{rollingWindAcc.absMean.toFixed(2)}</div>
           <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)'}}>MOA avg error</div>
         </div>
         <div>
@@ -11429,14 +11583,14 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
             No position &amp; distance has 2+ sessions yet. Log more under the same position and distance to see trends.
           </div>
         ) : (
-          <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'#1a1d27'}}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'var(--surf)'}}>
             {/* Y gridlines */}
             {[0,.25,.5,.75,1].map(f=>{
               const y=gy(f*maxES);
               return (
                 <g key={f}>
-                  <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="#ffffff10" strokeWidth={1}/>
-                  <text x={PL-3} y={+y+3} textAnchor="end" fill="#7a7f96" fontSize={7} fontFamily="Space Mono,monospace">{(f*maxES).toFixed(1)}</text>
+                  <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="var(--grid)" strokeWidth={1}/>
+                  <text x={PL-3} y={+y+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{(f*maxES).toFixed(1)}</text>
                 </g>
               );
             })}
@@ -11464,7 +11618,7 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
 
             {/* X-axis date ticks (sparse) */}
             {data.map((d,i)=>(i%(Math.max(1,Math.floor(data.length/4)))===0)&&(
-              <text key={i} x={gx(i)} y={H-4} textAnchor="middle" fill="#7a7f96" fontSize={7} fontFamily="Space Mono,monospace">{d.date.slice(5)}</text>
+              <text key={i} x={gx(i)} y={H-4} textAnchor="middle" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{d.date.slice(5)}</text>
             ))}
           </svg>
         )}
@@ -11681,14 +11835,14 @@ function GroupPlot({ pts, target, shots, yards, partners }) {
       {ell && (
         <div style={{padding:'8px 12px',borderTop:'1px solid var(--bdr)',display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
           <div>
-            <div style={{fontFamily:'var(--fm)',fontSize:13,fontWeight:700,color:'#e8c840'}}>
+            <div style={{fontFamily:'var(--fm)',fontSize:13,fontWeight:700,color:'var(--gold)'}}>
               {moa(ell.sigmaX)!==null ? moa(ell.sigmaX).toFixed(2) : ell.sigmaX.toFixed(2)}
               <span style={{color:'var(--dim)',fontSize:9,fontWeight:400}}> {moa(ell.sigmaX)!==null?'MOA':'in'} ↔</span>
             </div>
             <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)'}}>horizontal σ</div>
           </div>
           <div>
-            <div style={{fontFamily:'var(--fm)',fontSize:13,fontWeight:700,color:'#e8c840'}}>
+            <div style={{fontFamily:'var(--fm)',fontSize:13,fontWeight:700,color:'var(--gold)'}}>
               {moa(ell.sigmaY)!==null ? moa(ell.sigmaY).toFixed(2) : ell.sigmaY.toFixed(2)}
               <span style={{color:'var(--dim)',fontSize:9,fontWeight:400}}> {moa(ell.sigmaY)!==null?'MOA':'in'} ↕</span>
             </div>
@@ -11696,7 +11850,7 @@ function GroupPlot({ pts, target, shots, yards, partners }) {
           </div>
           <div style={{flex:1,minWidth:120}}>
             <div style={{fontFamily:'var(--fm)',fontSize:11,fontWeight:700,
-              color: dominant==='vertical'?'var(--acc)':dominant==='horizontal'?'#4a9eff':dominant==='diagonal'?'#e8c840':'var(--green)'}}>
+              color: dominant==='vertical'?'var(--acc)':dominant==='horizontal'?'var(--blue)':dominant==='diagonal'?'var(--gold)':'var(--green)'}}>
               {dominant==='round' ? 'round group' : `${dominant} ${aspectEll.toFixed(1)}:1`}
             </div>
             <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',lineHeight:1.4}}>
@@ -11743,7 +11897,7 @@ function ScoreDecomposition({ session, target, shots }) {
       <div style={{margin:'0 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
         <div style={{display:'flex',justifyContent:'space-between',gap:12,marginBottom:8}}>
           <div style={{flex:1}}>
-            <div style={{fontFamily:'var(--fm)',fontSize:12,color:'#4a9eff',fontWeight:700}}>−{dec.lostDispersion.toFixed(1)}</div>
+            <div style={{fontFamily:'var(--fm)',fontSize:12,color:'var(--blue)',fontWeight:700}}>−{dec.lostDispersion.toFixed(1)}</div>
             <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.06em'}}>to dispersion</div>
           </div>
           <div style={{flex:1}}>
@@ -11782,22 +11936,22 @@ function SightChart({ shots }) {
     <div style={{background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,overflow:'hidden'}}>
       <div style={{padding:'8px 12px',borderBottom:'1px solid var(--bdr)',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',display:'flex',justifyContent:'space-between'}}>
         <span>Sight settings per shot · MOA</span>
-        <span><span style={{color:'var(--acc)'}}>— elev</span>  <span style={{color:'#3db87a'}}>-- wind</span></span>
+        <span><span style={{color:'var(--acc)'}}>— elev</span>  <span style={{color:'var(--green)'}}>-- wind</span></span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'#1a1d27'}}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'var(--surf)'}}>
         {[yMin, (yMin+yMax)/2, yMax].map((v,i)=>{
           const y=gy(v);
           return <g key={i}>
-            <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="#ffffff10" strokeWidth={1}/>
-            <text x={PL-3} y={+y+3} textAnchor="end" fill="#7a7f96" fontSize={7} fontFamily="Space Mono,monospace">{v.toFixed(2)}</text>
+            <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="var(--grid)" strokeWidth={1}/>
+            <text x={PL-3} y={+y+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{v.toFixed(2)}</text>
           </g>;
         })}
         <path d={ep} fill="none" stroke="var(--acc)" strokeWidth={1.8}/>
         {elevs.map((v,i)=><circle key={i} cx={gx(i)} cy={gy(v)} r={3} fill="var(--acc)"/>)}
-        <path d={wp} fill="none" stroke="#3db87a" strokeWidth={1.5} strokeDasharray="4 2"/>
-        {winds.map((v,i)=><circle key={i} cx={gx(i)} cy={gy(v)} r={2.5} fill="#3db87a"/>)}
+        <path d={wp} fill="none" stroke="var(--green)" strokeWidth={1.5} strokeDasharray="4 2"/>
+        {winds.map((v,i)=><circle key={i} cx={gx(i)} cy={gy(v)} r={2.5} fill="var(--green)"/>)}
         {shots.map((sh,i)=>(i%(Math.max(1,Math.floor(shots.length/5)))===0)&&(
-          <text key={i} x={gx(i)} y={H-3} textAnchor="middle" fill="#7a7f96" fontSize={7} fontFamily="Space Mono,monospace">{shotLabel(shots,i)}</text>
+          <text key={i} x={gx(i)} y={H-3} textAnchor="middle" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{shotLabel(shots,i)}</text>
         ))}
       </svg>
     </div>
@@ -12323,6 +12477,65 @@ function useBenchImport({ core, ammo, onSaveAmmo }) {
 /* The stacked form of the importer, for a screen that has room for a card.
  * Both nodes are siblings here, so neither can end up inside the other's
  * layout. */
+/* Appearance. Three choices and a sentence each.
+ *
+ * "Follow this device" is the default and is listed first because it is the
+ * one that keeps being right: a phone that dims itself at dusk changes this
+ * app with it, mid-session, with no listener beyond the media query in the
+ * stylesheet. The other two are for the case the system cannot express --
+ * a bright range under a dark-mode phone, or the reverse. */
+function AppearanceCard({ pref, onPick, failedToSave }) {
+  const now = effectiveTheme(pref);
+  const OPTS = [
+    ['system', 'Follow this device',
+     `Whatever the phone or laptop is set to, including a schedule that flips it at dusk. Right now that is ${now === 'dark' ? 'night' : 'day'}.`],
+    ['light', 'Day',
+     'Target paper: the grey-green stock an SR face is printed on, with the same warm black on it.'],
+    ['dark', 'Night',
+     'The cool blue-black Zero shipped in, for a line or a bench after dark.'],
+  ];
+  return (
+    <>
+      <div className="mcard">
+        {OPTS.map(([v, title, note], i) => (
+          <div key={v} className="msub"
+               style={{padding:'11px 13px',
+                       /* The card draws the last edge itself; a rule here too is two lines. */
+                       borderBottom: i < OPTS.length - 1 ? '1px solid var(--bdr)' : 'none'}}
+               role="button" tabIndex={0}
+               aria-pressed={pref === v}
+               onClick={()=>onPick(v)}
+               onKeyDown={e=>{ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(v); } }}>
+            <div className="msub-body">
+              <div className="msub-name">{title}</div>
+              <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.6,marginTop:3}}>{note}</div>
+            </div>
+            <div style={{color:'var(--acc)',fontSize:14,fontWeight:700,width:18,textAlign:'right',
+                         visibility: pref === v ? 'visible' : 'hidden'}}>✓</div>
+          </div>
+        ))}
+      </div>
+      {failedToSave && (
+        <div style={{margin:'0 13px 7px',fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',lineHeight:1.6}}>
+          ⚠ Applied, but this browser will not remember it — the theme resets on reload.
+        </div>
+      )}
+      <div style={{margin:'0 13px 8px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.7}}>
+        A setting for THIS device, not for your account. It is not exported, not
+        backed up and not synced, so the phone you take to the range and the
+        laptop you review on can disagree — and usually should. Bench has the
+        same setting under More › Appearance; the two read one system
+        preference but keep their own override.
+        <div style={{marginTop:6}}>
+          Shot plots keep the night ground under both themes. A target face is
+          an object, not chrome, and a group has to look the same wherever you
+          open it.
+        </div>
+      </div>
+    </>
+  );
+}
+
 /* The More menu: a list of destinations, each with a line saying what is
  * behind it before you tap.
  *
@@ -12764,7 +12977,7 @@ function FirearmGroupTrend({ sessions, firearm, getTarget }) {
       <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',background:'var(--surf2)',borderRadius:5}}>
         {[0, maxES/2, maxES].map((v,i)=>(
           <g key={i}>
-            <line x1={PL} y1={gy(v)} x2={W-PR} y2={gy(v)} stroke="#ffffff10" strokeWidth={1}/>
+            <line x1={PL} y1={gy(v)} x2={W-PR} y2={gy(v)} stroke="var(--grid)" strokeWidth={1}/>
             <text x={PL-3} y={+gy(v)+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{v.toFixed(1)}</text>
           </g>
         ))}
@@ -12856,7 +13069,7 @@ function AddFirearmForm({ initial, onBack, onSave }) {
               Typical match barrel life estimates — rifles: .223 ~5,000 · 6mm/6.5mm ~2,500–3,500 · .308 ~3,000–4,000 · magnums ~1,200–2,000 rds. Pistols: 9mm ~50,000+ · .40 ~30,000 · .45 ACP ~30,000+. Numbers vary widely by chambering, pressure, and load.
             </div>
             {error && (
-              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'#f0606022',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'var(--tint-red)',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
                 {error}
               </div>
             )}
@@ -13072,14 +13285,14 @@ function AddTargetForm({ onBack, onSave }) {
             </div>
 
             {error && (
-              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'#f0606022',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'var(--tint-red)',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
                 {error}
               </div>
             )}
             <button className="bprim" onClick={doSave}>Save target</button>
             </>}
             {mode!=='rings' && error && (
-              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'#f0606022',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
+              <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--red)',background:'var(--tint-red)',border:'1px solid var(--red)',borderRadius:5,padding:'8px 11px'}}>
                 {error}
               </div>
             )}

@@ -11,6 +11,35 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<script>
+/* The theme, before the first paint.
+ *
+ * This is four lines in the <head> rather than anything in app.js because
+ * app.js is a 200KB inline script at the bottom of the body: by the time it
+ * runs the browser has already painted a full screen of the WRONG ground, and
+ * a white flash on the way into a night-adapted app is exactly the thing this
+ * feature exists to avoid. It reads one key and sets one attribute.
+ *
+ * No stored preference means no attribute, which is deliberate: the CSS then
+ * answers to prefers-color-scheme on its own and follows the system for the
+ * life of the page, with no listener needed. theme.Bench is written by
+ * More > Appearance and is per-device on purpose -- it describes the screen in
+ * your hand, not the account, so it stays out of the database and out of every
+ * export and cloud sync. */
+(function () {
+  try {
+    var t = localStorage.getItem('theme.Bench');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    var dark = t ? t === 'dark'
+      : !(window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches);
+    /* iOS paints the status bar from this, and it is the one piece of chrome
+     * the stylesheet cannot reach. Left at the launch colour in the file so
+     * the splash screen and the manifest still agree. */
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', dark ? '#0f1117' : '#e4e1d8');
+  } catch (e) { /* private mode, or no storage at all: the CSS default stands */ }
+})();
+</script>
 <style>
 /* Type stack, shared with Zero so the two apps read as one product.
  *
@@ -33,9 +62,44 @@
    * The accent deliberately does NOT match. Brass here, orange in Zero, is the
    * one thing that tells you at a glance which app you are looking at -- and
    * with both installed side by side on a home screen, that is worth keeping. */
-  --bg:#0f1117; --panel:#1a1d27; --panel2:#252836; --line:#353848;
-  --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
-  --brass:#c9a227; --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
+  /* ── Day and night ─────────────────────────────────────────────────────
+   *
+   * Two grounds, one product. Night is the palette both apps already shipped:
+   * a cool blue-black, because that is what a phone at a range after dark
+   * should be. Day is not an inversion of it -- it is TARGET PAPER, the
+   * grey-green stock an SR face is printed on, with the same warm black
+   * sitting on it. Both columns are the information site's, so the page that
+   * sells the app and the app itself are one palette.
+   *
+   * Light is the bare :root because that is what a browser with no opinion
+   * gets, and the media query below hands the system-preference case back to
+   * night. `data-theme` on <html> is the user's own override and wins over
+   * both -- see the boot script in <head> and Appearance under More.
+   *
+   * What does NOT move: brass is brass, the target face is target paper, and
+   * a marking colour is a bottle of paint. Those are objects, not chrome, and
+   * they look the same under both lights. */
+  color-scheme:light;
+  --bg:#e4e1d8; --panel:#efede6; --panel2:#f7f6f1; --line:#c9c5b8;
+  --ink:#1a1814; --ink2:#5f5a4c; --ink3:#6a6454;
+  /* Brass, one step deeper than the night value: #c9a227 on paper is 2.3:1,
+   * which is a decorative gold rather than a legible one, and this colour has
+   * to carry 10.5px tab labels and every inline link in the app. */
+  --brass:#77600d; --ok:#2e7d52; --warn:#9c6209; --bad:#b4472e;
+  --on-brass:#fff7ee;
+  --nav:rgba(243,241,234,.97);
+  --header:rgba(240,238,231,.94);
+  --shadow-1:0 6px 20px rgba(26,24,20,.14);
+  --shadow-2:0 3px 14px rgba(26,24,20,.18);
+  --ring:rgba(119,96,13,.30);
+  --hatch-a:#dcd8cc; --hatch-b:#ebe8df;
+  --ok-t:#1f5c39; --ok-b:#a8c9b4; --ok-bg:#dfeae2;
+  --warn-t:#6e4708; --warn-b:#d3bd8a; --warn-bg:#f0e7d3;
+  --bad-t:#8c2f1c; --bad-b:#d9b1a6; --bad-bg:#f2e0da;
+  --ban-bad-t:#7d2a19; --ban-bad-b:#d9b1a6; --ban-bad-bg:#f4e3dd;
+  --ban-warn-t:#63400a; --ban-warn-b:#d3bd8a; --ban-warn-bg:#f3ead6;
+  --ban-info-t:#21506e; --ban-info-b:#b4cbdb; --ban-info-bg:#e2ebf2;
+  --armed-bg:#b4472e; --armed-t:#fff7ee; --armed-b:#8c2f1c;
   --r:9px; --tap:44px;
   /* The viewport meta says viewport-fit=cover, which deliberately extends the
    * page UNDER the status bar and the home indicator. That only works if the
@@ -46,6 +110,48 @@
   --safe-b:env(safe-area-inset-bottom,0px);
   --safe-l:env(safe-area-inset-left,0px);
   --safe-r:env(safe-area-inset-right,0px);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+  color-scheme:dark;
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#252836; --line:#353848;
+  --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
+  --brass:#c9a227; --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
+  --on-brass:#20180a;
+  --nav:rgba(30,33,39,.97);
+  --header:rgba(22,24,28,.94);
+  --shadow-1:0 6px 20px rgba(0,0,0,.45);
+  --shadow-2:0 3px 14px rgba(0,0,0,.4);
+  --ring:rgba(201,162,39,.28);
+  --hatch-a:#2a2e36; --hatch-b:#20232a;
+  --ok-t:#8ce99a; --ok-b:#2b6b38; --ok-bg:#14301c;
+  --warn-t:#ffd866; --warn-b:#7a5c14; --warn-bg:#332711;
+  --bad-t:#ffa8a8; --bad-b:#8a2b2b; --bad-bg:#3a1414;
+  --ban-bad-t:#ffc9c9; --ban-bad-b:#8a2b2b; --ban-bad-bg:#2e1212;
+  --ban-warn-t:#ffe8a3; --ban-warn-b:#7a5c14; --ban-warn-bg:#2b2210;
+  --ban-info-t:#c5dcf0; --ban-info-b:#1b4a72; --ban-info-bg:#0f2231;
+  --armed-bg:#8a2b2b; --armed-t:#fff; --armed-b:#b34747;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0f1117; --panel:#1a1d27; --panel2:#252836; --line:#353848;
+  --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
+  --brass:#c9a227; --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
+  --on-brass:#20180a;
+  --nav:rgba(30,33,39,.97);
+  --header:rgba(22,24,28,.94);
+  --shadow-1:0 6px 20px rgba(0,0,0,.45);
+  --shadow-2:0 3px 14px rgba(0,0,0,.4);
+  --ring:rgba(201,162,39,.28);
+  --hatch-a:#2a2e36; --hatch-b:#20232a;
+  --ok-t:#8ce99a; --ok-b:#2b6b38; --ok-bg:#14301c;
+  --warn-t:#ffd866; --warn-b:#7a5c14; --warn-bg:#332711;
+  --bad-t:#ffa8a8; --bad-b:#8a2b2b; --bad-bg:#3a1414;
+  --ban-bad-t:#ffc9c9; --ban-bad-b:#8a2b2b; --ban-bad-bg:#2e1212;
+  --ban-warn-t:#ffe8a3; --ban-warn-b:#7a5c14; --ban-warn-bg:#2b2210;
+  --ban-info-t:#c5dcf0; --ban-info-b:#1b4a72; --ban-info-bg:#0f2231;
+  --armed-bg:#8a2b2b; --armed-t:#fff; --armed-b:#b34747;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0}
@@ -85,7 +191,7 @@ p{margin:0 0 .7em}
 button,input,select,textarea{font:inherit;color:inherit}
 code,.mono{font-family:var(--fm)}
 
-header{flex:0 0 auto;z-index:30;background:rgba(22,24,28,.94);
+header{flex:0 0 auto;z-index:30;background:var(--header);
   backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
   /* One declaration, not a shorthand plus an override: a `padding` shorthand
    * later in the rule silently resets padding-top, which is how this was
@@ -143,7 +249,7 @@ main{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain
  * on the platform does. The trade is that the labels sit close to the
  * indicator; the gain is that the bar looks deliberate. */
 nav.tabs{flex:0 0 auto;z-index:40;display:flex;
-  background:rgba(30,33,39,.97);
+  background:var(--nav);
   border-top:1px solid var(--line)}
 /* The strip under the bar.
  *
@@ -189,7 +295,7 @@ nav.tabs{flex:0 0 auto;z-index:40;display:flex;
  * element in every headless render. tools/spacing-audit.mjs overrides the
  * variable to reproduce the device. */
 .tabshim{position:fixed;left:0;right:0;bottom:0;z-index:39;pointer-events:none;
-  height:var(--safe-b);background:rgba(30,33,39,.97)}
+  height:var(--safe-b);background:var(--nav)}
 nav.tabs button{flex:1;background:none;border:0;color:var(--ink3);padding:8px 4px 10px;
   display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10.5px;
   cursor:pointer;min-height:var(--tap);justify-content:center}
@@ -258,9 +364,9 @@ dl.kv dd.mono{font-variant-numeric:tabular-nums}
 .chip{display:inline-flex;align-items:center;font-size:11px;font-weight:650;
   letter-spacing:.03em;padding:3px 8px;border-radius:999px;border:1px solid;
   text-transform:uppercase;white-space:nowrap}
-.chip.ok{color:#8ce99a;border-color:#2b6b38;background:#14301c}
-.chip.warn{color:#ffd866;border-color:#7a5c14;background:#332711}
-.chip.bad{color:#ffa8a8;border-color:#8a2b2b;background:#3a1414}
+.chip.ok{color:var(--ok-t);border-color:var(--ok-b);background:var(--ok-bg)}
+.chip.warn{color:var(--warn-t);border-color:var(--warn-b);background:var(--warn-bg)}
+.chip.bad{color:var(--bad-t);border-color:var(--bad-b);background:var(--bad-bg)}
 .chip.neutral{color:var(--ink2);border-color:var(--line);background:var(--panel2)}
 
 label.f{display:block;margin-bottom:11px}
@@ -297,12 +403,12 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;
   padding:11px 15px;min-height:var(--tap);cursor:pointer;font-weight:600;font-size:14px}
 .btn:active{transform:translateY(1px)}
-.btn.primary{background:var(--brass);border-color:var(--brass);color:#20180a}
-.btn.danger{color:#ffa8a8;border-color:#8a2b2b;background:transparent}
+.btn.primary{background:var(--brass);border-color:var(--brass);color:var(--on-brass)}
+.btn.danger{color:var(--bad-t);border-color:var(--bad-b);background:transparent}
 /* An armed delete. Filled rather than outlined, because the difference between
  * "the button that deletes" and "the button that is about to delete" has to be
  * visible without reading the label. */
-.btn.danger.armed{background:#8a2b2b;color:#fff;border-color:#b34747}
+.btn.danger.armed{background:var(--armed-bg);color:var(--armed-t);border-color:var(--armed-b)}
 .btn.wide{width:100%}
 .btn.sm{padding:7px 11px;min-height:36px;font-size:13px}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}
@@ -312,7 +418,7 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
   letter-spacing:.10em;text-transform:uppercase;text-align:center}
 .serialbox input.bad{border-color:var(--bad)}
 .serialbox input.good{border-color:var(--ok)}
-.err{color:#ffa8a8}.warnt{color:#ffd866}
+.err{color:var(--bad-t)}.warnt{color:var(--warn-t)}
 
 .pos{margin-bottom:14px}
 .pos .poshdr{display:flex;justify-content:space-between;align-items:baseline;
@@ -323,8 +429,8 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
 .sw{width:46px;height:46px;border-radius:12px;border:2px solid var(--line);cursor:pointer;
   display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px;
   font-size:10px;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.6);color:#fff}
-.sw.on{border-color:var(--brass);box-shadow:0 0 0 3px rgba(201,162,39,.28)}
-.sw.none{background:repeating-linear-gradient(45deg,#2a2e36,#2a2e36 5px,#20232a 5px,#20232a 10px);
+.sw.on{border-color:var(--brass);box-shadow:0 0 0 3px var(--ring)}
+.sw.none{background:repeating-linear-gradient(45deg,var(--hatch-a),var(--hatch-a) 5px,var(--hatch-b) 5px,var(--hatch-b) 10px);
   color:var(--ink2);text-shadow:none}
 .sw.any{background:var(--panel2);color:var(--ink2);text-shadow:none}
 
@@ -339,20 +445,21 @@ svg.casemini{width:76px;height:auto;flex:none}
 
 .banner{border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13.5px;
   border:1px solid;display:flex;gap:9px;align-items:flex-start}
-.banner.bad{color:#ffc9c9;border-color:#8a2b2b;background:#2e1212}
-.banner.warn{color:#ffe8a3;border-color:#7a5c14;background:#2b2210}
-.banner.info{color:#c5dcf0;border-color:#1b4a72;background:#0f2231}
+.banner.bad{color:var(--ban-bad-t);border-color:var(--ban-bad-b);background:var(--ban-bad-bg)}
+.banner.warn{color:var(--ban-warn-t);border-color:var(--ban-warn-b);background:var(--ban-warn-bg)}
+.banner.info{color:var(--ban-info-t);border-color:var(--ban-info-b);background:var(--ban-info-bg)}
 .banner .small{display:block;margin-top:3px}
 
 .empty{text-align:center;color:var(--ink3);padding:26px 14px;font-size:14px}
 .empty p{margin:0 0 12px}
 .toast{position:fixed;left:12px;right:12px;bottom:calc(76px + var(--safe-b));z-index:60;pointer-events:none;
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;
-  padding:11px 13px;font-size:13.5px;box-shadow:0 6px 20px rgba(0,0,0,.45)}
+  padding:11px 13px;font-size:13.5px;box-shadow:var(--shadow-1)}
 
 /* -------------------------------------------------------------- labels */
+/* A label is a sticker: white stock, black ink, whatever the app is wearing. */
 .label-preview{background:#fff;border-radius:8px;display:inline-block;
-  box-shadow:0 3px 14px rgba(0,0,0,.4)}
+  box-shadow:var(--shadow-2)}
 .lbl{width:2.5in;height:1.5in;padding:.07in .09in;box-sizing:border-box;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
   color:#000;background:#fff;display:flex;flex-direction:column;

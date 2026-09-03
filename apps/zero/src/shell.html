@@ -10,8 +10,47 @@
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <title>Zero</title>
+<style>
+/* The ground, before the bundle exists.
+ *
+ * Zero's palette lives in Zero.jsx, injected as a <style> by the first render
+ * -- which is a whole screen of painting too late. The body used to carry
+ * background:#0f1117 inline for exactly that reason, and now that the ground
+ * has two values it needs the same head start with a query in front of it.
+ * Only the ground: everything else is on the far side of a paint that already
+ * has the real stylesheet.
+ *
+ * Its own variable rather than --bg, because Zero.jsx owns --bg and two
+ * definitions of one token in two files is how they end up disagreeing. */
+:root{color-scheme:light;--boot:#e4e1d8}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--boot:#0f1117}}
+:root[data-theme="dark"]{color-scheme:dark;--boot:#0f1117}
+body{margin:0;background:var(--boot)}
+</style>
+<script>
+/* The theme, before the first paint.
+ *
+ * No stored preference means no attribute, which is deliberate: the CSS then
+ * answers to prefers-color-scheme on its own. theme_v1 is written by
+ * More > Appearance and is per-device on purpose -- it describes the screen in
+ * your hand, not the account, so it is not in the backup, not in the export
+ * and not in the cloud sync. Bare key, like every other key this app owns. */
+(function () {
+  try {
+    var t = localStorage.getItem('theme_v1');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    var dark = t ? t === 'dark'
+      : !(window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches);
+    /* iOS paints the status bar from this, and it is the one piece of chrome
+     * the stylesheet cannot reach. The tag keeps the launch colour in the file
+     * so the splash screen and the manifest still agree. */
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', dark ? '#0f1117' : '#e4e1d8');
+  } catch (e) { /* private mode, or no storage at all: the CSS default stands */ }
+})();
+</script>
 </head>
-<body style="margin:0;background:#0f1117">
+<body>
 <div id="root"></div>
 <script src="bundle.js"></script>
 <script>

@@ -132,6 +132,18 @@ p { margin: 0; }
    * built on and wrong on every phone. */
   padding-top: 96px;
   padding-bottom: 72px;
+  /* And it has to FILL its track, or the gutter above is measured from the
+   * wrong edge.
+   *
+   * .hero is a grid and .wrap carries `margin: 0 auto`. Auto inline margins
+   * on a grid item switch off the stretch alignment, so between 520 and 900px
+   * -- where the hero is one column and its content is narrower than the page
+   * -- the block sized to its own text and centred itself: 537px of headline
+   * floating in an 820px column, 80px right of the brand directly above it.
+   * Above 900 the two-column template is wider than the track, so it filled
+   * and the fault vanished; below 520 there is no free space to centre in. It
+   * was only ever visible on a tablet. */
+  width: 100%;
 }
 @media (max-width: 900px) {
   .hero-grid { grid-template-columns: 1fr; gap: 36px; padding-top: 72px; padding-bottom: 56px; }

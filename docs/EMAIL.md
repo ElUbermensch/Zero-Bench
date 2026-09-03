@@ -83,6 +83,7 @@ So a run cannot double-draft a thread and cannot lose track after a crash:
 ```
 Zero/triaged      seen by a run, classified
 Zero/drafted      a reply is waiting in drafts
+Zero/refuse       a pressure or load-data question — standing reply only
 Zero/escalate     needs you, deliberately not drafted
 Zero/sent         you approved and sent it
 ```
@@ -92,12 +93,14 @@ The label IS the state. No local file to drift out of sync with the mailbox.
 ### What runs every six hours
 
 1. Search `support@` for threads with a customer message newer than the last
-   reply, excluding anything already labelled `Zero/drafted` or `Zero/escalate`.
+   reply, excluding anything already labelled `Zero/drafted`, `Zero/refuse` or
+   `Zero/escalate`.
 2. Classify each against the ruleset (§3).
-3. **Escalate** → label, no draft.
-4. **Draftable** → retrieve the closest past threads you answered (§4), write a
+3. **Tier 0** → label `Zero/refuse`, attach the standing reply, never compose.
+4. **Escalate** → label, no draft.
+5. **Draftable** → retrieve the closest past threads you answered (§4), write a
    reply in your voice, save as a Gmail draft, label `Zero/drafted`.
-5. One notification: how many drafted, how many escalated, and the escalations by
+6. One notification: how many drafted, how many escalated, and the escalations by
    subject so you can judge urgency without opening anything.
 
 Six hours is a good interval for support that is not promising same-hour replies.
@@ -136,17 +139,75 @@ your habits and nobody's personal data — and the ruleset.
 
 ## 3. The ruleset
 
-A file, version-controlled, read at the start of every run. Three tiers.
+A file, version-controlled, read at the start of every run. Four tiers, and the
+first one is not really about email at all.
+
+### Tier 0 — refused, by everyone, including you
+
+**Charge weights, pressure, pressure signs, and "is this load safe".**
+
+This is not an escalation. An escalation ends with the question being answered by
+a person here, and answering it at all is the thing that must not happen —
+because it takes on responsibility for a mistake that injures or kills somebody,
+in a subject this product explicitly does not claim to know anything about.
+`docs/bench-design.md §7` already says the software will never suggest,
+recommend, extrapolate or interpolate a charge, and calls that a hard design
+boundary rather than a disclaimer. A boundary the software holds and the support
+address does not is not a boundary.
+
+So there is one fixed reply, below, approved once. Nobody writes a fresh one, in
+email or anywhere else. Two things it must never do, both of which read as
+harmless in the moment:
+
+- **Never assess.** "That sounds about right" and "that sounds high" are both
+  answers to a pressure question. So is "I'd back off a bit." Silence on the
+  substance is the whole point.
+- **Never interpret an observation.** A photograph of a cratered primer with
+  "is this pressure?" is a pressure question. The app *records* pressure signs;
+  it does not read them, and neither do we.
+
+The reply is deliberately plain rather than legalistic. A wall of disclaimer
+reads as a company protecting itself, invites an argument, and is worse in every
+way — including legally — than saying the true thing simply.
+
+> Thanks for writing.
+>
+> We don't answer questions about charge weights, pressure, or whether a
+> particular load is safe — not for anyone, and not in any circumstance. That
+> isn't caution about your question in particular; it's a fixed limit on what
+> this product is.
+>
+> Bench is a record keeper. It stores what you loaded and what it did. It ships
+> no load data, and we have no way to know your components, your chamber, your
+> throat, your brass or the conditions you're shooting in — which are the things
+> that decide the answer. Being wrong about that hurts people, so we don't guess.
+>
+> The published manuals are the authority here: Hodgdon's online data, Hornady,
+> Sierra, Nosler, Lyman. For a question about a specific powder, or about
+> something you're seeing on a case, the manufacturer's technical line will speak
+> to you directly — they have test data we don't.
+>
+> If there's anything else in your message — a bug, or a question about the app
+> itself — say so and I'll help with that part.
+
+**Mixed threads.** A message asking about a crash *and* a charge weight gets the
+app question answered normally and this reply for the other half. The presence of
+a legitimate question does not license engaging with the other one, and dropping
+the refusal because the rest was friendly is exactly how the boundary erodes.
+
+**It is a policy, not a mail rule.** The same refusal applies on the phone, in a
+forum thread, in a direct message, at a match, and to anyone who ever answers on
+behalf of this product. A rule that holds in email and dissolves in conversation
+protects nobody — and the conversational version is the more likely one, because
+it is where being helpful feels most natural.
+
+**This is the one category where a fixed reply is safer than a human draft.**
+Everywhere else, judgment improves the answer. Here, judgment is the hazard: the
+temptation to be helpful is strongest precisely when somebody is being polite and
+seems to want only a small reassurance.
 
 ### Never drafted, always escalated
 
-- **Anything about load data, powder charges, pressure, or "is this safe".**
-  The apps refuse to give load data as a hard design boundary, stated in
-  `docs/bench-design.md §7`. Customer email is exactly where someone asks anyway,
-  and a friendly plausible answer from an address with the product's name on it
-  undoes that boundary in writing. This is the single most likely way an email
-  assistant does real harm here, because the question sounds helpful and the
-  answer sounds easy.
 - Refunds, chargebacks, cancellations, anything about money.
 - Legal, liability, injury, or an accident of any kind.
 - Press, partnership, bulk licensing.

@@ -56,6 +56,7 @@ header{
 }
 header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.01em}
 header .sub{color:var(--ink3); font-size:12px; font-family:var(--fm)}
+.tabs{display:flex; gap:6px}
 .fresh{color:var(--ink3); font-size:11px; font-family:var(--fm); margin-right:4px}
 .fresh.stale{color:var(--warn)}
 .spacer{flex:1}
@@ -144,9 +145,10 @@ code.key{font-family:var(--fm); font-size:13px; letter-spacing:.12em;
    box you cannot check a typo in — which is the single most common cause of
    the problem being looked up. */
 .support{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
-.support input{flex:1 1 260px; min-width:0; padding:9px 11px; font-size:14px;
-  font-family:var(--fm); color:var(--ink); background:var(--surf2);
-  border:1px solid var(--bdr); border-radius:8px}
+/* Only the differences from the generic `input` rule above — that one already
+   carries this app's tokens, and --surf2/--bdr are Bench's names, not these. */
+.support input{flex:1 1 260px; min-width:0; width:auto;
+  font-family:var(--fm); font-size:14px}
 .support input:focus{outline:2px solid var(--zero); outline-offset:1px}
 .support-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:12px}
 table.kv{width:auto; min-width:min(420px,100%)}

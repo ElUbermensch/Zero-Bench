@@ -114,9 +114,59 @@ Deno.serve(async (req) => {
     });
   };
 
-  if (!['lookup', 'send_reset', 'resend_confirmation'].includes(action)) {
+  if (!['list', 'lookup', 'send_reset', 'resend_confirmation'].includes(action)) {
     return json({ error: 'unknown action' }, 400);
   }
+
+  /* The whole customer list, for the support table.
+   *
+   * Paged through server-side and capped, because the admin users endpoint
+   * returns 50 at a time and an owner should not have to click "next" to find
+   * somebody. The cap is a real limit rather than a promise: past it the table
+   * says so instead of quietly showing a prefix of the truth.
+   *
+   * Sorted alphabetically HERE so every caller gets the same order, and
+   * carrying only the columns the table shows -- no app metadata, no identity
+   * provider payloads, nothing that would turn a support screen into a data
+   * export. */
+  if (action === 'list') {
+    const MAX_PAGES = 20;              // 20 x 200 = 4000 accounts
+    const users: unknown[] = [];
+    let truncated = false;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const r = await admin(`/auth/v1/admin/users?page=${page}&per_page=200`);
+      if (!r.ok) break;
+      const batch = (await r.json()).users || [];
+      users.push(...batch.map((u: Record<string, unknown>) => ({
+        id: u.id,
+        email: u.email,
+        created_at: u.created_at,
+        last_sign_in_at: u.last_sign_in_at,
+        email_confirmed: !!(u.email_confirmed_at || u.confirmed_at),
+        is_anonymous: !!u.is_anonymous,
+        mfa_factors: ((u.factors as { status?: string }[]) || [])
+          .filter((f) => f.status === 'verified').length,
+      })));
+      if (batch.length < 200) break;
+      if (page === MAX_PAGES) truncated = true;
+    }
+    /* Leaderboard handles, fetched once for the whole table rather than once
+     * per row. The handle is often the only name an owner knows a customer by
+     * -- a match report says "Ubermensch shot a 197", not an email address --
+     * so a support table without it cannot answer "who is that". */
+    const lb = await admin('/rest/v1/leaderboard_profiles?select=id,handle&limit=5000');
+    const handles = new Map<string, string>();
+    if (lb.ok) for (const r of await lb.json()) handles.set(r.id, r.handle);
+    for (const u of users as { id: string; handle?: string | null }[]) {
+      u.handle = handles.get(u.id) || null;
+    }
+
+    users.sort((a: { email?: string }, b: { email?: string }) =>
+      String(a.email || '').localeCompare(String(b.email || '')));
+    await record(true, null, { listed: users.length });
+    return json({ users, truncated });
+  }
+
   if (!email || !email.includes('@')) return json({ error: 'an email address is required' }, 400);
 
   /* Find the account. The admin users endpoint is paginated and its filter is
@@ -144,6 +194,12 @@ Deno.serve(async (req) => {
     const factors = (user.factors || []).filter(
       (f: { status?: string }) => f.status === 'verified').length;
 
+    /* One row at most: the table is keyed by the user id, and the handle is
+     * case-insensitively unique across the project. */
+    const lb = await admin(
+      `/rest/v1/leaderboard_profiles?id=eq.${user.id}&select=handle`);
+    const lbRows = lb.ok ? await lb.json() : [];
+
     await record(true, user.id, { found: true });
     return json({
       found: true,
@@ -157,6 +213,7 @@ Deno.serve(async (req) => {
         is_anonymous: !!user.is_anonymous,
         providers: (user.app_metadata?.providers) || [],
         mfa_factors: factors,
+        handle: lbRows[0]?.handle || null,
         recent_events: evRows.length,
         events_by_app: perApp,
       },

@@ -38,6 +38,85 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../tools/config.mjs';
+
+
+/* ── the traffic beacon ────────────────────────────────────────────────────
+ *
+ * Injected here rather than written into the source page, for the same reason
+ * the doctype is: the source doubles as a Claude Artifact, where a Supabase key
+ * has no business being. It also means the key comes from the ONE config file
+ * every other build reads, instead of a second copy someone has to remember.
+ *
+ * What it sends is a pageview and nothing else: the path, the referring HOST,
+ * any utm tags on the link that was clicked, and whether the screen is a phone.
+ * No IP, no cookie, no fingerprint, no full referrer, and an id that lives in
+ * sessionStorage and dies with the tab -- so five pages in one sitting are one
+ * visit, and tomorrow's sitting cannot be tied to today's.
+ *
+ * It is deliberately incapable of breaking the page: it never throws, never
+ * blocks paint, never retries, and a failed send is simply a lost row. A
+ * marketing counter that can take the marketing site down is a bad trade.
+ */
+const beaconFor = (cfg) => `<script>
+(function () {
+  try {
+    var URL_ = ${JSON.stringify(cfg.url || '')};
+    var KEY = ${JSON.stringify(cfg.anonKey || '')};
+    if (!URL_ || !KEY) return;
+    // Never count the people building the thing.
+    var h = location.hostname;
+    if (h === 'localhost' || h === '127.0.0.1' || h === '' || location.protocol === 'file:') return;
+    // Honour the two signals a reader has to say no. Both are one line to
+    // respect and the alternative is collecting data from someone who asked.
+    if (navigator.doNotTrack === '1' || window.doNotTrack === '1'
+        || navigator.globalPrivacyControl === true) return;
+
+    var K = 'zs.visit';
+    var id = null;
+    try { id = sessionStorage.getItem(K); } catch (e) {}
+    if (!id) {
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            var r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : ((r & 3) | 8)).toString(16);
+          });
+      try { sessionStorage.setItem(K, id); } catch (e) {}
+    }
+
+    var q = new URLSearchParams(location.search);
+    var refHost = null;
+    try {
+      // The HOST only. A full referrer can carry the reader's search terms.
+      if (document.referrer) {
+        var r = new URL(document.referrer);
+        if (r.hostname !== location.hostname) refHost = r.hostname.slice(0, 120);
+      }
+    } catch (e) {}
+
+    var w = window.innerWidth || 1024;
+    var body = {
+      visit_id: id,
+      path: location.pathname.slice(0, 200) || '/',
+      referrer_host: refHost,
+      utm_source: (q.get('utm_source') || '').slice(0, 60) || null,
+      utm_medium: (q.get('utm_medium') || '').slice(0, 60) || null,
+      utm_campaign: (q.get('utm_campaign') || '').slice(0, 80) || null,
+      device: w < 768 ? 'mobile' : (w < 1024 ? 'tablet' : 'desktop')
+    };
+
+    fetch(URL_ + '/rest/v1/site_visit', {
+      method: 'POST',
+      headers: { apikey: KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify(body),
+      keepalive: true,
+      mode: 'cors'
+    }).catch(function () {});
+  } catch (e) { /* a counter must never break the page it counts */ }
+})();
+</script>`;
+
+const cfg = loadConfig();
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(HERE, 'dist');
@@ -135,6 +214,7 @@ for (const page of PAGES) {
     '</head>',
     '<body>',
     bodySrc.trim(),
+    beaconFor(cfg),
     '</body>',
     '</html>',
     '',

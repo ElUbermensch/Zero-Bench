@@ -34,7 +34,7 @@ const APPS = ['bench', 'zero'];
 const COLOR = { bench: 'var(--bench)', zero: 'var(--zero)' };
 const LABEL = { bench: 'Bench', zero: 'Zero' };
 
-const UI = { range: 30, view: 'loading', error: null, data: null, busy: false,
+const UI = { range: 30, tab: 'apps', view: 'loading', error: null, data: null, busy: false,
              mfa: null };   // { factorId, qr, secret, uri, challengeId, fresh }
 
 const $ = (id) => document.getElementById(id);
@@ -81,7 +81,24 @@ function hms(totalSeconds) {
 async function load() {
   const from = dayList(UI.range)[0];
   const q = (extra) => `select=*&day=gte.${from}&order=day.asc${extra || ''}`;
-  const views = {
+  /* The customer list comes from the edge function, not a view: auth.users is
+   * not exposed through PostgREST, and should not be. */
+  if (UI.tab === 'support') {
+    const r = await ownerTool('list', '');
+    if (!r.ok) throw new Error(r.code === 'aal2_required'
+      ? 'This needs a second factor verified in this session — sign out and back in.'
+      : r.error);
+    return { customers: r.data.users || [], truncated: !!r.data.truncated };
+  }
+  const views = UI.tab === 'site' ? {
+    /* The marketing site's own tables. Loaded only when that tab is open: an
+     * owner watching app usage should not pay for four extra reads a minute
+     * on a page they are not looking at. */
+    siteDaily: 'v_site_daily',
+    siteSources: 'v_site_sources',
+    sitePages: 'v_site_pages',
+    siteDevices: 'v_site_devices',
+  } : {
     active: 'v_analytics_daily_active',
     signups: 'v_analytics_new_users',
     events: 'v_analytics_events_by_name',
@@ -96,7 +113,7 @@ async function load() {
     if (!res.ok) {
       const st = res.status;
       throw new Error(st === 404
-        ? `The view ${view} does not exist — apply migrations 0015 and 0016 to the Supabase project first.`
+        ? `The view ${view} does not exist — apply migration ${view.startsWith('v_site') ? '0019' : '0015 and 0016'} to the Supabase project first.`
         : `Could not read ${view}${st ? ` (HTTP ${st})` : ''}.`);
     }
     out[key] = res.data || [];
@@ -274,61 +291,136 @@ const sum = (rows, field, app) => rows
   .filter(r => !app || r.source_app === app)
   .reduce((a, r) => a + (+r[field] || 0), 0);
 
-/* Customer support, for the question this exists to answer: someone writes in
- * saying they cannot get into their account, and all you have is an email
- * address.
+
+/* ------------------------------------------------------- the customers tab */
+/*
+ * Every account, alphabetically, filtered as you type.
  *
- * It shows the few facts that resolve almost every such message -- does the
- * account exist, was the address ever confirmed, when did they last get in --
- * and then offers the two emails that fix it. It shows no logbook data: whether
- * somebody uses the apps is a support question, what they shot is theirs.
+ * A table rather than a search box alone, because the two support questions
+ * need different things. "Here is my email, I cannot get in" is a lookup; but
+ * "how many people have never confirmed" and "who signed up last week and never
+ * came back" are questions you can only ask of a list you can see. The filter
+ * matches on the address as typed, so a half-remembered domain still finds
+ * somebody.
  *
- * There is no "reset their password to X" here and will not be. Passwords are
- * hashed and cannot be read back, a reset link is the correct instrument, and
- * an owner who can set a customer's password can enter their account
- * afterwards -- which is a different power from helping them into it.
+ * Filtering happens in the browser, over a list already fetched. That is the
+ * right trade at this size -- a few thousand rows is nothing to hold, and it
+ * means typing does not put a request on the wire per keystroke against an
+ * endpoint that holds the service key.
+ *
+ * Confirmation state leads, after the address, because an unconfirmed account
+ * is the single most common cause of "it will not let me in" and the one thing
+ * on this screen that has a one-click fix.
  */
-function supportPanel() {
+function supportTab() {
+  const d = UI.data || {};
+  const all = d.customers || [];
   const s = UI.support || {};
-  const u = s.result;
-  const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+  const q = (s.filter || '').trim().toLowerCase();
+  /* The filter matches the handle as well as the address, because the name a
+   * customer is known by in a match report is the handle, and "who is
+   * Ubermensch" is the question a support screen has to be able to answer. */
+  const rows = (q ? all.filter(u =>
+    (u.email || '').toLowerCase().includes(q) ||
+    (u.handle || '').toLowerCase().includes(q)) : all.slice())
+    /* Sorted here as well as in the function. The order is a promise this
+     * screen makes to the reader, so it should not depend on an endpoint
+     * continuing to keep it. Guests have no address and sort last, where they
+     * do not interrupt a run of names. */
+    .sort((a, b) => String(a.email || '￿').localeCompare(String(b.email || '￿')));
+
+  const unconfirmed = all.filter(u => !u.email_confirmed && !u.is_anonymous).length;
+  const anon = all.filter(u => u.is_anonymous).length;
+  const when = (iso) => (iso ? new Date(iso).toLocaleDateString() : '—');
+
   return `
+  <main>
     <section>
-      <h2>Customer support</h2>
-      <p class="note">Look an account up by email. Every action here is written to
-        <code>owner_action_log</code>, including the ones that find nobody.</p>
+      <h2>Customers</h2>
+      <p class="note">Every account on the project, alphabetically. Anonymous entries are
+        pair-fire guests, not sign-ups — they have no address and nothing to reset.</p>
+      <div class="tiles">
+        ${tile('Accounts', fmt(all.length - anon), 'real sign-ups')}
+        ${tile('Never confirmed', fmt(unconfirmed),
+               unconfirmed ? 'usually the reason someone cannot get in' : 'all confirmed')}
+        ${tile('Guests', fmt(anon), 'anonymous pair-fire devices')}
+      </div>
+      ${d.truncated ? `<div class="banner warn">More accounts exist than this screen
+        loads. Everything below is the first few thousand by address.</div>` : ''}
+    </section>
+
+    <section>
       <div class="card">
-        <form id="support" class="support">
-          <input id="support-email" type="email" placeholder="customer@example.com"
-                 value="${esc(s.email || '')}" autocomplete="off" spellcheck="false" required>
-          <button type="submit">${s.busy ? 'Working…' : 'Look up'}</button>
+        <form id="cfilter" class="support" onsubmit="return false">
+          <input id="cfilter-q" type="search" placeholder="Filter by email or handle…"
+                 value="${esc(s.filter || '')}" autocomplete="off" spellcheck="false">
+          ${q ? `<button type="button" data-act="clearfilter">Clear</button>` : ''}
         </form>
         ${s.error ? `<div class="banner bad">${esc(s.error)}</div>` : ''}
         ${s.notice ? `<div class="banner ok">${esc(s.notice)}</div>` : ''}
-        ${u ? `
-          <table class="kv">
-            <tr><th>Email</th><td>${esc(u.email || '')}</td></tr>
-            <tr><th>Confirmed</th><td>${u.email_confirmed
-              ? 'yes'
-              : '<strong>no — this is usually the whole problem</strong>'}</td></tr>
-            <tr><th>Account created</th><td>${esc(when(u.created_at))}</td></tr>
-            <tr><th>Last signed in</th><td>${esc(when(u.last_sign_in_at))}</td></tr>
-            <tr><th>Second factor</th><td>${u.mfa_factors
-              ? `${u.mfa_factors} verified` : 'none'}</td></tr>
-            <tr><th>Sign-in method</th><td>${esc((u.providers || []).join(', ') || 'email')}</td></tr>
-            <tr><th>Recent activity</th><td>${u.recent_events
-              ? `${fmt(u.recent_events)} events — ${Object.entries(u.events_by_app || {})
-                  .map(([a, n]) => `${LABEL[a] || a} ${fmt(n)}`).join(', ')}`
-              : 'nothing recorded'}</td></tr>
-          </table>
-          <div class="support-actions">
-            <button data-mail="send_reset" ${s.busy ? 'disabled' : ''}>Send password reset</button>
-            ${u.email_confirmed ? ''
-              : `<button data-mail="resend_confirmation" ${s.busy ? 'disabled' : ''}>Resend confirmation</button>`}
-          </div>
-          <p class="note">Both send mail to the customer, and both are rate-limited by
-            Supabase — roughly one a minute per address.</p>
-        ` : ''}
+        <p class="note">${q ? `${fmt(rows.length)} of ${fmt(all.length)} shown`
+                            : `${fmt(all.length)} accounts`}</p>
+        <div class="scroll"><table>
+          <thead><tr>
+            <th>Email</th><th>Handle</th><th>Confirmed</th><th>Joined</th>
+            <th>Last seen</th><th>2FA</th><th></th>
+          </tr></thead>
+          <tbody>${rows.length ? rows.map(u => `<tr>
+            <td>${u.is_anonymous ? '<span class="chip">guest</span>' : esc(u.email || '—')}</td>
+            <td>${u.handle ? esc(u.handle)
+                 : '<span style="color:var(--ink3)">—</span>'}</td>
+            <td>${u.is_anonymous ? '—'
+                 : (u.email_confirmed ? 'yes'
+                    : '<span class="chip" style="color:var(--warn)">no</span>')}</td>
+            <td>${esc(when(u.created_at))}</td>
+            <td>${esc(when(u.last_sign_in_at))}</td>
+            <td>${u.mfa_factors ? 'yes' : '—'}</td>
+            <td>${u.is_anonymous ? ''
+                 : `<button data-pick="${esc(u.email || '')}">Open</button>`}</td>
+          </tr>`).join('')
+            : `<tr><td colspan="7" class="empty">${q ? 'No account matches that.'
+                                                     : 'No accounts yet.'}</td></tr>`}
+          </tbody></table></div>
+      </div>
+    </section>
+
+    ${s.result ? supportDetail(s.result) : ''}
+  </main>`;
+}
+
+/* The detail for one customer, opened from the table. Kept separate from the
+ * list so the list stays scannable: a table with seven columns of detail per
+ * row is one nobody reads. */
+function supportDetail(u) {
+  const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+  const s = UI.support || {};
+  return `
+    <section>
+      <h2>${esc(u.email || '')}</h2>
+      <p class="note">Every action here is written to <code>owner_action_log</code>.</p>
+      <div class="card">
+        <table class="kv">
+          <tr><th>Confirmed</th><td>${u.email_confirmed
+            ? 'yes' : '<strong>no — this is usually the whole problem</strong>'}</td></tr>
+          <tr><th>Account created</th><td>${esc(when(u.created_at))}</td></tr>
+          <tr><th>Last signed in</th><td>${esc(when(u.last_sign_in_at))}</td></tr>
+          <tr><th>Leaderboard handle</th><td>${u.handle
+            ? esc(u.handle) : 'has not published a score'}</td></tr>
+          <tr><th>Second factor</th><td>${u.mfa_factors
+            ? `${u.mfa_factors} verified` : 'none'}</td></tr>
+          <tr><th>Sign-in method</th><td>${esc((u.providers || []).join(', ') || 'email')}</td></tr>
+          <tr><th>Recent activity</th><td>${u.recent_events
+            ? `${fmt(u.recent_events)} events — ${Object.entries(u.events_by_app || {})
+                .map(([a, n]) => `${LABEL[a] || a} ${fmt(n)}`).join(', ')}`
+            : 'nothing recorded'}</td></tr>
+        </table>
+        <div class="support-actions">
+          <button data-mail="send_reset" ${s.busy ? 'disabled' : ''}>Send password reset</button>
+          ${u.email_confirmed ? ''
+            : `<button data-mail="resend_confirmation" ${s.busy ? 'disabled' : ''}>Resend confirmation</button>`}
+        </div>
+        <p class="note">Both send mail to the customer, and both are rate-limited by
+          Supabase — roughly one a minute per address.</p>
       </div>
     </section>`;
 }
@@ -463,8 +555,6 @@ function dashboard(d) {
         : '<div class="empty">Nothing tracked yet.</div>'}</div>
     </section>
 
-    ${supportPanel()}
-
     <section>
       <h2>Every event</h2>
       <p class="note">The whole table, spine included, so a number above can always be
@@ -501,16 +591,157 @@ function freshness() {
   return `<span class="fresh">updated ${ago}</span>`;
 }
 
+
+/* ---------------------------------------------------- the marketing website */
+/*
+ * A separate screen, because it answers a separate question. The app tabs ask
+ * "are people using this"; this one asks "did what we did on Thursday bring
+ * anybody" -- and the two must not be added together, since a stranger reading
+ * a page and a shooter logging a string are not comparable events.
+ *
+ * Built around ATTRIBUTION rather than volume. A total pageview count tells you
+ * almost nothing you can act on; the same number broken down by the campaign
+ * tag on the link tells you which post to write again. So the source table is
+ * the centre of this screen and everything else is context around it.
+ *
+ * These rows are written by anonymous visitors using a key printed in the page,
+ * which is said on screen rather than only in the migration: a number a
+ * stranger can inflate should not be presented with the same confidence as one
+ * behind an auth check.
+ */
+function siteDashboard(d) {
+  const days = dayList(UI.range);
+
+  const daily = d.siteDaily || [];
+  const byDay = new Map(daily.map(r => [r.day, r]));
+  const visitSeries = [{ key: 'site', label: 'Visits', color: 'var(--zero)',
+    values: days.map(x => (byDay.get(x) ? +byDay.get(x).visits || 0 : 0)) }];
+  const viewSeries = [{ key: 'site', label: 'Pageviews', color: 'var(--bench)',
+    values: days.map(x => (byDay.get(x) ? +byDay.get(x).pageviews || 0 : 0)) }];
+
+  const totalVisits = sum(daily, 'visits');
+  const totalViews = sum(daily, 'pageviews');
+  const perVisit = totalVisits ? (totalViews / totalVisits) : 0;
+  const busiest = daily.reduce((a, r) => (+r.visits > (a ? +a.visits : -1) ? r : a), null);
+
+  // Sources, campaigns first: the tagged ones are the ones you chose to run.
+  const srcMap = new Map();
+  for (const r of (d.siteSources || [])) {
+    const cur = srcMap.get(r.source) || { source: r.source, medium: r.medium, visits: 0 };
+    cur.visits += +r.visits || 0;
+    srcMap.set(r.source, cur);
+  }
+  const sources = [...srcMap.values()].sort((a, b) => b.visits - a.visits);
+  const campaigns = sources.filter(r => r.source !== 'direct');
+
+  const pageMap = new Map();
+  for (const r of (d.sitePages || [])) {
+    const cur = pageMap.get(r.path) || { path: r.path, views: 0, visits: 0 };
+    cur.views += +r.views || 0; cur.visits += +r.visits || 0;
+    pageMap.set(r.path, cur);
+  }
+  const pages = [...pageMap.values()].sort((a, b) => b.views - a.views).slice(0, 15);
+
+  const devMap = new Map();
+  for (const r of (d.siteDevices || [])) {
+    devMap.set(r.device, (devMap.get(r.device) || 0) + (+r.visits || 0));
+  }
+  const devices = [...devMap.entries()].sort((a, b) => b[1] - a[1]);
+
+  const empty = !daily.length;
+
+  return `
+  <main>
+    ${empty ? `<div class="banner warn">No website traffic recorded in ${rangeTitle().toLowerCase()}.
+      If the site has only just been rebuilt, this fills in as people visit —
+      and visitors who send Do Not Track are never counted.</div>` : ''}
+
+    <section>
+      <h2>${rangeTitle()} — the information site</h2>
+      <p class="note">Anonymous pageviews. No IP, no cookie, no fingerprint: a visit id
+        lives in the tab and dies with it, so the same person tomorrow is a new visit.
+        <strong>These rows are written by the public</strong> using the key printed in the
+        page, so treat a sudden spike as a claim rather than a fact until a source
+        explains it.</p>
+      <div class="tiles">
+        ${tile('Visits', fmt(totalVisits), 'separate tabs, not people')}
+        ${tile('Pageviews', fmt(totalViews), 'pages read')}
+        ${tile('Pages per visit', totalVisits ? perVisit.toFixed(1) : '—',
+               'how far past the first page they got')}
+        ${tile('Busiest day', busiest ? fmt(busiest.visits) : '—',
+               busiest ? busiest.day : 'nothing yet')}
+        ${tile('Tagged arrivals', fmt(sum(campaigns, 'visits')),
+               'came from a campaign or a referrer')}
+      </div>
+    </section>
+
+    <section>
+      <h2>Visits per day</h2>
+      <p class="note">The line to watch on the day of a post, a video, or a range-day
+        handout. A campaign that worked shows up here within hours.</p>
+      <div class="card"><div class="scroll">${lineChart(days, visitSeries)}</div></div>
+    </section>
+
+    <section>
+      <h2>Where they came from</h2>
+      <p class="note">Attributed once per visit, from the FIRST page — the tag is only on
+        the link that was clicked, so counting every page would credit the campaign once
+        and “direct” four times for the same person. Add
+        <code>?utm_campaign=spring-match</code> to a link to make it appear here by name.</p>
+      <div class="card">${sources.length
+        ? `<div class="scroll">${rankChart(sources.slice(0, 15).map(r => ({
+            label: r.source === 'direct' ? 'direct / untagged' : r.source,
+            value: r.visits,
+            color: r.source === 'direct' ? 'var(--ink3)' : 'var(--zero)',
+            sub: r.medium || '',
+          })))}</div>`
+        : '<div class="empty">Nothing yet.</div>'}</div>
+    </section>
+
+    <section>
+      <h2>Pageviews per day</h2>
+      <div class="card"><div class="scroll">${barChart(days, viewSeries)}</div></div>
+    </section>
+
+    <section>
+      <h2>What they read</h2>
+      <div class="card"><div class="scroll"><table>
+        <thead><tr><th>Page</th><th class="n">Views</th><th class="n">Visits</th></tr></thead>
+        <tbody>${pages.length ? pages.map(r => `<tr>
+          <td>${esc(r.path)}</td>
+          <td class="n">${fmt(r.views)}</td>
+          <td class="n">${fmt(r.visits)}</td></tr>`).join('')
+          : '<tr><td colspan="3" class="empty">Nothing yet.</td></tr>'}
+        </tbody></table></div></div>
+    </section>
+
+    <section>
+      <h2>What they read it on</h2>
+      <p class="note">A page that converts on a desktop and not on a phone has a layout
+        problem, not a copy problem.</p>
+      <div class="card">${devices.length
+        ? `<div class="scroll">${rankChart(devices.map(([k, v]) => ({
+            label: k, value: v, color: 'var(--bench)', sub: '' })))}</div>`
+        : '<div class="empty">Nothing yet.</div>'}</div>
+    </section>
+  </main>`;
+}
+
 function header() {
   const u = CORE && CORE.getUser();
   return `<header>
     <h1>Zero Suite</h1>
     <span class="sub">owner dashboard</span>
     <span class="spacer"></span>
-    <span class="range">
+    <span class="tabs">
+      <button data-tab="apps" aria-pressed="${UI.tab === 'apps'}">Apps</button>
+      <button data-tab="site" aria-pressed="${UI.tab === 'site'}">Website</button>
+      <button data-tab="support" aria-pressed="${UI.tab === 'support'}">Customers</button>
+    </span>
+    ${UI.tab === 'support' ? '' : `<span class="range">
       ${RANGES.map(([n, label]) => `<button data-range="${n}"
         aria-pressed="${UI.range === n}">${label}</button>`).join('')}
-    </span>
+    </span>`}
     ${freshness()}
     <button data-act="refresh">${UI.busy || UI.refreshing ? 'Loading…' : 'Refresh'}</button>
     ${u ? `<button data-act="signout">Sign out</button>` : ''}
@@ -656,7 +887,8 @@ function render() {
     return;
   }
   if (UI.view === 'loading') { app.innerHTML = header() + '<main><p class="note">Loading…</p></main>'; return; }
-  app.innerHTML = header() + dashboard(UI.data);
+  app.innerHTML = header() + (UI.tab === 'site' ? siteDashboard(UI.data)
+    : UI.tab === 'support' ? supportTab() : dashboard(UI.data));
 }
 
 /* -------------------------------------------------------------------- flow */
@@ -859,6 +1091,7 @@ async function runOwnerTool(action, email) {
   render();
   const r = await ownerTool(action, email);
   const st = { busy: false, email, error: null, notice: null,
+               filter: (UI.support && UI.support.filter) || '',
                result: (UI.support && UI.support.result) || null };
   if (!r.ok) {
     st.error = r.code === 'aal2_required'
@@ -877,10 +1110,28 @@ async function runOwnerTool(action, email) {
   render();
 }
 
+/* Filtering is local and immediate — no request per keystroke against an
+ * endpoint that holds the service key. */
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'cfilter-q') return;
+  UI.support = { ...(UI.support || {}), filter: e.target.value };
+  render();
+  const el = $('cfilter-q');
+  if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+});
+
 document.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
+  if (b.dataset.act === 'clearfilter') {
+    UI.support = { ...(UI.support || {}), filter: '' };
+    return render();
+  }
+  if (b.dataset.pick) return runOwnerTool('lookup', b.dataset.pick);
   if (b.dataset.range) { UI.range = +b.dataset.range; return enter(); }
+  if (b.dataset.tab && b.dataset.tab !== UI.tab) {
+    UI.tab = b.dataset.tab; UI.data = null; return enter();
+  }
   if (b.dataset.act === 'refresh') return enter();
   if (b.dataset.act === 'signout') {
     CORE.signOut();

@@ -1,41 +1,54 @@
 # Deploying the information page
 
-The page is `site-info/index.html`. It ships as **its own Vercel project**, on
-its own origin — not as a path on `zero-wine-one.vercel.app`. Why, in one
-paragraph, because it is the only thing here that is not obvious:
+Two pages — the overview (`site-info/index.html` → `/`) and the manual
+(`site-info/manual.html` → `/manual/`). They ship as **their own Vercel
+project**, on their own origin, not as a path on `zero-wine-one.vercel.app`.
+
+Why, in one paragraph, because it is the only thing here that is not obvious:
 
 > Zero's service worker is registered from the root, so its scope is `/` and its
 > fetch handler answers for **every** same-origin GET except the one path it
 > excludes by hand (`/bench`). A page at `/info` would be runtime-cached by that
 > worker on first view and served from that cache afterwards — and the cache
-> name is a hash of Zero's *bundle*, so editing this page does not invalidate
-> it. Every user who has opened Zero would be pinned to the first copy of the
-> page they ever saw, until Zero ships unrelated code. Offline, the same handler
-> answers `/info` with **Zero's app shell**. The fix is one line in
-> `apps/zero/src/sw.js`; until that line exists, this page belongs on an origin
-> with no service worker on it.
+> name is a hash of Zero's *bundle*, so editing the page does not invalidate it.
+> Every user who has opened Zero would be pinned to the first copy of the page
+> they ever saw, until Zero ships unrelated code. Offline, the same handler
+> answers `/info` with **Zero's app shell**. This was measured by executing the
+> shipped `sw.js` against a fake worker global, not reasoned about. The fix is
+> one line in `apps/zero/src/sw.js`; until that line exists, these pages belong
+> on an origin with no service worker on it.
 
-That is also where it wants to be when it gets a domain: attaching a domain to
+That is also where they want to be when they get a domain: attaching a domain to
 the app's project would make Zero answer on that hostname too — a second origin,
 a second `localStorage`, a second installable copy of the app.
 
 ---
 
-## 0. Before the first deploy — one fix in the page itself
+## Current state, verified 2026-09-03
 
-`site-info/index.html` was written as a Claude Artifact, and an Artifact is
-*wrapped* by its host. Served as a plain file, nothing supplies the wrapper. Add
-these three lines at the very top of the file:
+| | |
+|---|---|
+| Vercel team | `leander-s-projects4` (`team_4IgMTpoPK9SsLUCJ9gxzlKsC`) |
+| Apps project | `zero` (`prj_50uTRiZxLcd64HkA3Uf0vJg8SnA2`) → `ElUbermensch/Zero-Bench` |
+| Apps domain | `zero-wine-one.vercel.app` — last production deploy READY |
+| Info project | **does not exist yet** — step 1 below creates it |
+| Other project | `reticle-cam`, unrelated |
 
-```html
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-```
+The apps project's dashboard **Framework Preset still says `vite`**, left over
+from the old Vite repo. `vercel.json` sets `framework: null` with an explicit
+build command and output directory, and those take precedence, which is why the
+current deploy works. Worth correcting to **Other** at some point; it is not
+blocking and this push does not change it.
 
-Without the viewport line a phone lays the page out at 980px and zooms out —
-on a marketing page, that is the whole page. `npm run build:site` and
-`npm run preflight` both warn about this until it is fixed; neither blocks on it.
+## 0. No manual edit needed before the first deploy
+
+Earlier revisions of this file told you to paste a doctype, charset and viewport
+at the top of the page. **Do not.** The source must stay Artifact-shaped — an
+Artifact is wrapped by its host, and a second `<html>` in the body is a parse
+error — so `site-info/build.mjs` supplies the wrapper at build time instead,
+splitting head from body at the single `</style>`. `tools/preflight.mjs` checks
+both halves of that contract: that the source carries no `<html>`/`<body>`, and
+that the emitted file does.
 
 ## 1. Create the Vercel project (once, ~3 minutes)
 
@@ -49,7 +62,7 @@ app's.
 - **Root Directory: `site-info`** ← the only setting that matters
 - Framework Preset: **Other**. Leave Build Command and Output Directory blank —
   `site-info/vercel.json` sets them (`npm run build`, `dist`)
-- Environment variables: **none**. The page has no backend
+- Environment variables: **none**. The pages have no backend
 - Production branch: `main`
 - Deploy
 
@@ -59,90 +72,59 @@ by this work.
 
 ## 2. After the first deploy — check these
 
-- [ ] `https://<project>.vercel.app/` serves the page (not a directory listing,
-      not 404)
-- [ ] `curl -sI https://<project>.vercel.app/ | grep -i cache-control` →
-      `public, max-age=0, must-revalidate`
-- [ ] DevTools → Application → Service Workers on that origin: **none**. This is
-      the whole point of the separate project
-- [ ] On a phone, or DevTools device mode: the page is laid out for the screen,
-      not zoomed out (§0)
-- [ ] The Google Fonts stylesheet loads (the page's only external asset)
-- [ ] `https://zero-wine-one.vercel.app/` and `/bench/` still open their apps,
-      and an already-installed Zero still opens offline — the app deploy is
-      unchanged, so this is a sanity check, not an expected risk
+- `/` serves the overview; `/manual/` serves the manual
+- The overview's **Read the manual** button reaches `/manual/`, and the manual's
+  breadcrumb reaches `/`
+- View source on `/`: the first line is `<!doctype html>`, and there is a
+  `<meta name="viewport">`. If either is missing the page renders in quirks mode
+  and a phone lays it out at 980px
+- The theme toggle flips, and the page respects the OS theme before you touch it
+- On a phone, nothing scrolls sideways
+- Nothing but the two pages is fetchable — `/DEPLOY.md` and `/build.mjs` must
+  404. The output directory is `dist/`, which is why
 
-## 3. Shipping changes to the page
+## 3. When you pick a domain
 
-Edit `site-info/index.html`, push to `main`. Both projects redeploy: the app
-project rebuilds and republishes `site/` (unchanged by this edit), the info
-project republishes the page.
+- Vercel → the **`zero-info`** project → Settings → Domains → Add
+- Point DNS as Vercel instructs (an `A` record for an apex, a `CNAME` for a
+  subdomain)
+- Add **only to `zero-info`**. Adding it to the apps project as well would make
+  Zero answer there too, which is the second-origin problem above
+- Nothing in the repo needs editing. The pages carry no absolute self-links; the
+  two cross-links are relative and the buttons to the apps are absolute to
+  `zero-wine-one.vercel.app`, which stays correct
+- If the apps later get a domain of their own, update those two button hrefs in
+  `site-info/index.html` and `site-info/manual.html`
 
-Optional, to stop the info project rebuilding on every app commit — Project
-Settings → Git → **Ignored Build Step**:
+## 4. What can and cannot break the app deploy
 
-```sh
-git diff --quiet HEAD^ HEAD -- site-info/
+`npm run build:site` is the **apps'** build command and it also builds these
+pages. Failure is deliberately **non-fatal there**: a truncated marketing page
+must not stop a deploy of Zero and Bench. It prints
+
+```
+⚠ the information page did not build — the apps below are unaffected,
+  but its own deploy will fail until this is fixed.
 ```
 
-## 4. When you pick a domain
+and carries on. In *this* project's own build the same failure is fatal, because
+here the page is the deliverable. One assembly step still produces everything;
+what changes is who a failure is allowed to stop.
 
-Do it on the **info project**, not the app project.
+## 5. Editing the pages afterwards
 
-- [ ] Info project → Settings → Domains → **Add** `example.com` (and Vercel will
-      offer `www.example.com` with a redirect — take it)
-- [ ] DNS at the registrar, as Vercel's screen states it:
-      apex `A → 76.76.21.21`, and `www` `CNAME → cname.vercel-dns.com.`
-      (use Vercel's values if they differ from these; it prints the current ones)
-- [ ] Wait for the certificate to issue, then load the apex and `www` over HTTPS
-- [ ] **Do not** add that domain to the app project. It would serve Zero at the
-      marketing hostname: a second origin with an empty logbook and an
-      installable second copy of the app
-- [ ] If you want the app on a subdomain of the same name later — e.g.
-      `app.example.com` → the app project — that is a separate decision with a
-      real cost: it is a **new origin**, so every existing user's `localStorage`,
-      installed PWA and offline cache stay behind on `zero-wine-one.vercel.app`.
-      Add it as an *additional* domain, keep the old one working, and do not
-      redirect the old origin to it
+Edit `site-info/index.html` or `site-info/manual.html`, push, and Vercel
+redeploys both projects — the apps project rebuilds unnecessarily but harmlessly.
 
-Nothing needs to move projects when the domain arrives. That is the reason the
-page is in a project of its own from the start.
+Two rules the build enforces, so breaking them fails loudly rather than
+silently:
 
-## 5. If you decide you want it at `/info` on the app origin anyway
+1. **No `<html>` or `<body>` in the source.** The build adds them.
+2. **Exactly one `</style>` per page.** That is where the build splits head from
+   body; a second style block would put the whole page inside `<head>` and
+   render a blank document.
 
-Read the box at the top first, then:
-
-1. `apps/zero/src/sw.js` — widen the exclusion in the fetch handler from
-   `/(^|\/)bench(\/|$)/` to also skip `info`. Without this the page is stale for
-   existing users and answered with Zero's shell offline. This is not optional
-2. `tools/build-site.mjs` — copy the page into the assembled site:
-   `fs.cpSync(path.join(ROOT, 'site-info/dist'), path.join(SITE, 'info'), { recursive: true });`
-3. Root `vercel.json` — add a headers entry for `/info/` and `/info/index.html`
-   with `Cache-Control: public, max-age=0, must-revalidate`, matching the
-   entries already there. No comment keys (`"//"`), no BOM: Vercel validates
-   this file against a schema that rejects unknown properties, at deploy time,
-   before any build starts
-4. `tools/preflight.mjs` — the info-page section checks `site-info/dist`; point
-   it at `site/info` as well
-
-## What is in this folder
-
-| file | what it is |
-| --- | --- |
-| `index.html` | the page. One self-contained file, one external stylesheet (Google Fonts) |
-| `build.mjs` | copies the page to `dist/`, refuses to publish an empty one, warns about §0 |
-| `package.json` | so Vercel's install/build step behaves predictably in this root directory |
-| `vercel.json` | the info project's build, output and cache headers |
-| `dist/` | build output, gitignored |
-
-`npm run build:site` at the repo root runs `build.mjs` too, so one command still
-produces everything — it just publishes the page somewhere else.
-
-## Security headers
-
-Neither `vercel.json` in this repo sets any (`Cache-Control` only), and this one
-matches that rather than inventing a convention for one page. If you want them,
-the ones worth having on a static marketing page are `X-Content-Type-Options:
-nosniff`, `Referrer-Policy: strict-origin-when-cross-origin` and a
-`Strict-Transport-Security` header — add them to both files at once, so the two
-origins do not drift.
+And one rule it cannot enforce: **the solver table on the overview is generated
+from `apps/zero/src/solver.js` and goes stale when that file changes.** It has
+already shipped stale once. Regenerate it from the current solver rather than
+copying it from a source comment — the comments go stale too.

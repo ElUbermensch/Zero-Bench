@@ -80,7 +80,19 @@ execFileSync(process.execPath, [path.join(ROOT, 'apps/admin/build.mjs')], { stdi
  * deploy can bust, and serve Zero's shell under the page's URL offline. It
  * goes to site-info/dist/, which a Vercel project of its own publishes; the
  * reasoning is written out in site-info/build.mjs and site-info/DEPLOY.md. */
-execFileSync(process.execPath, [path.join(ROOT, 'site-info/build.mjs')], { stdio: 'inherit' });
+/* NON-FATAL, deliberately. execFileSync throws on a non-zero exit, and this
+ * script is the APPS' build command on Vercel -- so a truncated marketing page
+ * or a stray <style> in it would fail the deploy of Zero and Bench, which have
+ * nothing to do with it. The information page has its own Vercel project and
+ * its own build, and THERE the same failure is fatal, because there the page is
+ * the deliverable. One assembly step still produces everything; what changes is
+ * who a failure is allowed to stop. */
+try {
+  execFileSync(process.execPath, [path.join(ROOT, 'site-info/build.mjs')], { stdio: 'inherit' });
+} catch {
+  console.log('  ⚠ the information page did not build — the apps below are unaffected,\n'
+            + '    but its own deploy will fail until this is fixed.');
+}
 
 fs.rmSync(SITE, { recursive: true, force: true });
 fs.mkdirSync(path.join(SITE, 'bench'), { recursive: true });

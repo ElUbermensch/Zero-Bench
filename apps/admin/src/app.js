@@ -727,17 +727,33 @@ function siteDashboard(d) {
   </main>`;
 }
 
+/* The tab bar, at the bottom, because that is where Zero and Bench put theirs
+ * and this is the third app on the same home screen. A glyph over a label at
+ * the same 10.5px, matching their geometry, so the three do not read as two
+ * products and a web page.
+ *
+ * Only rendered on the dashboard itself: on the sign-in card or the MFA screen
+ * there is nothing to navigate between, and a bar offering tabs that all
+ * refuse would be an invitation to a dead end. */
+function tabbar() {
+  if (UI.view !== 'ready') return '';
+  const TABS = [
+    ['apps', '▤', 'Apps'],
+    ['site', '◰', 'Website'],
+    ['support', '≡', 'Customers'],
+  ];
+  return `<nav class="tabbar">${TABS.map(([k, g, label]) =>
+    `<button data-tab="${k}" aria-pressed="${UI.tab === k}">
+       <span class="g" aria-hidden="true">${g}</span>${label}</button>`).join('')}
+  </nav><div class="tabshim"></div>`;
+}
+
 function header() {
   const u = CORE && CORE.getUser();
   return `<header>
     <h1>Zero Suite</h1>
     <span class="sub">owner dashboard</span>
     <span class="spacer"></span>
-    <span class="tabs">
-      <button data-tab="apps" aria-pressed="${UI.tab === 'apps'}">Apps</button>
-      <button data-tab="site" aria-pressed="${UI.tab === 'site'}">Website</button>
-      <button data-tab="support" aria-pressed="${UI.tab === 'support'}">Customers</button>
-    </span>
     ${UI.tab === 'support' ? '' : `<span class="range">
       ${RANGES.map(([n, label]) => `<button data-range="${n}"
         aria-pressed="${UI.range === n}">${label}</button>`).join('')}
@@ -888,7 +904,7 @@ function render() {
   }
   if (UI.view === 'loading') { app.innerHTML = header() + '<main><p class="note">Loading…</p></main>'; return; }
   app.innerHTML = header() + (UI.tab === 'site' ? siteDashboard(UI.data)
-    : UI.tab === 'support' ? supportTab() : dashboard(UI.data));
+    : UI.tab === 'support' ? supportTab() : dashboard(UI.data)) + tabbar();
 }
 
 /* -------------------------------------------------------------------- flow */

@@ -28,6 +28,12 @@
   --ink:#f0f2f8; --ink2:#9099b0; --ink3:#6c7480;
   --ok:#3db87a; --warn:#e8a317; --bad:#f06060;
   --r:9px;
+  /* Same four the apps declare. viewport-fit=cover is already on the meta
+   * above, which is what makes these non-zero on a notched phone. */
+  --safe-t:env(safe-area-inset-top,0px);
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
 
   /* The two series colours, and the reason they are not the apps' own accents.
    *
@@ -45,18 +51,51 @@ html,body{margin:0;padding:0}
 body{
   background:var(--bg); color:var(--ink); font-family:var(--fh);
   font-size:14px; line-height:1.5;
-  padding:0 0 60px;
+  /* Clears the bottom bar plus whatever the home indicator takes. */
+  padding:0 0 calc(74px + var(--safe-b));
 }
 a{color:var(--zero)}
 
 header{
   position:sticky; top:0; z-index:5; background:rgba(15,17,23,.94);
   backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
-  padding:14px 20px; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  /* --safe-t, or the title sits under the clock and the battery on any phone
+     with a notch. Both apps pay this at the top of their own bars; a dashboard
+     saved to the same home screen has to pay it too. */
+  padding:calc(14px + var(--safe-t)) calc(20px + var(--safe-r))
+          14px calc(20px + var(--safe-l));
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
 }
 header h1{font-size:15px; margin:0; font-weight:600; letter-spacing:.01em}
 header .sub{color:var(--ink3); font-size:12px; font-family:var(--fm)}
-.tabs{display:flex; gap:6px}
+/* The tab bar, at the BOTTOM, matching Zero and Bench.
+ *
+ * Fixed rather than the last row of a flex column, because this page scrolls as
+ * one document -- Zero's is fixed for the same reason and on a phone that IS
+ * the physical bottom.
+ *
+ * No var(--safe-b) reserve inside the bar, which is the decision both apps
+ * already made and documented: 34px of bar-coloured space under the labels
+ * reads as padding rather than safety margin, and iOS draws the home indicator
+ * over native tab bars rather than above them. The shim below fills the strip
+ * in the bar's own colour for the case where the fixed bottom is not the
+ * physical bottom. */
+nav.tabbar{
+  position:fixed; left:0; right:0; bottom:0; z-index:40; display:flex;
+  background:rgba(15,17,23,.97); backdrop-filter:blur(8px);
+  border-top:1px solid var(--line);
+  padding-left:var(--safe-l); padding-right:var(--safe-r);
+}
+nav.tabbar button{
+  flex:1; background:none; border:0; border-radius:0; color:var(--ink3);
+  padding:8px 4px 10px; display:flex; flex-direction:column; align-items:center;
+  gap:2px; font-size:10.5px; font-family:var(--fh); cursor:pointer;
+}
+nav.tabbar button:hover{border-color:transparent; color:var(--ink2)}
+nav.tabbar button[aria-pressed="true"]{background:none; color:var(--zero)}
+nav.tabbar .g{font-size:17px; line-height:1}
+.tabshim{position:fixed; left:0; right:0; bottom:0; z-index:39;
+  pointer-events:none; height:var(--safe-b); background:rgba(15,17,23,.97)}
 .fresh{color:var(--ink3); font-size:11px; font-family:var(--fm); margin-right:4px}
 .fresh.stale{color:var(--warn)}
 .spacer{flex:1}
@@ -73,7 +112,10 @@ button{
 }
 button:hover{border-color:var(--ink3)}
 button[aria-pressed="true"]{background:var(--ink); color:var(--bg); border-color:var(--ink)}
-.range{display:flex; gap:6px}
+/* Wraps. Seven windows do not fit across a phone, and the one that fell off
+   the right edge was 1y -- the longest view, silently unreachable on the
+   device most likely to be checking it over a coffee. */
+.range{display:flex; gap:6px; flex-wrap:wrap}
 
 input{
   font-family:inherit; font-size:13px; background:var(--panel2); color:var(--ink);

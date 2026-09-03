@@ -2506,6 +2506,17 @@ const ZeroCore = (() => {
     let cursors = store.get(K.cursors) || {};     // { table: iso-timestamp }
     let outbox  = store.get(K.outbox)  || [];     // [{ id, table, row, op, queuedAt }]
     let rejected = store.get(K.rejected) || [];   // dead-lettered writes, see pushTable
+    /* Sweep telemetry out of a rejected list written by an older build.
+     *
+     * deadLetter drops these now, but a device that already collected them is
+     * still showing the count and would go on showing it: nothing removes a
+     * rejected row except the user pressing dismiss. The first person to run
+     * this had 168, every one of them an analytics row refused for an identity
+     * mismatch, presented as their own work having failed to sync. */
+    {
+      const kept = rejected.filter(r => r.table !== TELEMETRY);
+      if (kept.length !== rejected.length) { rejected = kept; store.set(K.rejected, rejected); }
+    }
     /* { table: { at: iso, tries: n } } -- the oldest row this app's apply
      * handler pulled and could NOT place, and how many syncs in a row it has
      * been stuck there. See commitCursor. */
@@ -2670,9 +2681,43 @@ const ZeroCore = (() => {
     }
 
     /* -------------------------------------------------------------- auth */
+    /* Telemetry queued by an identity that is no longer signed in can never be
+     * delivered, so it is dropped the moment the identity changes.
+     *
+     * The insert policy is `user_id = auth.uid()`, and the row carries the id
+     * it was queued with. signOut() KEEPS the outbox on purpose -- unsent work
+     * is the user's and should still go when they sign back in -- but that
+     * reasoning does not extend to analytics. Zero also signs in anonymously
+     * for pair fire, so a device that joins a relay and then signs into a real
+     * account has a queue full of rows stamped with an identity the server
+     * will refuse forever. Every one of them 403s on every sync from then on.
+     *
+     * Re-stamping them with the new user was the other option and is worse: it
+     * would file one person's activity under another person's account.
+     *
+     * Only runs when the new identity is actually known. A token refresh can
+     * return a session with no user object, and treating that as "nobody"
+     * would throw away a signed-in user's queue on every rotation. */
+    function dropOrphanTelemetry(uid) {
+      const before = outbox.length;
+      outbox = outbox.filter(e => e.table !== TELEMETRY || e.row.user_id === uid);
+      if (outbox.length !== before) persistOutbox();
+    }
+
     function setSession(s, reason) {
+      const prevUid = session && session.user && session.user.id;
+      const nextUid = s && s.user && s.user.id;
       session = s;
       store.set(K.session, s);
+      /* On sign-IN, not on sign-out, and the difference is a real one.
+       *
+       * Signing out does not make a queued row undeliverable: the same user
+       * signing back in can still send it, and `sign_out` itself is tracked
+       * moments before the session is cleared, so purging here would throw
+       * away the event that records the thing happening. It is signing in as
+       * SOMEONE ELSE that strands them -- that is the point at which the
+       * server will refuse those rows on every sync from then on. */
+      if (nextUid && nextUid !== prevUid) dropOrphanTelemetry(nextUid);
       if (s) emit(EVENTS.AUTH_SIGNED_IN, { user: s.user });
       else emit(EVENTS.AUTH_SIGNED_OUT, { reason: reason || 'user' });
     }
@@ -2902,6 +2947,28 @@ const ZeroCore = (() => {
     function aal() {
       const c = jwtClaims();
       return (c && c.aal) || 'aal1';
+    }
+
+    /**
+     * Send queued telemetry and nothing else.
+     *
+     * sync() pushes every table in declared order, and Zero only calls it when
+     * the user taps sync or publishes a score -- so Zero's analytics sat in the
+     * outbox indefinitely while Bench's went up after every edit, and the owner
+     * dashboard showed one app's traffic and called it the product's. Raising
+     * Zero to a full auto-sync would have fixed the symptom by changing what
+     * the app does with the USER's data on a phone at a range, which is not a
+     * decision telemetry gets to make.
+     *
+     * Failures are swallowed on purpose. This is a background errand: it must
+     * not raise, must not emit a sync error, and must not be distinguishable
+     * from nothing having happened.
+     */
+    async function flushTelemetry() {
+      if (cfg.telemetry === false) return 0;
+      if (!isSignedIn() || !isOnline()) return 0;
+      if (!pendingFor(TELEMETRY)) return 0;
+      try { return await pushTable(TELEMETRY); } catch (e) { return 0; }
     }
 
     /** Ensure SOME identity exists, without asking the user for anything.
@@ -3227,9 +3294,32 @@ const ZeroCore = (() => {
       const onPageHide = () => report(true);
       document.addEventListener('visibilitychange', onVisibility);
       window.addEventListener('pagehide', onPageHide);
+
+      /* Two chances to actually send what was measured.
+       *
+       * On the way out, because a visit that is never coming back is the one
+       * whose events would otherwise wait for a sync that may be days away --
+       * and the app_background row reporting the visit's length is written
+       * moments earlier by report() above. It is a best-effort send from a
+       * handler the browser may kill mid-flight, which is exactly what the
+       * queue is for: anything that does not make it stays queued.
+       *
+       * And on an interval, for the long session that never backgrounds: a
+       * phone propped on a bench for an afternoon is the normal case here.
+       * Five minutes is chosen against the fact that this is a background
+       * errand on a device that may be on cellular at a range -- often enough
+       * that a dashboard is current, rare enough to be invisible. */
+      const onIdleFlush = () => { flushTelemetry(); };
+      document.addEventListener('visibilitychange', onIdleFlush);
+      window.addEventListener('pagehide', onIdleFlush);
+      const timer = setInterval(onIdleFlush, 300_000);
+
       return () => {
         document.removeEventListener('visibilitychange', onVisibility);
         window.removeEventListener('pagehide', onPageHide);
+        document.removeEventListener('visibilitychange', onIdleFlush);
+        window.removeEventListener('pagehide', onIdleFlush);
+        clearInterval(timer);
       };
     }
 
@@ -3469,6 +3559,18 @@ const ZeroCore = (() => {
       const ids = new Set(entries.map(e => e.row.id));
       outbox = outbox.filter(e => !(e.table === table && ids.has(e.row.id) &&
                                     entries.indexOf(e) !== -1));
+      /* A refused telemetry row is dropped, not kept.
+       *
+       * The rejected list is a thing BOTH apps put in front of the user, with
+       * a count and a retry button, and it is meant to say "some of your work
+       * did not reach the server". An analytics row is not their work. One
+       * that cannot be delivered is worth exactly nothing, and showing it
+       * turns a measurement the user never asked for into a fault they are
+       * asked to care about.
+       *
+       * This is not hypothetical: 168 of them piled up in one account, which
+       * is how the bug this guards against was found. */
+      if (table === TELEMETRY) { persistOutbox(); return; }
       /* `op` is kept, and it matters more than it looks. A tombstone travels as
        * a PATCH; putting one back as an upsert of {id, deleted_at} is refused
        * outright, because Postgres builds the insert tuple before it detects
@@ -4319,7 +4421,7 @@ const ZeroCore = (() => {
       signUp, signIn, signInWithOtp, signOut, refresh,
       getSession, getUser, isSignedIn,
       upsert, remove, enqueue, pendingCount, pendingFor, rejectedList, clearRejected, retryRejected,
-      track, attachSessionListeners,
+      track, attachSessionListeners, flushTelemetry,
       get usageSessionId() { return usageSessionId; },
       sync, pullTable, pushTable, reconcile, resetCursors,
       setOnline, attachBrowserListeners, startAutoSync, stopAutoSync,

@@ -373,6 +373,24 @@ function dashboard(d) {
   </main>`;
 }
 
+/* Says when the numbers were last read, because a dashboard that refreshes
+ * itself is indistinguishable from one that has quietly stopped. A failed
+ * refresh keeps the old figures and labels them, rather than blanking the page
+ * or -- worse -- leaving a stale number looking current. */
+function freshness() {
+  if (UI.view !== 'ready') return '';
+  if (UI.refreshing) return `<span class="fresh">updating…</span>`;
+  if (UI.staleError) {
+    return `<span class="fresh stale" title="${esc(UI.staleError)}">could not refresh — showing the last good read</span>`;
+  }
+  if (!UI.lastLoaded) return '';
+  const secs = Math.round((Date.now() - UI.lastLoaded) / 1000);
+  const ago = secs < 10 ? 'just now'
+            : secs < 90 ? `${secs}s ago`
+            : `${Math.round(secs / 60)}m ago`;
+  return `<span class="fresh">updated ${ago}</span>`;
+}
+
 function header() {
   const u = CORE && CORE.getUser();
   return `<header>
@@ -383,7 +401,8 @@ function header() {
       ${[7, 30, 90].map(n => `<button data-range="${n}"
         aria-pressed="${UI.range === n}">${n}d</button>`).join('')}
     </span>
-    <button data-act="refresh">${UI.busy ? 'Loading…' : 'Refresh'}</button>
+    ${freshness()}
+    <button data-act="refresh">${UI.busy || UI.refreshing ? 'Loading…' : 'Refresh'}</button>
     ${u ? `<button data-act="signout">Sign out</button>` : ''}
   </header>`;
 }
@@ -531,6 +550,59 @@ function render() {
 }
 
 /* -------------------------------------------------------------------- flow */
+/* ------------------------------------------------------------ auto-refresh */
+/*
+ * The dashboard reports a number that changes while you are looking at it, so
+ * it refreshes itself rather than making the reader wonder whether it is live.
+ *
+ * A minute, not ten seconds. The events behind these views arrive in batches
+ * when an app syncs -- zero-core flushes telemetry on an interval and when a
+ * phone is backgrounded, not on every tap -- so polling at ten seconds would
+ * issue six times the queries to redraw the same four charts, and the number
+ * it painted would be no fresher. Four view reads a minute is already generous
+ * against how fast the underlying data can actually move.
+ *
+ * Paused while the tab is hidden, and caught up immediately when it comes back:
+ * a dashboard left open on a second monitor overnight should not spend the
+ * night querying, and should not need a manual reload in the morning either.
+ */
+const REFRESH_MS = 60_000;
+let refreshTimer = null;
+
+async function refresh(reason) {
+  // Never over the top of another read, and never while a screen that is not
+  // the dashboard is up -- an auto-refresh must not interrupt MFA entry.
+  if (UI.busy || UI.view !== 'ready') return;
+  UI.refreshing = true; render();
+  try {
+    UI.data = await load();
+    UI.lastLoaded = Date.now();
+    UI.staleError = null;
+  } catch (e) {
+    /* A failed refresh keeps the numbers already on screen and says so. The
+     * alternative -- replacing a working dashboard with an error page because
+     * one poll timed out -- throws away good data over a transient blip. */
+    UI.staleError = e.message || String(e);
+  }
+  UI.refreshing = false;
+  render();
+}
+
+function startRefresh() {
+  stopRefresh();
+  refreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') refresh('interval');
+  }, REFRESH_MS);
+}
+function stopRefresh() { if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; } }
+
+document.addEventListener('visibilitychange', () => {
+  // Coming back to a tab that has been hidden for a while: catch up at once
+  // rather than showing yesterday until the next tick.
+  if (document.visibilityState === 'visible' && UI.view === 'ready'
+      && Date.now() - (UI.lastLoaded || 0) > REFRESH_MS) refresh('visible');
+});
+
 async function enter() {
   UI.view = 'loading'; UI.busy = true; render();
   /* Ask the server, every time. A stale "yes" cached on the device would keep
@@ -552,9 +624,12 @@ async function enter() {
   if (CORE.aal() !== 'aal2') { UI.busy = false; return startMfa(); }
   try {
     UI.data = await load();
+    UI.lastLoaded = Date.now();
     UI.view = 'ready';
+    startRefresh();
   } catch (e) {
     UI.view = 'error'; UI.error = e.message || String(e);
+    stopRefresh();
   }
   UI.busy = false;
   render();

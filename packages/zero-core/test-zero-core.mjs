@@ -1775,6 +1775,62 @@ section('telemetry');
   const orphan = c.track('batch_created', {});
   ok(orphan === null, 'tracking while signed out records nothing rather than queueing a refusal');
 
+  /* ------------------------------------------------------------------------
+   * Telemetry stranded by a change of identity.
+   *
+   * This is the bug that reached production: the insert policy is
+   * `user_id = auth.uid()`, the row carries the id it was QUEUED with, and
+   * signOut deliberately keeps the outbox. So events queued by one identity
+   * were pushed under the next one, the server refused every one of them, and
+   * they dead-lettered into the rejected list both apps show the user -- 168
+   * of them in one account, presented as the user's own work failing to sync.
+   * ---------------------------------------------------------------------- */
+  {
+    const stranded = rowsOf().length;
+    ok(stranded > 0, 'signing out leaves the queued events alone — the same user can still send them');
+
+    // A DIFFERENT account signs in on this device.
+    await c.signUp('someone-else@example.com', 'hunter2');
+    const after = rowsOf();
+    ok(after.length > 0, 'the new session tracks its own events');
+    ok(after.every(e => e.row.user_id === c.getUser().id),
+       'and every queued event now belongs to whoever is signed in');
+    ok(!after.some(e => e.row.event_name === 'sign_out'),
+       "...the previous account's stranded events are dropped, not left to 403 forever");
+
+    /* The invariant that matters even if something is stranded anyway: a
+     * refused analytics row must never appear as the user's failed work. */
+    const before = c.rejectedList().length;
+    c.track('probe', {});
+    const probe = rowsOf().find(e => e.row.event_name === 'probe');
+    probe.row.user_id = '00000000-0000-0000-0000-0000000000ff';   // force a refusal
+    await c.sync({ trigger: 'manual', tables: [] });
+    ok(c.rejectedList().length === before,
+       'a refused telemetry row is discarded rather than shown as the user\'s failed work');
+    ok(!evOf(c).some(e => e.row.event_name === 'probe'),
+       '...and does not sit in the queue retrying forever either');
+  }
+
+  /* flushTelemetry: Zero only syncs when the user asks, so without this its
+   * analytics never left the device and the dashboard showed Bench alone. */
+  {
+    const c2 = mkClient(undefined, { appId: 'zero', telemetry: true });
+    await c2.signUp('flush@example.com', 'hunter2');
+    await c2.sync({ trigger: 'manual', tables: [] });        // drain the sign-up events
+    c2.track('shot_logged', { n: 5 });
+    c2.upsert('firearms', { name: 'Tikka', cartridge: '308 Win' });
+    ok(c2.pendingFor('analytics_event') === 1 && c2.pendingFor('firearms') === 1,
+       'a telemetry row and a real write are both queued');
+
+    await c2.flushTelemetry();
+    ok(c2.pendingFor('analytics_event') === 0, 'flushTelemetry sends the telemetry');
+    ok(c2.pendingFor('firearms') === 1,
+       "...and nothing else — the user's own work is not pushed behind their back");
+
+    await c2.signOut();
+    ok(await c2.flushTelemetry() === 0, 'signed out it is a no-op rather than an error');
+  }
+
   const off = mkClient(undefined, { telemetry: false });
   await off.signUp('quiet@example.com', 'hunter2');
   ok(off.outbox.filter(e => e.table === 'analytics_event').length === 0,

@@ -17,7 +17,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
 import { loadConfig } from '../../tools/config.mjs';
 import { FACE_CSS, FONT_FILES } from '../../packages/fonts/face-css.mjs';
@@ -131,8 +131,18 @@ export async function buildZero(o) {
   return { bytes: bundle.length, cache: `zero-${hash}` };
 }
 
-/* CLI: build for deployment, from supabase.config.json. */
-if (import.meta.url === `file://${process.argv[1]}`) {
+/* CLI: build for deployment, from supabase.config.json.
+ *
+ * pathToFileURL, not string concatenation. `file://${argv[1]}` yields
+ * "file://C:\zero-suite\apps\zero\build.mjs" on Windows, while import.meta.url
+ * is "file:///C:/zero-suite/apps/zero/build.mjs" -- different slashes, a
+ * different number of them, and a drive letter where a host should be. So the
+ * test was false on every Windows machine, this block never ran, and
+ * `npm run build:zero` printed the embed step and exited 0 having built
+ * nothing. Silent success is the bad part: CI builds on Linux where the two
+ * forms happen to agree, so nothing anywhere said the local build was a no-op.
+ */
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cfg = loadConfig();
   const r = await buildZero({ url: cfg.url, anonKey: cfg.anonKey });
   console.log(`dist/bundle.js ${(r.bytes / 1024 / 1024).toFixed(2)} MB · cache ${r.cache}` +

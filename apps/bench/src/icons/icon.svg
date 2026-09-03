@@ -1,9 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Reloading Tracker">
-  <rect width="512" height="512" rx="96" fill="#16181c"/>
-  <g transform="translate(256 256) rotate(-90) translate(-256 -256)">
-    <path d="M256 96 L300 150 L300 372 L296 372 L296 400 L216 400 L216 372 L212 372 L212 150 Z"
-          fill="#b9a06a" stroke="#8d7844" stroke-width="8"/>
-    <rect x="212" y="192" width="88" height="34" fill="#d92b2b"/>
-    <rect x="212" y="300" width="88" height="34" fill="#15171a"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Bench">
+  <rect width="512" height="512" fill="#0f1117"/>
+  <!-- Case: thin light outline, the same stroke language as Zero's rings. -->
+  <g fill="none" stroke="#f0f2f8" stroke-opacity=".67" stroke-width="6" stroke-linejoin="round">
+    <path d="M176 452 L176 252 L206 208 L306 208 L336 252 L336 452 Z"/>
+    <path d="M176 414 H336"/>
   </g>
+  <!-- Bullet: the accent, the way Zero's dot is. -->
+  <path d="M206 208 L206 150 Q256 58 306 150 L306 208 Z" fill="#c9a227"/>
 </svg>

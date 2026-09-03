@@ -33,9 +33,18 @@ const withFaces = shell.replace('<style>', () => '<style>\n' + FACE_CSS);
 const out = withFaces.replace('<!--APP-->', () => '<script>\n' + js + '\n<\/script>');
 fs.mkdirSync('dist', { recursive: true });
 fs.writeFileSync('dist/index.html', out);
-/* No service worker and no manifest, deliberately. This is not an offline-first
- * PWA: every number on it comes from a query, so a cached shell would only ever
- * show a spinner or yesterday's figures. It is a page you open. */
+/* A manifest and icons, but still no service worker, and the split is on
+ * purpose. The worker is what would make this offline-capable, and it must not
+ * be: every number here comes from a query, so a cached shell could only ever
+ * show a spinner or yesterday's figures. The manifest is only about identity --
+ * without it, saving the page to a home screen gets you a screenshot of
+ * whatever was on screen instead of an icon.
+ *
+ * Icons live under src/ rather than being generated, for the reason Bench's do:
+ * dist/ is gitignored, so a fresh clone would otherwise build a PWA with none. */
+fs.copyFileSync('src/manifest.webmanifest', 'dist/manifest.webmanifest');
+fs.mkdirSync('dist/icons', { recursive: true });
+for (const f of fs.readdirSync('src/icons')) fs.copyFileSync('src/icons/' + f, 'dist/icons/' + f);
 fs.mkdirSync('dist/fonts', { recursive: true });
 for (const f of FONT_FILES) {
   fs.copyFileSync(path.join('../../packages/fonts', f), path.join('dist/fonts', f));

@@ -150,6 +150,37 @@ for (const [app, files] of [
      `manifest ${m.theme_color}/${m.background_color}, meta ${themeMeta}, expected ${PRODUCT_BG}`);
 }
 
+/* The dashboard is checked separately, and shorter, because it is installable
+ * without being offline-capable. Every service-worker assertion above is
+ * deliberately inapplicable: it ships no worker, since a cached shell over a
+ * page whose every number is a query could only ever show stale figures. What
+ * it does need is an identity -- a manifest and icons -- or saving it to a home
+ * screen gets you a screenshot of the page instead of an icon, which is what
+ * it did on the first deploy. */
+for (const f of ['src/shell.html', 'src/manifest.webmanifest', 'src/icons/icon.svg',
+                 'src/icons/icon-192.png', 'src/icons/icon-512.png',
+                 'src/icons/icon-maskable-512.png']) {
+  ok(has(`apps/admin/${f}`), `apps/admin/${f}`, 'the dashboard needs this to install cleanly');
+}
+{
+  const m = JSON.parse(read('apps/admin/src/manifest.webmanifest'));
+  const shell = read('apps/admin/src/shell.html');
+  ok(m.icons.some(i => i.purpose === 'maskable'), 'apps/admin declares a maskable icon',
+     'without one, Android crops the icon into a circle and clips it');
+  ok(m.start_url === './' && m.scope === './', 'apps/admin uses relative start_url and scope',
+     'the dashboard is served from /admin/, so an absolute path would leave its scope');
+  ok(m.theme_color === PRODUCT_BG && m.background_color === PRODUCT_BG,
+     'apps/admin paints its launch screen the app\'s own colour',
+     `manifest ${m.theme_color}/${m.background_color}, expected ${PRODUCT_BG}`);
+  ok(/rel="manifest"/.test(shell) && /rel="apple-touch-icon"/.test(shell),
+     'apps/admin links its manifest and an apple-touch-icon',
+     'iOS reads the link tag, not the manifest, when saving to a home screen');
+  /* The one thing it must NOT have. Zero's worker declines /admin/ precisely
+   * because nothing here would ever take that scope back. */
+  ok(!has('apps/admin/src/sw.js'), 'apps/admin ships no service worker',
+     'the dashboard is a page you open; a cached one would report yesterday');
+}
+
 /* ──────────────────────────────────────────── the embedded core, and CI */
 section('consistency');
 const embedded = read('apps/zero/Zero.jsx');

@@ -7,6 +7,16 @@
 <meta name="description" content="Owner dashboard for Zero and Bench: traffic, sign-ups and feature usage.">
 <meta name="robots" content="noindex, nofollow">
 <title>Zero Suite — Owner</title>
+<!-- Installable, but deliberately not offline-capable: there is no service
+     worker here, because every number on this page comes from a query and a
+     cached shell could only ever show a spinner or yesterday's figures. The
+     manifest and the apple-touch-icon exist so that saving it to a home screen
+     gives you the icon rather than a screenshot of the page. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
 /* The suite's palette, value for value, so this reads as the same product as
  * the two apps it reports on. Type stack likewise -- the faces are vendored and

@@ -121,10 +121,20 @@ p { margin: 0; }
   grid-template-columns: 1.15fr .85fr;
   gap: 48px;
   align-items: center;
-  padding: 96px 0 72px;
+  /* Top and bottom only, NEVER the padding shorthand.
+   *
+   * .hero-grid is also a .wrap, and .wrap's whole job is the side gutter. A
+   * shorthand here writes padding-left and padding-right too -- to 0 -- so the
+   * hero lost the gutter every other block on the page keeps, and the headline
+   * and the buttons ran into the edge of the screen. It hid above ~1160px,
+   * where .wrap hits its 1080 max-width and "margin: 0 auto" provides the inset
+   * instead of the padding, so the page looked right on the machine it was
+   * built on and wrong on every phone. */
+  padding-top: 96px;
+  padding-bottom: 72px;
 }
 @media (max-width: 900px) {
-  .hero-grid { grid-template-columns: 1fr; gap: 36px; padding: 72px 0 56px; }
+  .hero-grid { grid-template-columns: 1fr; gap: 36px; padding-top: 72px; padding-bottom: 56px; }
 }
 .hero h1 { font-size: clamp(44px, 7.2vw, 88px); }
 .hero .lede {
@@ -322,6 +332,52 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
 .disc .dl { font-size: 14px; font-weight: 700; margin-top: 10px; }
 .disc .dd { font-size: 12.5px; color: var(--dim); margin-top: 6px; line-height: 1.5; }
 
+/* ── Pair fire ─────────────────────────────────────────────────────────── */
+/* The two firing-point colours are Zero's own, taken from the app so the
+   picture on this page and the picture on the phone are the same picture.
+   They are the app's accent and the blue it already spends on sighters and
+   wind, which reads as "the other one" without competing. They do NOT follow
+   the theme, for the same reason the target face does not: a firing point is
+   a place on the line, not a piece of chrome. */
+:root { --slot1: #e8943a; --slot2: #4a9eff; }
+.roles { display: grid; gap: 20px; }
+.role { padding-left: 16px; border-left: 2px solid var(--line); }
+.role .rk {
+  display: block; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--acc); margin-bottom: 6px;
+}
+.role p { color: var(--dim); font-size: 15px; line-height: 1.62; }
+.role em { color: var(--ink); font-style: italic; }
+.ui {
+  font-family: 'Space Mono', monospace; font-size: .88em; color: var(--ink);
+  background: var(--raised); border: 1px solid var(--line); border-radius: 3px;
+  padding: 1px 5px;
+  /* Unbroken while it fits, wrapped rather than overflowing when it cannot
+     -- see the same rule in the manual, where a six-word chip pushed the
+     document wider than a 320px phone. */
+  white-space: nowrap; overflow-wrap: anywhere;
+}
+@media (max-width: 380px) { .ui { white-space: normal; } }
+.relayviz svg { width: 100%; height: auto; display: block; max-width: 340px; margin: 0 auto; }
+.vizkey { list-style: none; margin: 20px auto 0; padding: 0; display: grid; gap: 9px; max-width: 340px; }
+.vizkey li {
+  display: flex; align-items: center; gap: 11px;
+  font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: .03em;
+  color: var(--dim); line-height: 1.4;
+}
+.vizkey .sw { width: 12px; height: 12px; border-radius: 50%; flex: none; box-sizing: border-box; }
+.vizkey .sw1 { background: var(--slot1); }
+.vizkey .sw2 { border: 1.8px dashed var(--slot2); }
+.vizkey .swc { border: 1.8px solid var(--acc); }
+.relayviz .facecap { max-width: 340px; margin-left: auto; margin-right: auto; }
+.relaynotes { padding: clamp(16px, 2vw, 22px) clamp(12px, 1.5vw, 18px); margin-top: 0; gap: 14px; }
+.relaynotes p { font-size: 15px; line-height: 1.62; }
+.relaynotes strong { color: var(--ink); font-weight: 600; }
+.book-foot a { color: var(--acc); text-decoration: none; }
+.book-foot a:hover { text-decoration: underline; }
+.cardlink { color: var(--acc); text-decoration: none; white-space: nowrap; }
+.cardlink:hover { text-decoration: underline; }
+
 /* ── Prose ─────────────────────────────────────────────────────────────── */
 .prose p { color: var(--dim); }
 #about .prose { margin-top: 24px; }
@@ -350,7 +406,8 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
    ═══════════════════════════════════════════════════════════════════════ */
 .wrap { padding: 0 clamp(20px, 4.5vw, 40px); }
 section { padding: clamp(56px, 7.5vw, 100px) 0; }
-.hero-grid { padding: clamp(52px, 8vw, 104px) 0 clamp(44px, 6vw, 80px); gap: clamp(32px, 4vw, 56px); }
+.hero-grid { padding-top: clamp(52px, 8vw, 104px); padding-bottom: clamp(44px, 6vw, 80px);
+             gap: clamp(32px, 4vw, 56px); }   /* top/bottom only — see .hero-grid above */
 .cards { gap: clamp(14px, 1.6vw, 20px); margin-top: clamp(28px, 3.4vw, 44px); }
 .card { padding: clamp(20px, 2.2vw, 28px); }
 .sec-sub { margin-top: 16px; }
@@ -449,6 +506,7 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span> Zero <span class="amp">&amp;</span> Bench</a>
     <nav class="topnav">
       <a href="#zero">Zero</a>
+      <a href="#relay">Pair fire</a>
       <a href="#bench">Bench</a>
       <a href="#solver">The solver</a>
       <a href="#together">Together</a>
@@ -584,14 +642,100 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
       </div>
       <div class="card">
         <span class="tag">Pair fire</span>
-        <h3>Two phones, one string</h3>
-        <p>A four-character code puts a partner and a coach on the same relay. Each shooter&rsquo;s string draws over the other&rsquo;s target in their own colour, with a feed for wind calls. No account needed to join.</p>
+        <h3>A relay on one string</h3>
+        <p>A four-character code puts up to four firing points and a coach on the same string, live, each shooter in their own colour. No account needed to join. <a class="cardlink" href="#relay">How a team uses it &rarr;</a></p>
       </div>
       <div class="card">
         <span class="tag">Targets</span>
         <h3>Forty-two NRA faces</h3>
         <p>High Power, Smallbore, Pistol, F-Class and Long Range, with every ring diameter transcribed from the rule book. Pin the three you shoot to the top of the picker and draw your own for steel.</p>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     Pair fire has a section rather than a card because it is the only thing
+     either app does that a whole team uses at once, and a line in a grid of
+     nine was not going to carry that.
+     ══════════════════════════════════════════════════════════════════════ -->
+<section id="relay">
+  <div class="wrap">
+    <div class="sec-head"><p class="eyebrow">Pair fire</p></div>
+    <h2 class="display">A team on the line, a coach behind it, one string on every screen.</h2>
+    <p class="sec-sub">Somebody reads out a four-character code and the relay is up. Every shot a shooter logs mirrors to everyone else as it is fired, and each shooter&rsquo;s string draws over the other&rsquo;s target in their own colour. It needs a connection. It does <strong>not</strong> need an account &mdash; a partner or a coach joins as a guest and creates nothing.</p>
+
+    <div class="split">
+      <div>
+        <div class="roles">
+          <div class="role">
+            <span class="rk mono">Host</span>
+            <p>Open your session, put your name in, press <span class="ui">&#9679; go live</span>. You get the code. Read it down the line.</p>
+          </div>
+          <div class="role">
+            <span class="rk mono">Shoot alongside</span>
+            <p>Join from <em>your own</em> session. That is the distinction that matters: joining from your own session is what makes your shots mirror as well as theirs.</p>
+          </div>
+          <div class="role">
+            <span class="rk mono">Coach or watch</span>
+            <p>Join from the Sessions header and pick <span class="ui">Coach</span>. Both strings, the roster, and a feed for wind calls and chatter. A coach scores nothing and cannot fire.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="relayviz">
+        <svg viewBox="0 0 300 300" role="img" aria-label="One target face carrying two shooters' strings — one solid, one hollow and dashed — and a shooter's call joined by a line to where that shot actually landed">
+          <circle cx="150" cy="150" r="146" fill="none" stroke="var(--line)" stroke-width="1"/>
+          <circle cx="150" cy="150" r="118" fill="none" stroke="var(--line)" stroke-width="1"/>
+          <circle cx="150" cy="150" r="90"  fill="none" stroke="var(--line)" stroke-width="1"/>
+          <circle cx="150" cy="150" r="62"  fill="var(--bull)"/>
+          <circle cx="150" cy="150" r="31"  fill="none" stroke="rgba(242,239,232,.30)" stroke-width="1"/>
+
+          <!-- Firing point 1: yours, solid. -->
+          <g fill="var(--slot1)">
+            <circle cx="139" cy="136" r="5"/>
+            <circle cx="158" cy="128" r="5"/>
+            <circle cx="130" cy="158" r="5"/>
+            <circle cx="163" cy="163" r="5"/>
+          </g>
+          <!-- Firing point 2: the next peg over. Hollow and dashed, which is
+               how Zero itself draws it -- on your target, in none of your
+               numbers, and never mistakable for one of yours. -->
+          <g fill="none" stroke="var(--slot2)" stroke-width="1.8" stroke-dasharray="3.5 2.5">
+            <circle cx="186" cy="118" r="5"/>
+            <circle cx="199" cy="146" r="5"/>
+            <circle cx="177" cy="176" r="5"/>
+            <circle cx="205" cy="169" r="5"/>
+          </g>
+
+          <!-- The call, and the shot it turned into. The gap is the point. -->
+          <line x1="103" y1="205" x2="134" y2="180" stroke="var(--acc)" stroke-width="1.3" stroke-dasharray="2.5 2.5"/>
+          <circle cx="103" cy="205" r="8" fill="none" stroke="var(--acc)" stroke-width="1.8"/>
+          <circle cx="134" cy="180" r="5" fill="var(--slot1)"/>
+        </svg>
+        <ul class="vizkey">
+          <li><span class="sw sw1" aria-hidden="true"></span>Firing point 1 &mdash; yours</li>
+          <li><span class="sw sw2" aria-hidden="true"></span>Firing point 2 &mdash; the next peg over</li>
+          <li><span class="sw swc" aria-hidden="true"></span>The call, joined to the shot it became</li>
+        </ul>
+        <p class="facecap mono">Colour is a function of the firing point, not of join order &mdash; so the shooter who is blue on your phone is blue on the coach&rsquo;s.</p>
+      </div>
+    </div>
+
+    <div class="note-inline">
+      <p><strong>What a coach is actually watching is the gap.</strong> A hollow ring joined to an impact is the shooter&rsquo;s call &mdash; where the sights were when the trigger broke &mdash; and the line between them is the shot they did not know they threw. Zero puts a call-versus-impact panel up per shooter, in minutes of angle, and reports the <em>mean error vector</em> rather than the mean absolute error, because only the systematic part of impact-minus-call is a sight correction. A shooter who calls low left and hits low left has a correctly zeroed rifle and made a bad shot; dialling for that makes the next good shot wrong.</p>
+    </div>
+
+    <div class="book">
+      <div class="book-head"><span class="eyebrow">Things worth knowing before you rely on it at a match</span></div>
+      <div class="stack relaynotes">
+        <p><strong>Your partner&rsquo;s string is drawn on your target and counted in none of your numbers.</strong> It is hollow and dashed in their firing-point colour, and every statistic on that screen &mdash; group, score, mean radius &mdash; is yours alone.</p>
+        <p><strong>The roles are enforced by the server, not by the screen.</strong> A shooter&rsquo;s token is refused if it tries to write their partner&rsquo;s string, and a coach&rsquo;s is refused if it tries to write any. Nobody can put a shot on somebody else&rsquo;s target.</p>
+        <p><strong>It polls rather than holding a socket, on purpose.</strong> A phone on the line is backgrounded for most of a string, browsers throttle background timers, and a dropped socket is a mirror that stops without telling anyone. Polling has no connection to lose, and the poll itself is the presence heartbeat &mdash; so &ldquo;watching&rdquo; means watching.</p>
+        <p><strong>It needs signal, and it is the only thing here that does.</strong> There is no offline queue for a relay, by design: a mirrored shot that arrives ten minutes late is worse than one that never arrives. Everything else in Zero keeps working with the phone in airplane mode, your own session included &mdash; if the mirror stops, you are still recording.</p>
+        <p><strong>It ends when the host ends it, and everyone is told.</strong> Leaving a session does not close the relay. When it does close, the coach&rsquo;s view says so and says that what they are looking at is the final state, rather than quietly going stale.</p>
+      </div>
+      <div class="book-foot mono">Pair fire is covered end to end in the manual &mdash; <a href="manual/#z-relay">hosting, joining, and the coach&rsquo;s view</a>.</div>
     </div>
   </div>
 </section>

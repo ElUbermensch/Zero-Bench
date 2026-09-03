@@ -138,6 +138,21 @@ code.key{font-family:var(--fm); font-size:13px; letter-spacing:.12em;
 .gate .card{padding:22px}
 .gate label{display:block; font-size:12px; color:var(--ink2); margin:10px 0 5px}
 .empty{color:var(--ink3); font-size:13px; padding:22px 0; text-align:center}
+
+/* Support panel. The lookup row wraps rather than shrinking the field: an
+   email address is long, and a box too narrow to read the address back is a
+   box you cannot check a typo in — which is the single most common cause of
+   the problem being looked up. */
+.support{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
+.support input{flex:1 1 260px; min-width:0; padding:9px 11px; font-size:14px;
+  font-family:var(--fm); color:var(--ink); background:var(--surf2);
+  border:1px solid var(--bdr); border-radius:8px}
+.support input:focus{outline:2px solid var(--zero); outline-offset:1px}
+.support-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:12px}
+table.kv{width:auto; min-width:min(420px,100%)}
+table.kv th{text-align:left; color:var(--ink3); font-weight:500; padding-right:18px;
+  white-space:nowrap; vertical-align:top}
+table.kv td{font-family:var(--fm); font-size:12.5px}
 </style>
 </head>
 <body>

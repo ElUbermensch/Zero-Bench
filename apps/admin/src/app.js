@@ -59,6 +59,24 @@ const dayList = (n) => {
 };
 const shortDay = (iso) => iso.slice(5).replace('-', '/');
 
+/* Durations as h/m/s rather than a raw second count.
+ *
+ * "4920s" is a number the reader has to do arithmetic on before it means
+ * anything; "1h 22m" is the same fact already understood. Seconds are kept at
+ * the small end, where they are the honest unit -- a 45-second visit is a
+ * 45-second visit, not "0h 0m 45s" -- and dropped at the large end, where a
+ * trailing seconds figure on an hour-long average is false precision over an
+ * estimate. Two units at most, always the two that carry the magnitude. */
+function hms(totalSeconds) {
+  const s = Math.max(0, Math.round(+totalSeconds || 0));
+  if (s < 60) return `${s}s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return sec > 0 ? `${m}m ${sec}s` : `${m}m`;
+}
+
 /* ------------------------------------------------------------------ loading */
 async function load() {
   const from = dayList(UI.range)[0];
@@ -119,7 +137,9 @@ function lineChart(days, series, opts) {
     const v = (max / 4) * t, yy = y(v);
     g += `<line x1="${PADL}" x2="${PADL + plotW}" y1="${yy}" y2="${yy}"
             stroke="var(--line)" stroke-width="1" opacity="${t ? .5 : 1}"/>`;
-    g += axisText(PADL - 8, yy + 3, Math.round(v), 'end');
+    /* The axis speaks the series' own unit. A duration chart labelled 900,
+     * 1800, 2700 asks the reader to divide by sixty on every gridline. */
+    g += axisText(PADL - 8, yy + 3, (opts && opts.fmt) ? opts.fmt(v) : Math.round(v), 'end');
   }
 
   // Selective date labels: never one per point.
@@ -152,7 +172,9 @@ function lineChart(days, series, opts) {
   let hit = '';
   const colW = days.length > 1 ? plotW / (days.length - 1) : plotW;
   days.forEach((d, i) => {
-    const vals = series.map(s => `${s.label} ${fmt(s.values[i] || 0)}`).join('  ·  ');
+    const unit = (opts && opts.fmt) || fmt;
+    const vals = series.map(s => `${s.label} ${s.values[i] == null ? '—' : unit(s.values[i])}`)
+      .join('  ·  ');
     hit += `<rect x="${x(i) - colW / 2}" y="${PADT}" width="${colW}" height="${plotH}"
               fill="transparent" data-tip="${esc(d + '  —  ' + vals)}"
               data-x="${x(i)}"/>`;
@@ -252,6 +274,75 @@ const sum = (rows, field, app) => rows
   .filter(r => !app || r.source_app === app)
   .reduce((a, r) => a + (+r[field] || 0), 0);
 
+/* Customer support, for the question this exists to answer: someone writes in
+ * saying they cannot get into their account, and all you have is an email
+ * address.
+ *
+ * It shows the few facts that resolve almost every such message -- does the
+ * account exist, was the address ever confirmed, when did they last get in --
+ * and then offers the two emails that fix it. It shows no logbook data: whether
+ * somebody uses the apps is a support question, what they shot is theirs.
+ *
+ * There is no "reset their password to X" here and will not be. Passwords are
+ * hashed and cannot be read back, a reset link is the correct instrument, and
+ * an owner who can set a customer's password can enter their account
+ * afterwards -- which is a different power from helping them into it.
+ */
+function supportPanel() {
+  const s = UI.support || {};
+  const u = s.result;
+  const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+  return `
+    <section>
+      <h2>Customer support</h2>
+      <p class="note">Look an account up by email. Every action here is written to
+        <code>owner_action_log</code>, including the ones that find nobody.</p>
+      <div class="card">
+        <form id="support" class="support">
+          <input id="support-email" type="email" placeholder="customer@example.com"
+                 value="${esc(s.email || '')}" autocomplete="off" spellcheck="false" required>
+          <button type="submit">${s.busy ? 'Working…' : 'Look up'}</button>
+        </form>
+        ${s.error ? `<div class="banner bad">${esc(s.error)}</div>` : ''}
+        ${s.notice ? `<div class="banner ok">${esc(s.notice)}</div>` : ''}
+        ${u ? `
+          <table class="kv">
+            <tr><th>Email</th><td>${esc(u.email || '')}</td></tr>
+            <tr><th>Confirmed</th><td>${u.email_confirmed
+              ? 'yes'
+              : '<strong>no — this is usually the whole problem</strong>'}</td></tr>
+            <tr><th>Account created</th><td>${esc(when(u.created_at))}</td></tr>
+            <tr><th>Last signed in</th><td>${esc(when(u.last_sign_in_at))}</td></tr>
+            <tr><th>Second factor</th><td>${u.mfa_factors
+              ? `${u.mfa_factors} verified` : 'none'}</td></tr>
+            <tr><th>Sign-in method</th><td>${esc((u.providers || []).join(', ') || 'email')}</td></tr>
+            <tr><th>Recent activity</th><td>${u.recent_events
+              ? `${fmt(u.recent_events)} events — ${Object.entries(u.events_by_app || {})
+                  .map(([a, n]) => `${LABEL[a] || a} ${fmt(n)}`).join(', ')}`
+              : 'nothing recorded'}</td></tr>
+          </table>
+          <div class="support-actions">
+            <button data-mail="send_reset" ${s.busy ? 'disabled' : ''}>Send password reset</button>
+            ${u.email_confirmed ? ''
+              : `<button data-mail="resend_confirmation" ${s.busy ? 'disabled' : ''}>Resend confirmation</button>`}
+          </div>
+          <p class="note">Both send mail to the customer, and both are rate-limited by
+            Supabase — roughly one a minute per address.</p>
+        ` : ''}
+      </div>
+    </section>`;
+}
+
+/* "Last 1 days" is the kind of thing that makes a reader doubt the numbers
+ * underneath it. */
+function rangeTitle() {
+  const n = UI.range;
+  if (n === 1) return 'Last 24 hours';
+  if (n === 365) return 'Last year';
+  if (n % 30 === 0 && n >= 60) return `Last ${n / 30} months`;
+  return `Last ${n} days`;
+}
+
 /* ----------------------------------------------------------------- rendering */
 function tile(k, v, s) {
   return `<div class="tile"><div class="k">${esc(k)}</div>
@@ -268,6 +359,15 @@ function dashboard(d) {
   const active = seriesFor(d.active, days, 'active_users');
   const visits = seriesFor(d.visits, days, 'visits');
   const signups = seriesFor(d.signups, days, 'new_users');
+  /* Null, not zero, on a day when no visit reported a close. Zero would draw a
+   * line down to the axis and read as "visits were instant that day", which is
+   * a measurement nobody took. lineChart skips nulls. */
+  const durSeries = APPS.map(app => {
+    const byDay = new Map(d.visits.filter(r => r.source_app === app && +r.visits_with_duration > 0)
+      .map(r => [r.day, +r.avg_duration_s || 0]));
+    return { key: app, label: LABEL[app], color: COLOR[app],
+             values: days.map(dd => (byDay.has(dd) ? byDay.get(dd) : null)) };
+  });
 
   /* Distinct people cannot be summed across days -- the same shooter on
    * Monday and Tuesday is one user, and adding the columns would report two.
@@ -299,25 +399,25 @@ function dashboard(d) {
     byName.set(key, cur);
   }
   const all = [...byName.values()].sort((a, b) => b.count - a.count);
-  const features = all.filter(r => !SPINE.has(r.name)).slice(0, 12);
+  const features = all.filter(r => !SPINE.has(r.name)).slice(0, 20);
 
   const empty = !d.active.length;
 
   return `
   <main>
-    ${empty ? `<div class="banner warn">No events in the last ${UI.range} days.
+    ${empty ? `<div class="banner warn">No events in ${rangeTitle().toLowerCase()}.
       If the apps have just been rebuilt, this fills in as people use them —
       a visit is recorded on the first sign-in, not on a signed-out page load.</div>` : ''}
 
     <section>
-      <h2>Last ${UI.range} days</h2>
+      <h2>${rangeTitle()}</h2>
       <p class="note">Days are UTC, the axis the database groups on.</p>
       <div class="tiles">
         ${tile('Visits', fmt(totalVisits), 'app opens, both apps')}
         ${tile('Busiest day', fmt(peakActive), 'people active — daily counts cannot be summed')}
         ${tile('New sign-ups', fmt(totalSignups), 'accounts created')}
         ${tile('Events recorded', fmt(totalEvents), 'every tracked action')}
-        ${tile('Typical visit', avgDur == null ? '—' : `${Math.round(avgDur)}s`, durNote)}
+        ${tile('Typical visit', avgDur == null ? '—' : hms(avgDur), durNote)}
       </div>
     </section>
 
@@ -343,6 +443,14 @@ function dashboard(d) {
     </section>
 
     <section>
+      <h2>How long a visit lasts</h2>
+      <p class="note">Averaged over the visits that reported a close, per day. Mobile
+        browsers routinely kill a backgrounded tab without running anything, so this is an
+        estimate over a self-selected sample — the visit COUNT above is the reliable one.</p>
+      <div class="card">${legend()}<div class="scroll">${lineChart(days, durSeries, { fmt: hms })}</div></div>
+    </section>
+
+    <section>
       <h2>What people actually do</h2>
       <p class="note">Feature actions only — sign-ins and app opens are the spine and are
         reported above.</p>
@@ -354,6 +462,8 @@ function dashboard(d) {
           })))}</div>`
         : '<div class="empty">Nothing tracked yet.</div>'}</div>
     </section>
+
+    ${supportPanel()}
 
     <section>
       <h2>Every event</h2>
@@ -398,8 +508,8 @@ function header() {
     <span class="sub">owner dashboard</span>
     <span class="spacer"></span>
     <span class="range">
-      ${[7, 30, 90].map(n => `<button data-range="${n}"
-        aria-pressed="${UI.range === n}">${n}d</button>`).join('')}
+      ${RANGES.map(([n, label]) => `<button data-range="${n}"
+        aria-pressed="${UI.range === n}">${label}</button>`).join('')}
     </span>
     ${freshness()}
     <button data-act="refresh">${UI.busy || UI.refreshing ? 'Loading…' : 'Refresh'}</button>
@@ -566,6 +676,20 @@ function render() {
  * a dashboard left open on a second monitor overnight should not spend the
  * night querying, and should not need a manual reload in the morning either.
  */
+/* The windows to look through.
+ *
+ * 1d and 3d are here because the short end is where an owner actually watches:
+ * "did the thing I shipped this morning change anything" is a question 7d
+ * answers badly, since six of its seven days predate the question. 180d and
+ * 365d because month-over-month is the shape a business asks about, and the
+ * data only gets more useful as it accumulates.
+ *
+ * The day axis stays UTC throughout, because that is what the views group on;
+ * a range measured in local days against buckets cut in UTC would put a
+ * boundary in the middle of a bar. */
+const RANGES = [[1, '24h'], [3, '3d'], [7, '7d'], [30, '30d'],
+                [90, '90d'], [180, '180d'], [365, '1y']];
+
 const REFRESH_MS = 60_000;
 let refreshTimer = null;
 
@@ -636,6 +760,13 @@ async function enter() {
 }
 
 document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'support') {
+    e.preventDefault();
+    if (UI.support && UI.support.busy) return;
+    const email = $('support-email').value.trim();
+    if (email) runOwnerTool('lookup', email);
+    return;
+  }
   if (e.target.id === 'mfa') {
     e.preventDefault();
     if (UI.busy) return;
@@ -687,6 +818,65 @@ document.addEventListener('submit', async (e) => {
   enter();
 });
 
+/* ------------------------------------------------------------ owner tools */
+/*
+ * Calls the owner-tools edge function, which holds the service-role key. This
+ * page holds nothing privileged: it forwards the session token and the function
+ * decides, re-checking admin AND the second factor server-side. The screen
+ * below is a convenience over that decision, not the decision.
+ */
+async function ownerTool(action, email) {
+  const s = CORE.getSession();
+  if (!s || !s.access_token) return { ok: false, error: 'Not signed in.' };
+  try {
+    const r = await fetch(`${SHARED_SUPABASE.url}/functions/v1/owner-tools`, {
+      method: 'POST',
+      headers: {
+        apikey: SHARED_SUPABASE.anonKey,
+        Authorization: `Bearer ${s.access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action, email }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return { ok: false, status: r.status,
+               error: data.error || `The support endpoint returned ${r.status}.`,
+               code: data.code };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    /* A function that was never deployed fails as a network error here, not a
+     * 404, because the browser cannot even reach an origin that does not
+     * answer. Saying so beats "failed to fetch". */
+    return { ok: false, error: 'Could not reach the support endpoint — check that the '
+                            + 'owner-tools function is deployed to this project.' };
+  }
+}
+
+async function runOwnerTool(action, email) {
+  UI.support = { ...(UI.support || {}), busy: true, error: null, notice: null };
+  render();
+  const r = await ownerTool(action, email);
+  const st = { busy: false, email, error: null, notice: null,
+               result: (UI.support && UI.support.result) || null };
+  if (!r.ok) {
+    st.error = r.code === 'aal2_required'
+      ? 'This needs a second factor verified in this session — sign out and back in.'
+      : r.error;
+    if (action === 'lookup') st.result = null;
+  } else if (action === 'lookup') {
+    st.result = r.data.found ? r.data.user : false;
+    if (!r.data.found) st.notice = 'No account with that address.';
+  } else {
+    st.notice = action === 'send_reset'
+      ? 'Password reset email sent.'
+      : 'Confirmation email resent.';
+  }
+  UI.support = st;
+  render();
+}
+
 document.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
@@ -694,8 +884,20 @@ document.addEventListener('click', (e) => {
   if (b.dataset.act === 'refresh') return enter();
   if (b.dataset.act === 'signout') {
     CORE.signOut();
-    UI.view = 'signin'; UI.data = null; UI.error = null;
+    UI.view = 'signin'; UI.data = null; UI.error = null; UI.support = null;
+    stopRefresh();
     return render();
+  }
+  /* Both of these put an email in somebody's inbox, so both confirm first.
+   * A support tool that fires on a single click is one that sends a stranger a
+   * password-reset the moment a mistyped address happens to match. */
+  if (b.dataset.mail) {
+    const email = (UI.support && UI.support.email) || '';
+    const what = b.dataset.mail === 'send_reset'
+      ? `Send a password reset email to ${email}?`
+      : `Resend the confirmation email to ${email}?`;
+    if (!confirm(what)) return;
+    return runOwnerTool(b.dataset.mail, email);
   }
 });
 

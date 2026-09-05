@@ -1632,6 +1632,36 @@ const TITLES = {
 };
 
 function render() {
+  /* ======================================================== the beta gate
+     Before anything else, and it paints the WHOLE screen rather than a banner
+     over the app: no tab bar, no back button, no record counts, no sync chip.
+     A gate that leaves the navigation up is a gate somebody taps past.
+
+     The server refuses this account regardless (migration 0021). This is what
+     turns that refusal into a sentence instead of a save that quietly does
+     nothing. */
+  if (!CORE || !CORE.isSignedIn() || CORE.isAnonymous()
+      || gateAccessStatus() !== 'approved') {
+    document.getElementById('title').innerHTML =
+      'Bench<div class="sub">closed beta</div>';
+    document.getElementById('back').classList.add('hidden');
+    document.getElementById('tabs').innerHTML = '';
+    const chip = document.getElementById('syncchip');
+    if (chip) chip.classList.add('hidden');
+    document.getElementById('view').innerHTML = CORE ? gateView()
+      /* No backend at all. Only reachable in a local build -- build:site
+         refuses to ship without one -- but "the app quietly does nothing" is
+         the wrong way to say so. */
+      : `<section class="card gate"><h2>No backend configured</h2>
+         <p class="small">This build has no Supabase project set, so there is
+         nobody to ask for access. Set one in <code>supabase.config.json</code>
+         and rebuild.</p></section>`;
+    armGatePoll(CORE && CORE.isSignedIn() && !CORE.isAnonymous()
+      && ['pending', 'unknown', null].includes(gateAccessStatus()));
+    return;
+  }
+  armGatePoll(false);
+
   const c = cur();
   let [t, s] = TITLES[c.v] || ['', ''];
   if (c.v === 'form') { t = 'New ' + FORMS[c.arg.kind].title.toLowerCase(); s = ''; }
@@ -3068,6 +3098,234 @@ function doSerialLookup() {
   go(found[0], found[1]);
 }
 
+/* ==========================================================================
+ * The beta gate.
+ *
+ * Bench used to be a local-only reloading log that could optionally sync. It
+ * is invitation-only now: nothing below the gate paints until the owner has
+ * approved the account.
+ *
+ * The refusal that counts is migration 0021 -- restrictive Postgres policies
+ * on every table, which a static bundle served with the publishable key cannot
+ * argue with. What is here exists so a refused user reads "waiting for
+ * approval" instead of watching an app that looks fine and silently fails to
+ * save. If this code and the database ever disagree, the database is right.
+ * ======================================================================== */
+
+/* The buckets the sign-up form offers. A fixed list because the point of
+ * asking is to COUNT the answers, and free text does not add up -- "a mate",
+ * "friend" and "word of mouth" are one row in a report and three in a table.
+ * The free-text box underneath collects the half that is actionable: which
+ * podcast, which forum. `Other` is always last and always present; a list with
+ * no escape hatch does not produce cleaner data, it produces people picking
+ * the nearest wrong option, which is indistinguishable from a real answer. */
+const HEARD_OPTIONS = [
+  'A friend or shooting partner',
+  'At a match or range',
+  'YouTube',
+  'A podcast',
+  'A forum or Reddit',
+  'Instagram or Facebook',
+  'A web search',
+  'Other',
+];
+
+/* Kept on UI rather than read out of the DOM on every render, because render()
+ * replaces the markup wholesale and anything typed but unsubmitted would be
+ * thrown away by an unrelated repaint -- a recheck timer firing mid-password,
+ * for instance. */
+UI.gate = { mode: 'in', status: null, checked: false, busy: false,
+            err: null, ok: null, heard: '', heardDetail: '', sent: false };
+
+function gateAccessStatus() {
+  return CORE ? CORE.accessStatus() : null;
+}
+
+/** Ask the server and repaint. Never throws into a caller: a failed check
+ *  leaves the last known answer standing, which for an approved user at a
+ *  range with no signal is the difference between their logbook and a wall. */
+async function refreshGate() {
+  if (!CORE || !CORE.isSignedIn()) { UI.gate.checked = true; render(); return; }
+  const before = gateAccessStatus();
+  try { await CORE.refreshAccess(); } catch (e) { /* keep what we had */ }
+  const after = gateAccessStatus();
+  UI.gate.status = after;
+  UI.gate.checked = true;
+  render();
+
+  /* Being let in is the moment sign-in used to be.
+   *
+   * doAuth() syncs immediately after a successful sign-in, on the reasoning
+   * that signing in IS the user saying "connect this to my account" and making
+   * them find a second button is the gap that made the feature feel absent.
+   * The gate moved that moment: you now sign in and then wait, and the request
+   * that would have gone out at sign-in would have been refused anyway.
+   *
+   * So it goes here instead, on the transition -- not on every check, or a
+   * hold screen polling once a minute would fire a sync a minute at an account
+   * that is still waiting. */
+  if (after === 'approved' && before !== 'approved') {
+    doSync().catch(() => {});
+  }
+}
+
+async function doGateAuth() {
+  const email = (document.getElementById('g-email') || {}).value || '';
+  const pw = (document.getElementById('g-pw') || {}).value || '';
+  const pw2 = (document.getElementById('g-pw2') || {}).value || '';
+  const heard = (document.getElementById('g-heard') || {}).value || '';
+  const detail = (document.getElementById('g-detail') || {}).value || '';
+  const up = UI.gate.mode === 'up';
+
+  if (!email.trim().includes('@')) { UI.gate.err = 'That does not look like an email address.'; return render(); }
+  if (pw.length < 6) { UI.gate.err = 'Passwords are at least six characters.'; return render(); }
+  if (up && pw !== pw2) { UI.gate.err = 'The two passwords are not the same.'; return render(); }
+  if (up && !heard) { UI.gate.err = 'Please say how you heard about Bench.'; return render(); }
+
+  UI.gate.busy = true; UI.gate.err = null; UI.gate.ok = null;
+  render();
+
+  const r = up
+    ? await CORE.signUp(email.trim(), pw,
+        { heardFrom: heard, heardDetail: detail.trim() || null })
+    : await CORE.signIn(email.trim(), pw);
+
+  UI.gate.busy = false;
+  if (!r.ok) {
+    UI.gate.err = r.error?.msg || r.error?.error_description || r.error?.message
+      || 'That did not work. Check the address and password.';
+    return render();
+  }
+  /* A sign-up with email confirmation on returns a user and no session. The
+   * account exists and the trigger has already filed the request, but there is
+   * no session to show a hold screen with -- so say so rather than leaving
+   * them on a form that silently emptied itself. */
+  if (r.needsConfirmation) {
+    UI.gate.mode = 'in';
+    UI.gate.ok = 'Account created. Confirm the email we just sent, then sign in — '
+               + 'your request is already with us.';
+    return render();
+  }
+  UI.gate.checked = false;
+  render();
+  await refreshGate();
+}
+
+async function doGateDetails() {
+  const heard = (document.getElementById('g-heard2') || {}).value || '';
+  const detail = (document.getElementById('g-detail2') || {}).value || '';
+  if (!heard || !CORE) return;
+  UI.gate.busy = true; render();
+  const r = await CORE.submitAccessDetails(heard, detail.trim() || null);
+  UI.gate.busy = false;
+  UI.gate.sent = !!r.ok;
+  await refreshGate();
+}
+
+/* Poll while waiting. One minute, chosen against holding a socket open for a
+ * day to save fifty-nine seconds on an event measured in hours. Stopped for a
+ * decision that will not reverse on its own -- a phone asking forever is a
+ * phone with a flat battery. */
+let gateTimer = null;
+function armGatePoll(waiting) {
+  if (!waiting) { clearInterval(gateTimer); gateTimer = null; return; }
+  if (gateTimer) return;
+  gateTimer = setInterval(() => { refreshGate(); }, 60000);
+}
+
+function gateView() {
+  const g = UI.gate;
+  const banner = (g.err ? `<div class="banner bad"><div>${esc(g.err)}</div></div>` : '')
+    + (g.ok ? `<div class="banner info"><div>${esc(g.ok)}</div></div>` : '');
+
+  /* Signed out, or an anonymous pair-fire guest -- which is not a signed-in
+   * user in any sense this screen cares about: there is no account to approve
+   * and no address to write to. Both get the sign-in card. */
+  if (!CORE.isSignedIn() || CORE.isAnonymous()) {
+    const up = g.mode === 'up';
+    return `<section class="card gate">
+      <h2>Bench is in closed beta</h2>
+      <div class="gate-modes">
+        <button class="btn sm ${up ? '' : 'on'}" data-act="gatemode" data-arg="in">Sign in</button>
+        <button class="btn sm ${up ? 'on' : ''}" data-act="gatemode" data-arg="up">Request access</button>
+      </div>
+      ${banner}
+      <label for="g-email">Email</label>
+      <input id="g-email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <label for="g-pw">Password</label>
+      <input id="g-pw" type="password" autocomplete="${up ? 'new-password' : 'current-password'}">
+      ${up ? `
+        <label for="g-pw2">Confirm password</label>
+        <input id="g-pw2" type="password" autocomplete="new-password">
+        <label for="g-heard">How did you hear about Bench?</label>
+        <select id="g-heard">
+          <option value="">choose one…</option>
+          ${HEARD_OPTIONS.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+        </select>
+        <label for="g-detail">Which one? <span class="small">(optional)</span></label>
+        <input id="g-detail" maxlength="280">` : ''}
+      <button class="btn primary wide" data-act="gateauth" ${g.busy ? 'disabled' : ''}>
+        ${g.busy ? 'Working…' : (up ? 'Request access' : 'Sign in')}</button>
+      <p class="small">${up
+        ? 'Bench is invitation-only while it is in beta. Creating an account puts you '
+          + 'in the queue; you are let in once the owner approves it.'
+        : 'One account, both Bench and Zero.'}</p>
+    </section>`;
+  }
+
+  /* Read from zero-core rather than from UI.gate, so there is one answer in
+   * the app and not two that can drift. UI.gate carries what the FORM is
+   * doing; the verdict belongs to the thing that fetched it. */
+  const status = gateAccessStatus() || 'unknown';
+  const waiting = status === 'pending' || status === 'unknown';
+  if (!g.checked && gateAccessStatus() === null) {
+    return `<section class="card gate"><p class="small">Checking your access…</p></section>`;
+  }
+
+  const rec = CORE.accessRecord();
+  const title = status === 'denied' ? 'Not approved'
+    : status === 'revoked' ? 'Access withdrawn'
+    : 'You are on the list';
+  const body = status === 'denied'
+    ? 'This account has not been given access to the beta. If you think that is a '
+      + 'mistake, reply to the email you signed up with.'
+    : status === 'revoked'
+    ? 'This account had access and no longer does. If that is unexpected, reply to '
+      + 'the email you signed up with.'
+    : 'Bench is invitation-only while it is in beta. Your request is with the owner; '
+      + 'this screen lets you in by itself the moment it is approved.';
+
+  /* Asked here only when it was not answered at sign-up -- normally it rode in
+   * the metadata and this never appears. */
+  const needsHeard = waiting && !(rec && rec.heardFrom) && !g.sent;
+
+  return `<section class="card gate">
+    <h2>${esc(title)}</h2>
+    <p class="small">${esc(body)}</p>
+    <p class="small muted">${esc(CORE.getUser()?.email || 'signed in')}${
+      rec && rec.requestedAt && waiting
+        ? ' · asked ' + esc(new Date(rec.requestedAt).toLocaleDateString()) : ''}</p>
+    ${banner}
+    ${needsHeard ? `
+      <hr>
+      <label for="g-heard2">How did you hear about Bench?</label>
+      <p class="small">It is the only thing we ask for.</p>
+      <select id="g-heard2">
+        <option value="">choose one…</option>
+        ${HEARD_OPTIONS.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+      </select>
+      <label for="g-detail2">Which one? <span class="small">(optional)</span></label>
+      <input id="g-detail2" maxlength="280">
+      <button class="btn wide" data-act="gatedetails" ${g.busy ? 'disabled' : ''}>
+        ${g.busy ? 'Sending…' : 'Send'}</button>` : ''}
+    <div class="gate-actions">
+      ${waiting ? `<button class="btn primary" data-act="gaterecheck" ${g.busy ? 'disabled' : ''}>
+        ${g.busy ? 'Checking…' : 'Check again'}</button>` : ''}
+      <button class="btn" data-act="gatesignout">Sign out</button>
+    </div>
+  </section>`;
+}
+
 /* Sign in / create account. Kept out of ACTIONS so the async flow reads in one
  * place rather than inside an object literal. */
 async function doAuth(mode) {
@@ -3489,6 +3747,23 @@ function guardedDelete(kind, id) {
 }
 
 const ACTIONS = {
+  /* The gate's own controls. They are in this table rather than bound
+   * directly because render() replaces the markup on every repaint, and a
+   * listener attached to a button is a listener attached to a button that no
+   * longer exists -- the delegation is the whole reason nothing else in this
+   * app has that bug. */
+  gatemode: (a) => { UI.gate.mode = a; UI.gate.err = null; UI.gate.ok = null; render(); },
+  gateauth: () => { doGateAuth(); },
+  gatedetails: () => { doGateDetails(); },
+  gaterecheck: () => { UI.gate.busy = true; render(); refreshGate()
+    .finally(() => { UI.gate.busy = false; render(); }); },
+  gatesignout: () => {
+    CORE.signOut();
+    UI.gate = { mode: 'in', status: null, checked: true, busy: false,
+                err: null, ok: null, heard: '', heardDetail: '', sent: false };
+    render();
+  },
+
   tab: (a) => reset(a),
   nav: (a) => go(a),
   brassDetail: (a) => go('brassDetail', a),
@@ -3978,6 +4253,27 @@ function openDeepLink() {
 
 openDeepLink();
 render();
+
+/* Ask whether this account is in the beta, and keep asking at the moments a
+ * user would expect the answer to have changed.
+ *
+ * Deferred behind the first paint for the same reason the launch sync is: a
+ * dead network must not delay the app opening. The gate is already painted
+ * from the cached verdict by then, so this call either confirms it or corrects
+ * it -- it is never the thing standing between the user and the screen. */
+if (CORE) {
+  CORE.on(CORE.EVENTS.ACCESS_CHANGED, () => { UI.gate.checked = true; render(); });
+  CORE.on(CORE.EVENTS.AUTH_SIGNED_OUT, () => { UI.gate.checked = true; render(); });
+  setTimeout(() => { refreshGate().catch(() => {}); }, 0);
+  /* Coming back to the app is when somebody who has just read "you're in" in
+   * their email actually looks. */
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && CORE.isSignedIn() && !CORE.isAnonymous()
+        && gateAccessStatus() !== 'approved') {
+      refreshGate().catch(() => {});
+    }
+  });
+}
 
 /* Sync on launch when a session already exists.
  *

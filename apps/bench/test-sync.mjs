@@ -6,6 +6,11 @@
  * recipe pointing at both, a batch pointing at the recipe and its lots.
  */
 import { chromium } from 'playwright';
+/* Invitation-only since migration 0021: signed out, Bench paints a gate and
+ * nothing else, so this suite could not reach the Cloud sync screen it is
+ * about. It boots as an approved account instead. The gate itself is driven
+ * from the outside in test-sync-ui.mjs. */
+import { useBetaFixture } from '../../tools/test-beta-session.mjs';
 import fsx from 'node:fs';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -42,7 +47,7 @@ let pass = 0, fail = 0;
 const ok = (c, l) => { if (c) { pass++; console.log('  PASS  ' + l); } else { fail++; console.log('  FAIL  ' + l); } };
 const section = (s) => console.log('\n' + s);
 
-const browser = await chromium.launch(LAUNCH_OPTS);
+const browser = useBetaFixture(await chromium.launch(LAUNCH_OPTS), mock.issueSession('jaxon@example.com'));
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
 const page = await ctx.newPage();
 const errors = [];
@@ -119,29 +124,20 @@ ok((await page.textContent('#view')).includes('Cloud sync'),
    'Cloud sync appears in More when the build has a backend');
 await page.click('button:has-text("Cloud sync")');
 await page.waitForTimeout(300);
-const readable = await page.evaluate(() => {
-  const out = {};
-  for (const id of ['sy-email', 'sy-pw']) {
-    const el = document.getElementById(id);
-    if (!el) { out[id] = null; continue; }
-    const cs = getComputedStyle(el);
-    let bg = cs.backgroundColor, n = el;
-    while (/rgba\(0, 0, 0, 0\)|transparent/.test(bg) && n.parentElement) {
-      n = n.parentElement; bg = getComputedStyle(n).backgroundColor;
-    }
-    out[id] = { color: cs.color, bg };
-  }
-  return out;
-});
-for (const [id, v] of Object.entries(readable)) {
-  ok(v && contrast(v.color, v.bg) >= 4.5,
-     `${id} is legible against its own background (${v ? contrast(v.color, v.bg).toFixed(1) : 'missing'}:1)`);
-}
+/* The legibility check on the credential fields moved to test-sync-ui.mjs.
+ *
+ * It used to run here on #sy-email and #sy-pw, which were on this screen while
+ * signed out. Since the beta gate this suite cannot BE signed out -- the Cloud
+ * sync screen is behind an approved account -- so those fields are never
+ * rendered here and the assertion was checking two elements that do not exist.
+ * The same fields are now the gate's, and that is where they are measured, on
+ * the suite that actually visits them. `contrast` stays defined above: the
+ * chip contrast assertions further down still use it. */
 
-await page.fill('#sy-email', 'jaxon@example.com');
-await page.fill('#sy-pw', 'hunter2');
-await page.click('button:has-text("Create account")');
-await page.waitForTimeout(700);
+/* The account is already established, because since the beta gate there is no
+   way to reach this screen without one. What is still worth asserting is that
+   the screen knows whose it is -- everything below files records under that
+   account and would be meaningless attributed to somebody else. */
 ok((await page.textContent('#view')).includes('jaxon@example.com'), 'signed in');
 
 section('a whole bench goes up');

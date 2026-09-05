@@ -2,6 +2,11 @@
  * it ships: file:// gives a null origin, no service worker, and unrepresentative
  * storage behaviour. */
 import { chromium } from 'playwright';
+/* Both apps are invitation-only since migration 0021: signed out, nothing
+ * paints but the gate. This puts the browser in the state an approved user's
+ * phone is in, which is the audience every assertion below was written for.
+ * See tools/test-beta-session.mjs for why there is no bypass flag. */
+import { useBetaFixture } from '../../tools/test-beta-session.mjs';
 /* Use the preinstalled browser when present (this dev sandbox sets
  * PLAYWRIGHT_BROWSERS_PATH); otherwise fall back to whatever Playwright
  * installed, which is what CI and a normal checkout will have. */
@@ -42,7 +47,7 @@ let pass = 0, fail = 0;
 const ok = (c, l) => { if (c) { pass++; console.log('  PASS  ' + l); } else { fail++; console.log('  FAIL  ' + l); } };
 const section = (s) => console.log('\n' + s);
 
-const browser = await chromium.launch(LAUNCH_OPTS);
+const browser = useBetaFixture(await chromium.launch(LAUNCH_OPTS));
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 },
   deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 const page = await ctx.newPage();

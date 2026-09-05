@@ -52,6 +52,15 @@ insert into auth.users (id, email) values
   ('c0000000-0000-0000-0000-00000000000c', 'owner@example.com')
 on conflict do nothing;
 
+/* 0021 files every new sign-up as `pending`, and a pending account is refused
+ * by a restrictive policy on every table these suites touch. They are about
+ * OWNERSHIP -- can B read A rows -- so the beta gate is switched off for their
+ * fixtures and tested on its own in rls_test11. Left on, every assertion below
+ * would still pass, and would pass for the wrong reason: refused, but by the
+ * gate rather than by the owner check the suite is measuring. */
+update public.access_request set status = 'approved';
+
+
 /* as_user() from rls_test.sql always claims aal1, and since 0017 reading the
  * analytics also demands aal2 -- so every admin READ below has to say which
  * assurance level it asks at. A separate function rather than a third

@@ -1,5 +1,10 @@
 /* End-to-end: patched Zero + mock Supabase, through the real UI. */
 import { chromium } from 'playwright';
+/* Invitation-only since migration 0021: signed out, the app paints a gate and
+ * nothing else. This boots the browser as an approved user, which is the
+ * audience every assertion below was written for. tools/test-beta-session.mjs
+ * explains why there is no bypass flag. */
+import { useBetaFixture } from '../../tools/test-beta-session.mjs';
 /* Use the preinstalled browser when present (this dev sandbox sets
  * PLAYWRIGHT_BROWSERS_PATH); otherwise fall back to whatever Playwright
  * installed, which is what CI and a normal checkout will have. */
@@ -74,7 +79,7 @@ const grabComponent = (name) => {
 
 const BATCH_ID = '11111111-2222-3333-4444-555555555555';
 
-const browser = await chromium.launch(LAUNCH_OPTS);
+const browser = useBetaFixture(await chromium.launch(LAUNCH_OPTS), mock.issueSession('jaxon@example.com'));
 const page = await browser.newPage({ viewport: { width: 430, height: 900 } });
 const errs = [];
 page.on('pageerror', e => errs.push(e.message));
@@ -135,12 +140,16 @@ console.log('\nboot');
    * would pass with the card sitting right there. */
   ok(!home.includes('Cloud backup'), '...nor the cloud backup card');
 
-  /* Signing in is the exception, and only while signed out. The email field
-   * was put on the home screen precisely so nobody has to hunt for it to
-   * answer "where is the sync button"; hiding it under More would undo that.
-   * Signed in it becomes a status readout, and that belongs in the menu --
-   * asserted below, after this suite signs in. */
-  ok(home.includes('Cloud sync'), 'but the sign-in card stays while signed out');
+  /* The sync card is not on this screen either, and since the beta gate that
+   * is now unconditional rather than a rule about being signed in.
+   *
+   * It used to read "the sign-in card stays while signed out", because the
+   * email field lived on the home screen so nobody had to hunt for it. There
+   * is no signed-out home screen any more: migration 0021 made the app
+   * invitation-only, and a visitor with no approved account gets the gate and
+   * nothing behind it. Signed in -- which is now the only way to be here --
+   * the panel is a status readout and belongs in the menu, asserted below. */
+  ok(!/Sync now/.test(home), '...nor the sync panel: signed in, it lives under More');
 
   const tabs = await page.$$eval('.tabbar button', bs => bs.map(b => b.textContent.trim()));
   ok(tabs.length === 4, `four tabs, not five (${tabs.length})`);
@@ -308,29 +317,27 @@ console.log('\nbuild stamp');
 }
 
 console.log('\nserver config + account');
-/* Back to Sessions, where the sign-in card lives while signed out. */
-await page.click('.tabbar button:has-text("Sessions")');
-await page.waitForTimeout(300);
-await page.fill('input[placeholder="email"]', 'jaxon@example.com');
-await page.fill('input[placeholder="password"]', 'hunter2');
-await page.click('button:has-text("create account")');
-await page.waitForTimeout(500);
-/* The other half of the placement rule: once there IS an account the panel is
- * a status readout and gets out of the way. Which means the card the user just
- * typed into vanishes -- and a card that vanishes with no acknowledgement
- * reads as a failure, so signing in carries them to the screen it became. */
+/* This suite used to type an address into the home screen and press "create
+ * account" here. It cannot any more, and not because the control moved: since
+ * migration 0021 there is no screen to type it on. An unapproved visitor sees
+ * the gate, and everything asserted above -- the seeded session, the tab bar,
+ * the More menu -- is behind it. The harness therefore arrives already signed
+ * in as an approved user (tools/test-beta-session.mjs), which is the state
+ * every one of those assertions was really about.
+ *
+ * What is still worth asserting is the half that did not change: signed in,
+ * the panel is a status readout, it lives under More, and it knows which
+ * account it is. */
 {
-  const after = await page.textContent('body');
-  ok(after.includes('jaxon@example.com'), 'signed in, email shown');
-  ok(/Sync now/.test(after), '...on the sync screen, which sign-in lands on');
-
   await page.click('.tabbar button:has-text("Sessions")');
   await page.waitForTimeout(300);
   const home = await page.textContent('body');
-  ok(!/Sync now/.test(home), 'and the panel is gone from the sessions screen');
+  ok(!/Sync now/.test(home), 'the sync panel is not on the sessions screen');
 
   await openMore('Cloud sync');
   const syncScreen = await page.textContent('body');
+  ok(syncScreen.includes('jaxon@example.com'), 'signed in, email shown');
+  ok(/Sync now/.test(syncScreen), '...on the sync screen under More');
   ok(syncScreen.includes('1 load linked'), 'the linked-load count is reported');
 }
 

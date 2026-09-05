@@ -308,6 +308,24 @@ export function startMock(opts = {}) {
     relayParts: new Map(),      // relayId -> Map(userId -> participant)
     joinFails: new Map(),       // userId -> count
     anonUsers: new Set(),       // user ids created by anonymous sign-in
+    /* The beta gate from migration 0021: userId -> the access_request row.
+     *
+     * Filed on sign-up, as `pending`, because that is what the trigger on
+     * auth.users does and a fixture that started people approved would be a
+     * fixture in which the hold screen never appears.
+     *
+     * What this mock deliberately does NOT do is refuse table reads and
+     * writes to a pending account. The refusal is a restrictive Postgres
+     * policy; the SQL suite (rls_test11) is where it is exercised, against a
+     * real planner, and it is the only place that can be evidence for it.
+     * Re-implementing it here would produce a second, hand-written copy of the
+     * rule that could agree with this file's author and disagree with the
+     * database -- the failure mode a mock is worst at revealing. So: this file
+     * models the STATUS, which is what the client logic branches on, and
+     * leaves the enforcement to the thing that enforces it.
+     *
+     * `mock.setAccess(id, status)` is how a test plays the owner. */
+    access: new Map(),          // userId -> { status, heard_from, ... }
     /* Pretend to be a server that predates migration 0009: no relay_face, and
      * a join_relay that does not know p_target_name. PostgREST resolves an RPC
      * by the keys in the body, so the extra key is a 404 rather than an
@@ -426,6 +444,20 @@ export function startMock(opts = {}) {
           return json(res, 200, s2);
         }
         state.users.set(payload.email, { id, password: payload.password });
+        /* The trigger from 0021, in miniature. It reads the sign-up `data`
+         * rather than a separate call, so a client that stopped sending the
+         * metadata would show up here as a request with no marketing answer --
+         * which is exactly how it would show up in the owner's queue. */
+        const meta = payload.data || {};
+        state.access.set(id, {
+          user_id: id,
+          email: payload.email,
+          status: 'pending',
+          heard_from: meta.heard_from || null,
+          heard_detail: meta.heard_detail || null,
+          requested_at: stamp(),
+          decided_at: null,
+        });
         return json(res, 200, issue(id, payload.email));
       }
 
@@ -541,6 +573,39 @@ export function startMock(opts = {}) {
         if (fn === 'keepalive') return json(res, 200, stamp());
 
         if (!a || a.expired) return json(res, 401, { message: 'JWT expired' });
+
+        /* my_access_status returns an OBJECT, never a row and never null.
+         * The `unknown` fallback is the case the client has to treat as
+         * pending: an account with no request row at all. An anonymous guest
+         * lands here too -- 0021 files them nothing on purpose. */
+        if (fn === 'my_access_status') {
+          const r = state.access.get(a.userId);
+          if (!r) return json(res, 200, { status: 'unknown' });
+          return json(res, 200, {
+            status: r.status,
+            requested_at: r.requested_at,
+            decided_at: r.decided_at,
+            heard_from: r.heard_from,
+            heard_detail: r.heard_detail,
+          });
+        }
+
+        /* Scoped to the CALLER's row and to `pending`, the same two
+         * restrictions the definer function carries. A test that could point
+         * this at somebody else would be testing a function that does not
+         * exist. */
+        if (fn === 'submit_access_details') {
+          const r = state.access.get(a.userId);
+          if (r && r.status === 'pending') {
+            r.heard_from = payload.p_heard_from || null;
+            r.heard_detail = payload.p_heard_detail || null;
+          }
+          return json(res, 200, r
+            ? { status: r.status, requested_at: r.requested_at,
+                decided_at: r.decided_at, heard_from: r.heard_from,
+                heard_detail: r.heard_detail }
+            : { status: 'unknown' });
+        }
 
         if (fn === 'create_relay') {
           for (const r of state.relays.values()) {
@@ -1005,6 +1070,59 @@ export function startMock(opts = {}) {
         state,
         stop: () => new Promise(r => server.close(r)),
         advance: (ms) => { state.clock += ms; },
+        /* Play the owner. `id` is a user id or the email they signed up with,
+         * because a test that has just called signUp() holds the address and
+         * would otherwise have to dig the uuid back out of the session. */
+        setAccess: (id, status) => {
+          const rec = state.users.get(id);
+          const uid = rec ? rec.id : id;
+          const row = state.access.get(uid) || {
+            user_id: uid, email: rec ? id : null, status: 'pending',
+            heard_from: null, heard_detail: null,
+            requested_at: stamp(), decided_at: null,
+          };
+          row.status = status;
+          row.decided_at = status === 'pending' ? null : stamp();
+          state.access.set(uid, row);
+          return row;
+        },
+        /* A REAL session for an approved account, for the browser suites.
+         *
+         * They boot the app already signed in, because after migration 0021
+         * a signed-out app paints a gate and nothing else -- there is no tab
+         * bar to click. What they must not do is boot with an invented token:
+         * the app syncs on launch, this mock would answer 401, zero-core would
+         * try the refresh token it has never seen, the refresh would fail, and
+         * the suite would be signed out three hundred milliseconds into a run
+         * for reasons no assertion mentions.
+         *
+         * So the token comes from the same issuer the app's own sign-in uses,
+         * and the account is one this mock will still recognise on the second
+         * request. */
+        issueSession: (email = 'tester@example.com', status = 'approved') => {
+          let rec = state.users.get(email);
+          if (!rec) {
+            rec = { id: randomUUID(), password: 'hunter2' };
+            state.users.set(email, rec);
+          }
+          const s = issue(rec.id, email);
+          state.access.set(rec.id, {
+            user_id: rec.id, email, status,
+            heard_from: null, heard_detail: null,
+            requested_at: stamp(), decided_at: status === 'pending' ? null : stamp(),
+          });
+          return {
+            userId: rec.id,
+            email,
+            status,
+            session: {
+              access_token: s.access_token,
+              refresh_token: s.refresh_token,
+              expires_at: Date.now() + state.ttlSec * 1000,
+              user: { id: rec.id, email, is_anonymous: false },
+            },
+          };
+        },
         seed: (t, row) => {
           const m = table(t);
           m.set(row.id, Object.assign({ created_at: stamp(), updated_at: stamp() }, row));

@@ -27,9 +27,25 @@ end $$;
 
 create schema if not exists auth;
 
+/* The columns are the ones the MIGRATIONS read, and no more.
+ *
+ * The real auth.users is forty-odd columns of GoTrue bookkeeping and none of
+ * it belongs here -- a fixture that mirrors a table it does not own drifts
+ * from it silently. These three arrived with 0021, whose trigger reads
+ * raw_user_meta_data for the sign-up answers, skips is_anonymous rows, and
+ * backfills from created_at. Without them the migration parses and then fails
+ * at the first insert, which is a suite that cannot run rather than one that
+ * fails an assertion.
+ *
+ * Defaults match GoTrue's: metadata is an empty object rather than null, and
+ * an account is not anonymous unless it says so. A fixture whose defaults
+ * differ from production is a fixture that green-lights the wrong branch. */
 create table if not exists auth.users (
-  id    uuid primary key default gen_random_uuid(),
-  email text unique
+  id                 uuid primary key default gen_random_uuid(),
+  email              text unique,
+  raw_user_meta_data jsonb not null default '{}'::jsonb,
+  is_anonymous       boolean not null default false,
+  created_at         timestamptz not null default now()
 );
 
 -- Supabase derives auth.uid() and auth.jwt() from the request JWT. Locally we

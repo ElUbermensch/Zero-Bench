@@ -33,6 +33,15 @@ insert into auth.users (id, email) values
   ('44444444-4444-4444-4444-444444444444', 'stranger@example.com')
 on conflict do nothing;
 
+/* 0021 files every new sign-up as `pending`, and a pending account is refused
+ * by a restrictive policy on every table these suites touch. They are about
+ * OWNERSHIP -- can B read A rows -- so the beta gate is switched off for their
+ * fixtures and tested on its own in rls_test11. Left on, every assertion below
+ * would still pass, and would pass for the wrong reason: refused, but by the
+ * gate rather than by the owner check the suite is measuring. */
+update public.access_request set status = 'approved';
+
+
 set role authenticated;
 
 -- ============================================================== host goes live

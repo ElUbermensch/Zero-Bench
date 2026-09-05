@@ -1,6 +1,11 @@
 /* Two independent browser profiles against one shared backend:
  * A publishes, B must see it. That is the whole feature. */
 import { chromium } from 'playwright';
+/* Invitation-only since migration 0021: signed out, the app paints a gate and
+ * nothing else. This boots the browser as an approved user, which is the
+ * audience every assertion below was written for. tools/test-beta-session.mjs
+ * explains why there is no bypass flag. */
+import { applyBetaFixture } from '../../tools/test-beta-session.mjs';
 /* Use the preinstalled browser when present (this dev sandbox sets
  * PLAYWRIGHT_BROWSERS_PATH); otherwise fall back to whatever Playwright
  * installed, which is what CI and a normal checkout will have. */
@@ -38,15 +43,24 @@ const errs = [];
 /** A fresh browser profile = a genuinely separate user, not a second tab. */
 async function shooter(email, seed) {
   const ctx = await browser.newContext({ viewport:{width:430,height:900} });
+  /* Signed in before the first paint, per context, rather than by typing into
+     a card on the home screen -- since migration 0021 there is no home screen
+     to type on until an approved account already exists.
+
+     Applied to THIS context rather than by wrapping browser.newContext once,
+     for two reasons: both shooters would otherwise get the same account, which
+     is the one thing a two-shooter suite cannot have; and the init script has
+     to be the one that wins after `page.reload()` below, which a per-context
+     fixture is and a page.evaluate is not. */
+  await applyBetaFixture(ctx, mock.issueSession(email));
   const page = await ctx.newPage();
   page.on('pageerror', e=>errs.push(`${email}: ${e.message}`));
   await page.goto(BASE);
-  await page.evaluate(({seed})=>{ localStorage.clear();
+  /* No localStorage.clear() any more: it would take the session out with the
+     seed data, and the context is already fresh. */
+  await page.evaluate(({seed})=>{
     localStorage.setItem('sessions_v1', JSON.stringify(seed)); }, {seed});
   await page.reload(); await page.waitForTimeout(600);
-  await page.fill('input[placeholder="email"]', email);
-  await page.fill('input[placeholder="password"]', 'pw12345');
-  await page.click('button:has-text("create account")'); await page.waitForTimeout(600);
   /* Sign-in lands on More -> Cloud sync now; these tests are about the
    * sessions and the board, so come back to them. */
   await page.click('.tabbar button:has-text("Sessions")');

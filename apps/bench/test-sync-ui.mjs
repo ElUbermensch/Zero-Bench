@@ -16,6 +16,10 @@
  * are in from every screen.
  */
 import { chromium } from 'playwright';
+/* No beta fixture here, deliberately. This is the one suite that drives the
+ * gate from the OUTSIDE -- a stranger arriving, asking, waiting and being let
+ * in -- so it must start signed out. Its stub backend answers
+ * my_access_status itself. */
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,7 +34,12 @@ const section = (s) => console.log('\n' + s);
 /* ----------------------------------------------------------- stub backend */
 /* Only the endpoints zero-core actually calls. CORS matters here and would not
  * in production: the app and the API share an origin there and do not here. */
-const hits = { token: 0, signup: 0, push: [], pull: [] };
+const hits = { token: 0, signup: 0, access: 0, push: [], pull: [] };
+/* The owner's verdict, as a mutable fixture. A new sign-up is `pending` --
+ * which is what migration 0021's trigger files -- and the suite moves it to
+ * `approved` at the point the owner would have, so both sides of the gate are
+ * exercised against the same running app rather than against two builds. */
+const access = { status: 'pending', heardFrom: null };
 const USER = { id: '11111111-2222-3333-4444-555555555555', email: 'shooter@example.com' };
 const TOKENS = {
   access_token: 'stub-access', refresh_token: 'stub-refresh',
@@ -58,6 +67,20 @@ const api = http.createServer((req, res) => {
     if (url.pathname === '/auth/v1/token') { hits.token++; return send(200, TOKENS); }
     if (url.pathname === '/auth/v1/signup') { hits.signup++; return send(200, TOKENS); }
     if (url.pathname === '/auth/v1/logout') { return send(204, {}); }
+    /* The beta gate's one read. `access.status` is a variable rather than a
+     * constant because this suite drives the gate from both sides: a stranger
+     * who is refused, and the same account once the owner has said yes. */
+    if (url.pathname === '/rest/v1/rpc/my_access_status') {
+      hits.access++;
+      return send(200, { status: access.status, requested_at: '2026-09-01T00:00:00Z',
+                         decided_at: null, heard_from: access.heardFrom,
+                         heard_detail: null });
+    }
+    if (url.pathname === '/rest/v1/rpc/submit_access_details') {
+      let b = {}; try { b = JSON.parse(raw); } catch { b = {}; }
+      access.heardFrom = b.p_heard_from || null;
+      return send(200, { status: access.status, heard_from: access.heardFrom });
+    }
     const m = /^\/rest\/v1\/([a-z_]+)$/.exec(url.pathname);
     if (m) {
       if (req.method === 'GET') { hits.pull.push(m[1]); return send(200, []); }
@@ -145,45 +168,91 @@ const chip = () => page.evaluate(() => {
 });
 
 /* ============================================== signed out, first launch */
-section('a user who has never signed in');
+section('a stranger gets the gate and nothing else');
 {
-  ok(await page.locator('#sy-email').isVisible(),
-     'the email field is on the first screen, with nothing tapped');
-  ok(await page.locator('#sy-pw').isVisible(), 'so is the password field');
-  ok(await page.locator('button:has-text("Sign in")').first().isVisible(),
-     'and the sign-in button');
+  /* This section used to assert that the sign-in card was on the first screen
+     with nothing tapped. It is not any more, and the reason is not that the
+     card moved: since migration 0021 there is no first screen. An account the
+     owner has not approved cannot see the app at all, so what a stranger meets
+     is the gate -- and the thing worth asserting is that it is a wall rather
+     than a banner over a working interface. */
+  ok(await page.locator('#g-email').isVisible(),
+     'the gate asks for an email with nothing tapped');
+  ok(await page.locator('#g-pw').isVisible(), 'and a password');
 
-  const c = await chip();
-  ok(c.text === 'Sign in', 'the header says Sign in');
-  ok(/act/.test(c.cls), 'and is styled as an outstanding action');
-  ok(c.h >= 36 && c.w >= 36, `the header chip is a real touch target (${Math.round(c.w)}×${Math.round(c.h)})`);
+  const tabs = await page.locator('#tabs button').count();
+  ok(tabs === 0, `no tab bar behind it (${tabs} tabs)`);
+  ok(await page.locator('#syncchip').isHidden(), '...and no sync chip in the header');
 
-  // Every other tab, because the question "am I signed in" is asked from
-  // wherever the user happens to be.
-  await page.click('[data-act="tab"][data-arg="brass"]');
-  await page.waitForTimeout(120);
-  ok((await chip()).text === 'Sign in', 'the header still says it from the Brass tab');
-  await page.click('[data-act="tab"][data-arg="more"]');
-  await page.waitForTimeout(120);
-  ok((await chip()).text === 'Sign in', '...and from More');
-  await page.click('[data-act="tab"][data-arg="lookup"]');
-  await page.waitForTimeout(120);
+  /* The load-bearing one: none of the user's own records are reachable, by
+     navigation or by reading the DOM. A gate that leaves the view painted
+     underneath is a screenshot away from being no gate at all. */
+  const view = await page.textContent('#view');
+  ok(!/Brass|Batches|Recipes/.test(view), 'nothing of the app is rendered behind the gate');
+
+  await page.click('[data-act="gatemode"][data-arg="up"]');
+  await page.waitForTimeout(150);
+  ok(await page.locator('#g-pw2').isVisible(),
+     'requesting access asks for the password twice');
+  ok(await page.locator('#g-heard').isVisible(),
+     '...and how they heard about it, which is the only other thing asked');
+  await page.click('[data-act="gatemode"][data-arg="in"]');
+  await page.waitForTimeout(150);
+
+  /* Legibility on the credential fields, moved here from test-sync.mjs.
+     It measured #sy-email and #sy-pw on the Cloud sync screen while signed
+     out; that screen is behind an approved account now, so the only place
+     those two boxes are ever seen is the gate. A password field nobody can
+     read is the same bug wherever it is painted. */
+  const relLum = (css) => {
+    const [r, g, b] = css.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number)
+      .map(v => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a, b) => {
+    const [x, y] = [relLum(a), relLum(b)].sort((m, n) => n - m);
+    return (x + 0.05) / (y + 0.05);
+  };
+  const readable = await page.evaluate(() => {
+    const out = {};
+    for (const id of ['g-email', 'g-pw']) {
+      const el = document.getElementById(id);
+      if (!el) { out[id] = null; continue; }
+      const cs = getComputedStyle(el);
+      let bg = cs.backgroundColor, n = el;
+      while (/rgba\(0, 0, 0, 0\)|transparent/.test(bg) && n.parentElement) {
+        n = n.parentElement; bg = getComputedStyle(n).backgroundColor;
+      }
+      out[id] = { color: cs.color, bg };
+    }
+    return out;
+  });
+  for (const [id, v] of Object.entries(readable)) {
+    ok(v && contrast(v.color, v.bg) >= 4.5,
+       `${id} is legible against its own background (${v ? contrast(v.color, v.bg).toFixed(1) : 'missing'}:1)`);
+  }
 }
 
-/* ================================================== the chip never syncs */
-section('the header chip navigates, it does not fire a write');
+/* ====================================================== waiting for approval */
+section('signed in, not yet approved');
 {
-  const before = hits.push.length;
-  await page.click('#syncchip');
-  await page.waitForTimeout(200);
-  ok(hits.push.length === before, 'tapping it sent nothing to the server');
-  ok(await page.locator('#sy-email').isVisible(), 'it opened the cloud page, which carries the same fields');
-  await page.click('[data-act="tab"][data-arg="lookup"]');
-  await page.waitForTimeout(120);
+  await page.fill('#g-email', 'shooter@example.com');
+  await page.fill('#g-pw', 'correct-horse');
+  await page.click('[data-act="gateauth"]');
+  await page.waitForTimeout(900);
+
+  ok(hits.token === 1, 'the password grant was called exactly once');
+  ok(hits.access > 0, 'and the app asked whether this account is in the beta');
+
+  const body = await page.textContent('#view');
+  ok(/on the list|approved/i.test(body), 'a pending account is told it is waiting');
+  ok((await page.locator('#tabs button').count()) === 0,
+     'signing in is not the same as being let in — still no tab bar');
+  ok(!hits.push.length, '...and nothing was pushed on behalf of an account with no access');
 }
 
-/* ========================================================== sign-in flow */
-section('signing in');
+/* ========================================================== the owner says yes */
+section('approved');
 {
   // Something local to send, so "did anything move" has an answer.
   await page.evaluate(() => {
@@ -191,14 +260,17 @@ section('signing in');
     save();
   });
 
-  await page.fill('#sy-email', 'shooter@example.com');
-  await page.fill('#sy-pw', 'correct-horse');
-  await page.click('button[data-act="syIn"]');
+  access.status = 'approved';               // the owner, in the dashboard
+  await page.click('[data-act="gaterecheck"]');
   await page.waitForTimeout(900);
 
-  ok(hits.token === 1, 'the password grant was called exactly once');
+  ok((await page.locator('#tabs button').count()) > 0,
+     'checking again lets them in, without signing in a second time');
   ok(hits.push.length > 0, 'records were pushed WITHOUT a second button being pressed');
   ok(hits.pull.length > 0, '...and a pull ran in the same pass');
+
+  await page.click('#syncchip');
+  await page.waitForTimeout(250);
 
   const body = await page.textContent('#view');
   ok(/shooter@example\.com/.test(body), 'the signed-in email is on the screen the user is already looking at');
@@ -238,11 +310,15 @@ section('signing out');
   await page.click('button[data-act="syOut"]');
   await page.waitForTimeout(200);
 
-  ok((await chip()).text === 'Sign in', 'the header goes back to Sign in');
-  await page.click('[data-act="tab"][data-arg="lookup"]');
-  await page.waitForTimeout(150);
-  ok(await page.locator('#sy-email').isVisible(),
-     'and the form comes back to the first screen rather than hiding under More');
+  /* Signing out no longer returns you to a usable app with a sign-in card on
+     it -- it returns you to the gate, which is the same thing a stranger sees.
+     The header chip is part of the app and goes with it. */
+  ok(await page.locator('#syncchip').isHidden(),
+     'the sync chip goes with the app, rather than sitting over the gate');
+  ok(await page.locator('#g-email').isVisible(),
+     'and signing out puts the gate back, not a sign-in card on a working app');
+  ok((await page.locator('#tabs button').count()) === 0,
+     '...with the tab bar gone again');
 }
 
 /* ================================================================ hygiene */

@@ -193,6 +193,17 @@ code.key{font-family:var(--fm); font-size:13px; letter-spacing:.12em;
   font-family:var(--fm); font-size:14px}
 .support input:focus{outline:2px solid var(--zero); outline-offset:1px}
 .support-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:12px}
+/* The decision buttons in the beta queue. `nowrap` because they are a row of
+ * verbs about one account and wrapping them mid-row puts "Deny" under the
+ * account below it -- which, on a screen whose whole job is applying the right
+ * verb to the right person, is the one layout failure that matters. */
+td.acts{white-space:nowrap}
+td.acts button{margin-right:6px}
+td.acts button:last-child{margin-right:0}
+/* A note under a cell's main value: the free-text half of "how did you hear",
+ * and whether a balance is settled. Deliberately quiet -- it is context for
+ * the number above it, not a second column. */
+td .note{margin:2px 0 0; font-size:11.5px}
 table.kv{width:auto; min-width:min(420px,100%)}
 table.kv th{text-align:left; color:var(--ink3); font-weight:500; padding-right:18px;
   white-space:nowrap; vertical-align:top}

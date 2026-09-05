@@ -2377,6 +2377,11 @@ const ZeroCore = (() => {
     AUTH_SIGNED_OUT:     'auth:signed-out',     // { reason: 'user'|'refresh-failed'|'revoked' }
     AUTH_TOKEN_REFRESHED:'auth:token-refreshed',// { expiresAt }
     AUTH_ERROR:          'auth:error',          // { phase, error }
+    /* The owner's decision on this account changed -- { status, record }.
+     * Fires only on a CHANGE, so an app can keep the hold screen polling
+     * without re-rendering it every few seconds, and so "you are in" arrives
+     * as an event rather than as something the user has to go looking for. */
+    ACCESS_CHANGED:      'access:changed',      // { status, record }
     NET_ONLINE:          'net:online',          // {}
     NET_OFFLINE:         'net:offline',         // {}
     SYNC_START:          'sync:start',          // { trigger }
@@ -2555,6 +2560,12 @@ const ZeroCore = (() => {
     const ns = 'zerocore.' + (cfg.appId || 'unknown');
     const K = {
       session: 'zerocore.session',     // shared across both apps, deliberately
+      /* Unnamespaced for the same reason the session is: the beta decision is
+       * about the ACCOUNT, not about which of the two apps is asking. A user
+       * approved in Zero is approved in Bench, and holding two copies of that
+       * would let them disagree -- which is to say, would let one app open
+       * while the other holds. */
+      access:  'zerocore.access',
       cursors: ns + '.cursors',
       outbox:  ns + '.outbox',
       rejected:ns + '.rejected',
@@ -2829,6 +2840,17 @@ const ZeroCore = (() => {
        * SOMEONE ELSE that strands them -- that is the point at which the
        * server will refuse those rows on every sync from then on. */
       if (nextUid && nextUid !== prevUid) dropOrphanTelemetry(nextUid);
+      /* The cached beta status belongs to the identity that fetched it.
+       *
+       * It is held so the hold screen does not flash the app for a moment on
+       * every launch while the round trip runs -- which, for a user who has
+       * been refused, would be a flash of the thing they were refused. That
+       * only works while the cache is about the CURRENT account: leaving one
+       * user's `approved` in place across a sign-out would open the app for
+       * the next person to sign in on the same phone, for as long as it took
+       * one request to come back and correct it. Cleared on any change of
+       * identity, sign-out included. */
+      if (nextUid !== prevUid) clearAccessCache();
       if (s) emit(EVENTS.AUTH_SIGNED_IN, { user: s.user });
       else emit(EVENTS.AUTH_SIGNED_OUT, { reason: reason || 'user' });
     }
@@ -2844,11 +2866,30 @@ const ZeroCore = (() => {
       };
     }
 
-    async function signUp(email, password) {
+    /**
+     * Create an account.
+     *
+     * `meta` carries the sign-up form's answers -- how they heard about the
+     * app -- into GoTrue's `data` field, which lands in raw_user_meta_data,
+     * which is where migration 0021's trigger reads them to file the access
+     * request. It is sent HERE rather than POSTed afterwards because with
+     * email confirmation switched on there is no afterwards: sign-up returns a
+     * user and no tokens, so there is no authenticated moment in which a
+     * follow-up call could be made. The answer would be lost for exactly the
+     * users the owner most needs to know about -- the new ones.
+     *
+     * Nothing else about the call changed. In particular the client does not
+     * and cannot file the request itself; the trigger does, so an account
+     * created by any other means still arrives in the queue.
+     */
+    async function signUp(email, password, meta) {
+      const data = {};
+      if (meta && meta.heardFrom) data.heard_from = String(meta.heardFrom).slice(0, 60);
+      if (meta && meta.heardDetail) data.heard_detail = String(meta.heardDetail).slice(0, 280);
       const t = await authRaw('signUp', '/auth/v1/signup', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, data }),
       });
       if (t.failure) return t.failure;
       const res = t.res;
@@ -2917,6 +2958,138 @@ const ZeroCore = (() => {
       trackOpen();
       track('sign_in_anonymous', {});
       return { ok: true, session };
+    }
+
+    /* --------------------------------------------------------- beta access */
+    /*
+     * Whether the owner has let this account in yet.
+     *
+     * The whole mechanism is in migration 0021 and the enforcement is there,
+     * in restrictive policies the browser cannot reach. Everything in this
+     * section is the COURTESY half: it exists so the apps can show a hold
+     * screen that says "waiting on approval" instead of a working interface
+     * that refuses every save with a policy error. Nothing here is a security
+     * boundary and none of it should ever be treated as one -- a client that
+     * lied about the answer would find every table shut regardless.
+     *
+     * Four states come back, and the apps must handle all four:
+     *
+     *   approved  in. Everything behaves as it did before the gate existed.
+     *   pending   waiting on the owner. The hold screen, and a poll.
+     *   denied    refused. The hold screen, without the poll's optimism.
+     *   revoked   was in, is not any more. Distinct from denied so support can
+     *             tell "it never worked" from "it stopped this morning".
+     *
+     * and a fifth the server invents for a row it cannot find:
+     *
+     *   unknown   treated exactly as `pending`. It covers an account created
+     *             while the migration was mid-deploy. Anything other than
+     *             fail-closed here would make a missing row the way in.
+     */
+    function accessRecordFor(uid) {
+      const rec = store.get(K.access);
+      // Belongs to somebody else, or to nobody: not an answer about this user.
+      if (!rec || !uid || rec.userId !== uid) return null;
+      return rec;
+    }
+
+    function clearAccessCache() { store.set(K.access, null); }
+
+    /** The last known answer for the signed-in account, or null if none has
+     *  come back yet on this device. Synchronous, so a first paint has
+     *  something to render; `refreshAccess()` is what makes it true. */
+    function accessStatus() {
+      const uid = session && session.user && session.user.id;
+      const rec = accessRecordFor(uid);
+      return rec ? rec.status : null;
+    }
+
+    /** The whole cached record -- status, when it was asked for, when it was
+     *  decided, and the marketing answer on file -- for the hold screen. */
+    function accessRecord() {
+      const uid = session && session.user && session.user.id;
+      const rec = accessRecordFor(uid);
+      return rec ? Object.assign({}, rec) : null;
+    }
+
+    /**
+     * True only for a positive `approved`.
+     *
+     * Written as an allow-list rather than `status !== 'denied'` on purpose.
+     * The negative form opens the app for every value the client has not heard
+     * of -- a status added by a later migration, a null from a failed request,
+     * the string 'unknown' -- and each of those is a case where the honest
+     * answer is "we do not know yet", which is not a yes.
+     *
+     * Anonymous pair-fire guests are their own answer: they have no account to
+     * approve, they are not what the gate is about, and 0021 lets them relay
+     * and nothing else. Zero asks this before showing its own interface, and a
+     * guest is never shown it.
+     */
+    function hasAccess() {
+      return accessStatus() === 'approved';
+    }
+
+    /**
+     * Ask the server. Returns { ok, status, record } and caches the answer.
+     *
+     * A failure leaves the previous cache ALONE rather than clearing it. The
+     * common failure is no signal, and a shooter at a range with an approved
+     * account should not be locked out of their own logbook because a poll
+     * could not complete -- the device data is local, and the server refuses
+     * anything that matters on its own account. The reverse case, a cached
+     * `approved` that has since been revoked, is closed by the server: their
+     * sync stops working the moment the revocation lands, whatever this says.
+     */
+    async function refreshAccess() {
+      const uid = session && session.user && session.user.id;
+      if (!uid) return { ok: false, status: null, error: { message: 'not signed in' } };
+      /* A RESULT, not a rejection, for the reason authRaw() gives one aisle
+       * over: a transport failure never produced a response, so it threw
+       * straight out of the promise. Both apps call this from an effect and
+       * from a timer, neither of which has anywhere to put a throw -- so a
+       * phone with no signal produced an unhandled rejection rather than
+       * "could not check". */
+      let r;
+      try {
+        r = await rpc('my_access_status', {});
+      } catch (e) {
+        return { ok: false, status: accessStatus(),
+                 error: { message: 'could not reach the server', transport: true } };
+      }
+      if (!r.ok) return { ok: false, status: accessStatus(), error: r.error };
+      const d = r.data || {};
+      const rec = {
+        userId: uid,
+        status: d.status || 'unknown',
+        requestedAt: d.requested_at || null,
+        decidedAt: d.decided_at || null,
+        heardFrom: d.heard_from || null,
+        heardDetail: d.heard_detail || null,
+        at: nowMs(),
+      };
+      const before = accessStatus();
+      store.set(K.access, rec);
+      if (before !== rec.status) emit(EVENTS.ACCESS_CHANGED, { status: rec.status, record: rec });
+      return { ok: true, status: rec.status, record: rec };
+    }
+
+    /**
+     * Answer the marketing question after the fact.
+     *
+     * Normally this never runs: the answer travels in the sign-up metadata and
+     * the trigger files it. It is here for the account that arrived without
+     * one, so the hold screen can ask rather than leaving the owner to decide
+     * on a blank row. The server refuses it once a decision has been made.
+     */
+    async function submitAccessDetails(heardFrom, heardDetail) {
+      const r = await rpc('submit_access_details', {
+        p_heard_from: heardFrom ? String(heardFrom).slice(0, 60) : null,
+        p_heard_detail: heardDetail ? String(heardDetail).slice(0, 280) : null,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      await refreshAccess();
+      return { ok: true, status: accessStatus() };
     }
 
     /** The access token's payload, or null if it is not a readable JWT.
@@ -4540,6 +4713,7 @@ const ZeroCore = (() => {
       backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
+      accessStatus, accessRecord, hasAccess, refreshAccess, submitAccessDetails,
       mfaEnroll, mfaChallenge, mfaVerify, mfaUnenroll, mfaFactors, aal,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,
@@ -6240,6 +6414,310 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
   );
 }
 
+/* ==========================================================================
+   The beta gate.
+
+   Zero used to open straight into a logbook and treat an account as an
+   optional extra for people who wanted their data on more than one device.
+   That is no longer true: the app is invitation-only while it is in beta, and
+   nothing below the gate renders until the owner has said yes.
+
+   The enforcement is migration 0021 -- restrictive policies the browser cannot
+   argue with. What is here is the part that makes a refusal legible instead of
+   showing somebody a working interface that silently fails to save. Both exist
+   on purpose and only one of them is a security boundary; if this file and the
+   database ever disagree, the database is right.
+
+   Three screens, in order:
+
+     no account       sign in, or create one and answer the marketing question
+     waiting          a hold screen that polls
+     approved         the app, exactly as it was
+   ========================================================================== */
+
+/* The buckets the sign-up form offers.
+ *
+ * A fixed list rather than a free-text box, because the point of asking is to
+ * COUNT the answers, and free text does not add up -- "a mate", "friend",
+ * "word of mouth" and "Dave" are one row in a report and four in a table. The
+ * free-text box is still there underneath, for the half that is actually
+ * actionable: which podcast, which forum, which match.
+ *
+ * `Other` is last and always present. A list with no escape hatch does not
+ * produce cleaner data; it produces people picking the nearest wrong option,
+ * which is worse than an honest "other" because it is indistinguishable from a
+ * real answer. */
+const HEARD_OPTIONS = [
+  'A friend or shooting partner',
+  'At a match or range',
+  'YouTube',
+  'A podcast',
+  'A forum or Reddit',
+  'Instagram or Facebook',
+  'A web search',
+  'Other',
+];
+
+const gateWrap = {
+  minHeight: '100dvh', display: 'flex', alignItems: 'center',
+  justifyContent: 'center', padding: '24px 16px',
+  paddingBottom: 'calc(24px + env(safe-area-inset-bottom))',
+  background: 'var(--bg)',
+};
+const gateCard = {
+  width: '100%', maxWidth: 380, background: 'var(--surf)',
+  border: '1px solid var(--bdr)', borderRadius: 11, padding: '20px 18px',
+};
+const gateInput = {
+  width: '100%', background: 'var(--surf2)', border: '1px solid var(--bdr)',
+  borderRadius: 5, padding: '10px 11px', color: 'var(--ink)',
+  fontFamily: 'var(--fm)', fontSize: 12.5, marginBottom: 8,
+  boxSizing: 'border-box',
+};
+const gateNote = {
+  fontFamily: 'var(--fm)', fontSize: 9.5, color: 'var(--dim)',
+  lineHeight: 1.55, marginTop: 8,
+};
+const gateLabel = {
+  fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)',
+  textTransform: 'uppercase', letterSpacing: '0.09em', marginBottom: 5,
+};
+
+/* `data-gate` is a hook, and a deliberate one.
+ *
+ * The gate is the whole document when it is showing -- no tab bar, no view
+ * container, none of the ids the rest of the app is found by. Anything asking
+ * "did the bundle run and paint" from outside (the offline cold-boot check in
+ * tools/test-cross-app.mjs is the one that made this necessary) would
+ * otherwise read a correctly rendered gate as a blank page. */
+function GateShell({ children }) {
+  return <><style>{S}</style><div style={gateWrap} data-gate="1"><div style={gateCard}>
+    <div style={{fontFamily:'var(--fm)', fontSize:15, color:'var(--ink)',
+                 letterSpacing:'0.02em', marginBottom:2}}>Zero</div>
+    <div style={{...gateLabel, marginBottom:16}}>precision shooting log · closed beta</div>
+    {children}
+    <div style={{...gateNote, opacity:0.6, marginTop:16}}>
+      build {(typeof window !== 'undefined' && window.__BUILD__) || 'unknown'}
+    </div>
+  </div></div></>;
+}
+
+/**
+ * Sign in, or ask to be let in.
+ *
+ * The two modes share one card rather than living on two screens, because the
+ * commonest visit is a returning user who is already approved and wants three
+ * taps, not a landing page.
+ */
+function AccessSignIn({ core, onSignedIn }) {
+  const [mode, setMode] = useState('in');           // 'in' | 'up'
+  const [email, setEmail] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [heard, setHeard] = useState('');
+  const [heardDetail, setHeardDetail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const up = mode === 'up';
+  /* Checked as you type rather than on submit. A mismatch discovered by a
+     rejected submission means retyping both boxes; discovered while the second
+     one is still under the cursor, it means one keystroke. */
+  const mismatch = up && pw2.length > 0 && pw !== pw2;
+  const canSubmit = email.trim().includes('@') && pw.length >= 6
+    && (!up || (pw === pw2 && !!heard));
+
+  async function go() {
+    if (!canSubmit || busy) return;
+    setBusy(true); setMsg(null);
+    const r = up
+      ? await core.signUp(email.trim(), pw, {
+          heardFrom: heard,
+          /* Only meaningful next to a bucket, so it is sent only with one.
+             A detail with no category is a sentence nobody can count. */
+          heardDetail: heardDetail.trim() || null,
+        })
+      : await core.signIn(email.trim(), pw);
+    setBusy(false);
+    if (!r.ok) {
+      setMsg({ kind: 'err', text: r.error?.msg || r.error?.error_description
+        || r.error?.message || 'That did not work. Check the address and password.' });
+      return;
+    }
+    /* Sign-up with email confirmation on returns a user and no session. The
+       account exists and the request is already filed -- the trigger did it --
+       but they cannot be shown the hold screen until they have confirmed and
+       signed in, so say so rather than leaving them on a card that just
+       emptied itself. */
+    if (r.needsConfirmation) {
+      setMode('in'); setPw(''); setPw2('');
+      setMsg({ kind: 'ok', text: 'Account created. Confirm the email we just sent, '
+        + 'then sign in — your request is already with us.' });
+      return;
+    }
+    setPw(''); setPw2('');
+    onSignedIn();
+  }
+
+  return (
+    <GateShell>
+      <div style={{display:'flex', gap:6, marginBottom:14}}>
+        {[['in','Sign in'], ['up','Request access']].map(([k, label]) => (
+          <button key={k} onClick={()=>{ setMode(k); setMsg(null); }}
+            style={{flex:1, background: mode===k ? 'var(--surf2)' : 'none',
+                    border:'1px solid var(--bdr)', borderRadius:5, padding:'8px 0',
+                    color: mode===k ? 'var(--ink)' : 'var(--dim)',
+                    fontFamily:'var(--fm)', fontSize:10.5, cursor:'pointer'}}>
+            {label}</button>
+        ))}
+      </div>
+
+      <input style={gateInput} type="email" value={email} autoCapitalize="none"
+        autoComplete="username" spellCheck="false" placeholder="email"
+        onChange={e=>setEmail(e.target.value)}/>
+      <input style={gateInput} type="password" value={pw}
+        autoComplete={up ? 'new-password' : 'current-password'}
+        placeholder="password" onChange={e=>setPw(e.target.value)}/>
+
+      {up && <>
+        <input style={{...gateInput,
+                       borderColor: mismatch ? 'var(--red)' : 'var(--bdr)'}}
+          type="password" value={pw2} autoComplete="new-password"
+          placeholder="confirm password" onChange={e=>setPw2(e.target.value)}/>
+        {mismatch && <div style={{...gateNote, color:'var(--red)', marginTop:0}}>
+          The two passwords are not the same.</div>}
+
+        <div style={{...gateLabel, marginTop:12}}>How did you hear about Zero?</div>
+        <select style={{...gateInput, appearance:'none'}} value={heard}
+          onChange={e=>setHeard(e.target.value)}>
+          <option value="">choose one…</option>
+          {HEARD_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+        {/* Shown always rather than only for "Other": the interesting answer is
+            WHICH podcast, and a box that appears only for the least useful
+            option collects the detail exactly where it is least useful. */}
+        <input style={gateInput} value={heardDetail} maxLength={280}
+          placeholder="which one? (optional)"
+          onChange={e=>setHeardDetail(e.target.value)}/>
+      </>}
+
+      <button className="badd" disabled={busy || !canSubmit} onClick={go}
+        style={{width:'100%', marginTop:4, opacity: (busy || !canSubmit) ? 0.45 : 1}}>
+        {busy ? 'working…' : up ? 'Request access' : 'Sign in'}</button>
+
+      {msg && <div style={{...gateNote,
+        color: msg.kind === 'err' ? 'var(--red)' : 'var(--green)'}}>{msg.text}</div>}
+
+      <div style={gateNote}>
+        {up
+          ? 'Zero is invitation-only while it is in beta. Creating an account puts '
+            + 'you in the queue; you will be let in once the owner approves it.'
+          : 'One account, both Zero and Bench.'}
+      </div>
+    </GateShell>
+  );
+}
+
+/**
+ * The wait.
+ *
+ * It polls rather than making the user relaunch, because the thing they are
+ * waiting for happens on somebody else's schedule and the app is the only
+ * place they will find out. Sixty seconds is chosen against the alternative
+ * of a push channel: approval is a human action measured in hours, and a
+ * websocket held open for a day to save fifty-nine seconds of latency is not a
+ * trade worth its complexity.
+ *
+ * Polling stops for a decision that is not going to change on its own --
+ * `denied` and `revoked` are not states an owner reverses without being asked,
+ * and a phone asking every minute forever is a phone with a flat battery.
+ */
+function AccessHold({ core, record, status, onRecheck, onSignOut }) {
+  const [busy, setBusy] = useState(false);
+  const [heard, setHeard] = useState('');
+  const [heardDetail, setHeardDetail] = useState('');
+  const [sent, setSent] = useState(false);
+
+  const waiting = status === 'pending' || status === 'unknown';
+
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const t = setInterval(() => { onRecheck(); }, 60000);
+    /* And on the way back to the app, which is when somebody who has just read
+       "you're in" in their email actually looks. */
+    const onVis = () => { if (!document.hidden) onRecheck(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
+  }, [waiting, onRecheck]);
+
+  const title = status === 'denied' ? 'Not approved'
+    : status === 'revoked' ? 'Access withdrawn'
+    : 'You are on the list';
+
+  const body = status === 'denied'
+    ? 'This account has not been given access to the beta. If you think that is '
+      + 'a mistake, reply to the email you signed up with.'
+    : status === 'revoked'
+    ? 'This account had access and no longer does. If that is unexpected, reply '
+      + 'to the email you signed up with.'
+    : 'Zero is invitation-only while it is in beta. Your request is with the '
+      + 'owner; this screen will let you in by itself the moment it is approved.';
+
+  /* The marketing question, asked here only when it was not answered at
+     sign-up. Normally it travelled in the metadata and this never appears. */
+  const needsHeard = waiting && !(record && record.heardFrom);
+
+  return (
+    <GateShell>
+      <div style={{fontFamily:'var(--fm)', fontSize:12.5, color:'var(--ink)',
+                   marginBottom:8}}>{title}</div>
+      <div style={{...gateNote, marginTop:0, fontSize:10.5}}>{body}</div>
+
+      <div style={{...gateNote, marginTop:12}}>
+        {core.getUser()?.email || 'signed in'}
+        {record && record.requestedAt && waiting
+          ? ` · asked ${new Date(record.requestedAt).toLocaleDateString()}` : ''}
+      </div>
+
+      {needsHeard && !sent && (
+        <div style={{marginTop:14, paddingTop:14, borderTop:'1px solid var(--bdr)'}}>
+          <div style={gateLabel}>One question while you wait</div>
+          <div style={{...gateNote, marginTop:0, marginBottom:8}}>
+            How did you hear about Zero? It is the only thing we ask for.</div>
+          <select style={{...gateInput, appearance:'none'}} value={heard}
+            onChange={e=>setHeard(e.target.value)}>
+            <option value="">choose one…</option>
+            {HEARD_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+          <input style={gateInput} value={heardDetail} maxLength={280}
+            placeholder="which one? (optional)"
+            onChange={e=>setHeardDetail(e.target.value)}/>
+          <button className="badd" disabled={!heard || busy}
+            style={{width:'100%', opacity: (!heard || busy) ? 0.45 : 1}}
+            onClick={async () => {
+              setBusy(true);
+              const r = await core.submitAccessDetails(heard, heardDetail.trim() || null);
+              setBusy(false);
+              if (r.ok) { setSent(true); onRecheck(); }
+            }}>{busy ? 'sending…' : 'Send'}</button>
+        </div>
+      )}
+
+      <div style={{display:'flex', gap:8, marginTop:16}}>
+        {waiting && (
+          <button className="badd" style={{flex:1, opacity: busy ? 0.5 : 1}}
+            disabled={busy}
+            onClick={async () => { setBusy(true); await onRecheck(); setBusy(false); }}>
+            {busy ? 'checking…' : 'Check again'}</button>
+        )}
+        <button className="badd" onClick={onSignOut}
+          style={{flex:1, background:'none', border:'1px solid var(--bdr)',
+                  color:'var(--ink)'}}>Sign out</button>
+      </div>
+    </GateShell>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState('sessions');
   /* Which submenu is open under More. null is the menu itself. Kept separate
@@ -6588,6 +7066,41 @@ function App() {
     return () => offs.forEach(off => off());
   }, [core]);
 
+  /* ------------------------------------------------------------ beta access
+     Whether the owner has let this account in. Nothing below the gate further
+     down renders until this says `approved`.
+
+     Seeded from zero-core's cache rather than from null, and that is the
+     difference between a returning user opening their logbook and a returning
+     user watching a hold screen for the length of a round trip -- which, for
+     somebody who was refused last week, would be a flash of the app they were
+     refused. The cache is per account and is dropped on any change of
+     identity, so it cannot open the app for the wrong person. */
+  const [access, setAccess] = useState(() => (core ? core.accessStatus() : null));
+  const [accessChecked, setAccessChecked] = useState(false);
+
+  const recheckAccess = useCallback(async () => {
+    if (!core || !core.isSignedIn()) { setAccessChecked(true); return { ok: false }; }
+    const r = await core.refreshAccess();
+    setAccess(core.accessStatus());
+    setAccessChecked(true);
+    return r;
+  }, [core]);
+
+  useEffect(() => {
+    if (!core) { setAccessChecked(true); return undefined; }
+    const offs = [
+      core.on(core.EVENTS.ACCESS_CHANGED, (p) => setAccess(p.status)),
+      /* A sign-in is a new question, not a new answer: the previous account's
+         verdict says nothing about this one, so the screen goes back to
+         "checking" rather than showing a stale yes. */
+      core.on(core.EVENTS.AUTH_SIGNED_IN, () => { setAccessChecked(false); recheckAccess(); }),
+      core.on(core.EVENTS.AUTH_SIGNED_OUT, () => { setAccess(null); setAccessChecked(true); }),
+    ];
+    recheckAccess();
+    return () => offs.forEach(off => off());
+  }, [core, recheckAccess]);
+
   /* One shot, in the shape the relay wants. The call travels with it: the gap
    * between where a shooter said the sights were and where the hole is, is the
    * single most useful thing a coach reads off a live string. */
@@ -6856,6 +7369,52 @@ function App() {
   ];
 
   if (!ready) return <><style>{S}</style><div style={{padding:40,fontFamily:'var(--fm)',fontSize:11,color:'var(--dim)'}}>loading...</div></>;
+
+  /* ========================================================== the beta gate
+     Everything below this point is the app. Nothing below this point renders
+     for an account the owner has not approved -- not a tab bar, not a screen
+     name, not a count of somebody's sessions. The refusal that matters is in
+     the database (migration 0021); this is what makes it legible.
+
+     Placed after `ready` so the hooks above all run in the same order on every
+     render, and before every `screen === ...` branch below, so there is no
+     route into the app that skips it. */
+  if (!core) {
+    /* No backend configured at all. Only reachable in a local build -- the
+       deploy refuses to ship without one -- but "the app quietly does nothing"
+       is the wrong way to say so. */
+    return <GateShell>
+      <div style={{fontFamily:'var(--fm)', fontSize:12, color:'var(--ink)'}}>
+        No backend configured</div>
+      <div style={{...gateNote, fontSize:10.5}}>
+        This build has no Supabase project set, so there is nobody to ask for
+        access. Set one in <code>supabase.config.json</code> and rebuild.</div>
+    </GateShell>;
+  }
+
+  /* An anonymous session is a pair-fire guest, and a guest is not a signed-in
+     user in any sense this screen cares about: there is no account to approve
+     and no address to write to. Sending them to the hold screen would be
+     asking them to wait for a decision nobody will ever make, so they are sent
+     to sign in instead. */
+  if (!core.isSignedIn() || core.isAnonymous()) {
+    return <AccessSignIn core={core}
+      onSignedIn={() => { setAccessChecked(false); recheckAccess(); }}/>;
+  }
+
+  if (access !== 'approved') {
+    /* The first look on a device that has never asked. Shown only while the
+       answer is genuinely unknown -- a cached `approved` skips it entirely, so
+       a returning user never sees this at all. */
+    if (!accessChecked && access === null) {
+      return <GateShell>
+        <div style={{...gateNote, marginTop:0, fontSize:10.5}}>Checking your access…</div>
+      </GateShell>;
+    }
+    return <AccessHold core={core} status={access || 'unknown'}
+      record={core.accessRecord()} onRecheck={recheckAccess}
+      onSignOut={() => { core.signOut(); setAccess(null); setAccessChecked(true); }}/>;
+  }
 
   if (screen === 'relay') {
     return <RelayViewer core={core} onExit={()=>setScreen('home')}/>;

@@ -10,6 +10,7 @@
  * relay API to make something appear -- if a button is not wired, this fails.
  */
 import { chromium } from 'playwright';
+import { applyBetaFixture } from '../../tools/test-beta-session.mjs';
 import fsx from 'node:fs';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -50,28 +51,37 @@ const errs = [];
  *  separate zero-core instance, separate identity. */
 async function device(label, { seed, email } = {}) {
   const ctx = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  /* Every device now carries an approved account, and that is a product
+   * change rather than a harness convenience.
+   *
+   * A coach used to join with no account at all: zero-core signed the device
+   * in anonymously and the relay was the one thing an anonymous session could
+   * do. The beta gate closed that door in the CLIENT -- Zero shows nobody its
+   * interface, and the join form is inside the interface -- so there is no
+   * longer a route by which a stranger reaches a four-character code.
+   *
+   * The database still allows it: may_relay() in migration 0021 lets an
+   * anonymous session join and grants it nothing else, precisely so that a
+   * guest link can be handed back later as a client change and not a
+   * migration. Until then, a relay is between approved accounts, and these
+   * devices are approved accounts.
+   *
+   * Applied per context rather than by wrapping browser.newContext, because
+   * the whole point of a relay suite is that the devices are different people:
+   * one shared fixture would make the host and the coach the same account and
+   * every mirroring assertion would pass without mirroring anything. */
+  await applyBetaFixture(ctx, mock.issueSession(email || `${label}@example.com`));
   const page = await ctx.newPage();
   page.on('pageerror', e => errs.push(`${label}: ${e.message}`));
   await page.goto(BASE);
+  /* No localStorage.clear(): the context is already fresh, and clearing it
+   * would take the session out with the seed and drop the device at the gate. */
   await page.evaluate(s => {
-    localStorage.clear();
     if (s) localStorage.setItem('sessions_v1', JSON.stringify(s));
   }, seed || null);
   await page.reload();
   await page.waitForTimeout(600);
   await page.waitForTimeout(300);
-  if (email) {
-    await page.fill('input[placeholder="email"]', email);
-    await page.fill('input[placeholder="password"]', 'pw12345');
-    await page.click('button:has-text("create account")');
-    await page.waitForTimeout(600);
-    /* Signing in from the home screen now lands on More -> Cloud sync: the
-     * card that was typed into belongs in the menu once there is an account,
-     * and vanishing with no acknowledgement would read as a failure. Come
-     * back to the sessions, which is what these tests are about. */
-    await page.click('.tabbar button:has-text("Sessions")');
-    await page.waitForTimeout(300);
-  }
   return { ctx, page, label };
 }
 
@@ -291,9 +301,20 @@ ok(textB.includes('4 called · 200yd'),
 ok(/0\.24[\s\S]{0,40}MOA call miss/.test(textB),
    '...so the same half inch is 0.24 MOA for B where it is 0.48 for A');
 
-const anon = await C.page.evaluate(() =>
-  JSON.parse(localStorage.getItem('zerocore.session') || '{}')?.user?.is_anonymous);
-ok(anon === true, 'the coach is on an anonymous identity, having created no account');
+/* This asserted `is_anonymous === true` -- that the coach had joined with no
+   account at all, which was the point of anonymous sign-in.
+   The beta gate ended that route through the client: the join form lives
+   inside Zero's interface, and Zero shows its interface to nobody who has not
+   been approved. So a coach is an approved account now, and what is still
+   worth asserting is the half that has not changed and is the actual feature:
+   a coach is a DIFFERENT person from the shooters, and is given a coach's
+   screen rather than a shooter's. */
+const coachId = await C.page.evaluate(() =>
+  JSON.parse(localStorage.getItem('zerocore.session') || '{}')?.user?.id);
+const shooterId = await A.page.evaluate(() =>
+  JSON.parse(localStorage.getItem('zerocore.session') || '{}')?.user?.id);
+ok(!!coachId && coachId !== shooterId,
+   'the coach is a separate identity from the shooter, on a separate device');
 ok(await C.page.locator('input[placeholder="message"]').count() === 1,
    'the coach can talk to the line');
 ok(await C.page.locator('button:has-text("+ shot")').count() === 0,

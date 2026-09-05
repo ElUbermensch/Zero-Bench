@@ -38,6 +38,15 @@ insert into auth.users (id, email) values
   ('e0000000-0000-0000-0000-00000000000e', 'mfa-shooter@example.com')
 on conflict do nothing;
 
+/* 0021 files every new sign-up as `pending`, and a pending account is refused
+ * by a restrictive policy on every table these suites touch. They are about
+ * OWNERSHIP -- can B read A rows -- so the beta gate is switched off for their
+ * fixtures and tested on its own in rls_test11. Left on, every assertion below
+ * would still pass, and would pass for the wrong reason: refused, but by the
+ * gate rather than by the owner check the suite is measuring. */
+update public.access_request set status = 'approved';
+
+
 insert into public.profiles (id, display_name, is_admin) values
   ('d0000000-0000-0000-0000-00000000000d', 'MFA Owner',   true),
   ('e0000000-0000-0000-0000-00000000000e', 'MFA Shooter', false)

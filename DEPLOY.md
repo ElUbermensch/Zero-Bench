@@ -138,6 +138,7 @@ paste each one whole rather than in pieces.
 | `0015_admin_role.sql` | `profiles.is_admin`, and the `is_admin()` the analytics policies ask |
 | `0016_analytics_events.sql` | `analytics_event` and the four rollups the owner dashboard reads |
 | `0017_admin_mfa.sql` | requires a verified second factor (`aal2`) to read the analytics |
+| `0021_access_requests.sql` | the beta gate: `access_request`, the trigger that files one per sign-up, and the restrictive policies that refuse every table until you approve it |
 
 If you have the Supabase CLI instead:
 
@@ -321,6 +322,51 @@ Then open `/admin/` and sign in with that account. Anyone else who finds the URL
 a sign-in box and, if they sign in, a page telling them they are not an admin — the
 row-level security in `0016` is what actually withholds the data, so this holds even
 against someone calling the REST API directly.
+
+### Letting people in — the beta gate
+
+Since migration `0021` the apps are **invitation-only**. Signing up no longer gets
+anybody in; it files a request, and nothing in either app works until you approve it.
+
+What a new user does:
+
+1. opens Zero or Bench and gets a gate instead of the app,
+2. picks **Request access**, gives an email, a password twice, and answers one
+   question — how they heard about the product,
+3. lands on a hold screen that polls, and lets them in by itself the moment you say
+   yes. They never have to be told, and never have to reinstall anything.
+
+What you do: open `/admin/`, go to the **Access** tab, and press **Approve**.
+Waiting requests sort to the top. **Deny** refuses; **Revoke** takes access back from
+somebody who had it, and takes effect on their next request — there is no session to
+wait out.
+
+**Billing is on the same row, ready for when the apps are paid for.** Each request
+carries an amount due and an amount paid, both in cents, and the difference is the
+`balance` shown beside the buttons. Press **Billing** to set them. Nothing is
+automatic on purpose: recording a payment does not approve anybody and approving
+somebody does not claim a payment. The workflow is "approve once the balance is met",
+and the number is put in front of you at the moment you press the button — including
+in the confirmation, which says what they still owe.
+
+The **How they heard about it** table underneath counts the sign-up answers. That is
+the only marketing question the product asks anybody.
+
+**None of this is enforced by the dashboard, and that matters.** Both apps are static
+bundles served with the publishable key, so a hold screen is only a courtesy — the
+refusal is a set of restrictive row-level-security policies applied to every table in
+`0021`, which a browser cannot argue with. `supabase/test/rls_test11.sql` is the
+adversarial suite for it: a waiting account cannot read or write anything, cannot
+approve itself through the table, the RPC or the sign-up form, and cannot open a pair
+fire relay through the security-definer functions that never see a policy at all.
+
+**Existing accounts were let in automatically.** The migration backfills everybody who
+had an account when it ran as `approved`, with a note saying so. Locking out people
+who already have a logbook in the app is not a beta gate, it is an outage. The gate is
+for who comes next. If you want somebody out, revoke them from the Access tab.
+
+**Approving requires the second factor**, the same as the analytics — see below. So
+does reading the queue at all.
 
 ### The second factor
 

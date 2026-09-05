@@ -11,6 +11,11 @@
  * the other owns.
  */
 import { chromium } from 'playwright';
+/* Invitation-only since migration 0021: signed out, the app paints a gate and
+ * nothing else. This boots the browser as an approved user, which is the
+ * audience every assertion below was written for. tools/test-beta-session.mjs
+ * explains why there is no bypass flag. */
+import { useBetaFixture } from './test-beta-session.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -75,7 +80,7 @@ const server = http.createServer(serveBoth);
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const BASE = `http://127.0.0.1:${server.address().port}/`;
 
-const browser = await chromium.launch(LAUNCH_OPTS);
+const browser = useBetaFixture(await chromium.launch(LAUNCH_OPTS), mock.issueSession('both@example.com'));
 /* ONE context: the two apps share an origin in production and therefore share
  * localStorage. Giving each its own context would test a separation that does
  * not exist and would have hidden the shared-cursor bug entirely. */
@@ -133,7 +138,9 @@ section('one account, two apps');
 {
   await zero.goto(BASE);
   await zero.evaluate(() => {
-    localStorage.clear();
+    /* No localStorage.clear(): it would take the session out with it and drop
+       the app at the beta gate, which since migration 0021 is what a signed
+       out Zero shows instead of a logbook. The context is fresh anyway. */
     localStorage.setItem('rifles_v1', JSON.stringify([{
       id: 'r1', name: 'Tikka T3x', caliber: '6.5 Creedmoor',
       barrelLife: 2800, roundsAtStart: 120, notes: 'match barrel', ts: 1,
@@ -142,11 +149,15 @@ section('one account, two apps');
   await zero.reload();
   await zero.waitForTimeout(700);
 
-  await zero.fill('input[placeholder="email"]', 'both@example.com');
-  await zero.fill('input[placeholder="password"]', 'hunter2');
-  await zero.click('button:has-text("create account")');
-  await zero.waitForTimeout(700);
+  /* The account is established before the first paint rather than typed in
+     here, for the reason above: there is no screen to type it on until an
+     approved account exists. The premise this section is really about is
+     untouched -- ONE account across both apps -- and is asserted below by
+     opening Bench and finding it already signed in. */
+  await zeroMore('Cloud sync');
   ok((await zero.textContent('body')).includes('both@example.com'), 'Zero is signed in');
+  await zero.click('.tabbar button:has-text("Sessions")');
+  await zero.waitForTimeout(300);
 
   /* The session is deliberately shared between the two apps: it is an
    * identity, not work in progress, and one sign-in for both apps is the whole
@@ -610,10 +621,18 @@ section('two apps, one origin, no signal');
       await p.waitForTimeout(600);
       const landed = p.url().split('?')[0] === url;
       /* The APP, not merely a document. A shell served without its script
-       * still has the right title and a body full of nothing; only the tab bar
-       * proves the bundle came out of the cache and ran. */
+       * still has the right title and a body full of nothing; only something
+       * the bundle itself renders proves it came out of the cache and ran.
+       *
+       * `[data-gate]` counts, and has to: this browser is a cold install with
+       * no session, so what Zero correctly paints offline is the beta gate,
+       * which has no tab bar by design. Requiring `.tabbar` here would have
+       * read a working offline gate as a page that failed to load -- and the
+       * subject of this test is the service worker, not who is signed in. */
       const drawn = await p.evaluate(() =>
-        (document.querySelector('.tabbar') || document.querySelector('#view')) ? 'app' : 'blank')
+        (document.querySelector('.tabbar') || document.querySelector('#view')
+         || document.querySelector('[data-gate]') || document.querySelector('.gate'))
+          ? 'app' : 'blank')
         .catch(() => 'blank');
       return `${await p.title()}|${landed ? 'landed' : 'elsewhere'}|${drawn}`;
     } catch (e) { return 'DEAD|' + String(e.message).split('\n')[0]; }

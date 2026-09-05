@@ -1909,6 +1909,104 @@ section('mfa');
   ok(c.aal() === 'aal1', 'and starts at aal1 again — the factor is per session, not once per account');
 }
 
+/* ================================================================== access */
+section('the beta gate');
+{
+  /* The client half of migration 0021. Everything that REFUSES lives in the
+     database and is tested in supabase/test/rls_test11.sql; what is tested
+     here is the part the apps branch on, and the two mistakes that part can
+     make: opening for a status it does not recognise, and carrying one
+     account's answer over to the next person on the same phone. */
+  const store = memStore();
+  const c = mkClient(store, { appId: 'zero' });
+
+  const seen = [];
+  c.on(c.EVENTS.ACCESS_CHANGED, (p) => seen.push(p.status));
+
+  await c.signUp('beta-a@example.com', 'hunter2',
+                 { heardFrom: 'Podcast', heardDetail: 'The Bullet Points' });
+
+  ok(c.accessStatus() === null,
+     'nothing is known about a brand-new account until the server is asked');
+  ok(!c.hasAccess(), '...and unknown is not a yes');
+
+  const r1 = await c.refreshAccess();
+  ok(r1.ok && r1.status === 'pending', 'a fresh sign-up comes back pending');
+  ok(!c.hasAccess(), 'pending is not access');
+  ok(seen.includes('pending'), 'and the change is announced, so a hold screen can appear');
+
+  /* The marketing answer travelled in the sign-up itself. That is the whole
+     reason it is sent as GoTrue metadata: with email confirmation on there is
+     no session afterwards in which to send it separately. */
+  const rec = c.accessRecord();
+  ok(rec.heardFrom === 'Podcast' && rec.heardDetail === 'The Bullet Points',
+     'the sign-up carried how they heard about it, without a second call');
+
+  const sub = await c.submitAccessDetails('Forum', 'Snipers Hide');
+  ok(sub.ok && c.accessRecord().heardFrom === 'Forum',
+     'a waiting user can correct the answer');
+  ok(c.accessStatus() === 'pending', '...which does not move their status');
+
+  mock.setAccess('beta-a@example.com', 'approved');
+  ok(c.accessStatus() === 'pending',
+     'the owner approving does not change the client until it asks again');
+  const r2 = await c.refreshAccess();
+  ok(r2.ok && r2.status === 'approved' && c.hasAccess(), 'asking again lets them in');
+  ok(seen.includes('approved'), 'and that arrives as an event rather than silently');
+
+  /* Revocation is the case a cache gets wrong. */
+  mock.setAccess('beta-a@example.com', 'revoked');
+  await c.refreshAccess();
+  ok(c.accessStatus() === 'revoked' && !c.hasAccess(),
+     'revoking takes it back, and revoked is distinguishable from denied');
+
+  mock.setAccess('beta-a@example.com', 'approved');
+  await c.refreshAccess();
+  ok(c.hasAccess(), 'approved again');
+
+  /* A failed poll must not lock out somebody who is already in. A shooter at
+     a range with no signal still owns their logbook, and the server refuses
+     anything that actually matters on its own account. */
+  const savedFetch = c._config.fetch;
+  c._config.fetch = async () => { throw new Error('offline'); };
+  const r3 = await c.refreshAccess().catch(() => ({ ok: false }));
+  c._config.fetch = savedFetch;
+  ok(c.hasAccess(),
+     'a poll that could not complete leaves an approved user approved');
+  ok(!r3.ok, '...while still reporting that it did not complete');
+
+  /* The one that matters on a shared phone: signing out must not leave
+     `approved` sitting in storage for whoever signs in next. */
+  await c.signOut();
+  ok(c.accessStatus() === null, 'signing out drops the cached decision');
+
+  await c.signUp('beta-b@example.com', 'hunter2', { heardFrom: 'Friend' });
+  ok(c.accessStatus() === null,
+     'and the next account on the same device inherits nothing');
+  await c.refreshAccess();
+  ok(c.accessStatus() === 'pending' && !c.hasAccess(),
+     '...it starts pending, like everybody else');
+
+  /* An anonymous pair-fire guest files no request at all. The apps never show
+     them the account interface, so `unknown` is the honest answer and must not
+     read as a yes. */
+  const g = mkClient(memStore(), { appId: 'zero' });
+  await g.signInAnonymously();
+  const rg = await g.refreshAccess();
+  ok(rg.ok && rg.status === 'unknown', 'an anonymous guest has no request on file');
+  ok(!g.hasAccess(), '...and unknown does not open the app');
+
+  /* Fail-closed against a status this build has never heard of, which is what
+     a later migration adding one would look like to an app already in the
+     field. */
+  mock.setAccess('beta-b@example.com', 'suspended-pending-review');
+  await c.refreshAccess();
+  ok(c.accessStatus() === 'suspended-pending-review',
+     'an unrecognised status is reported as it stands');
+  ok(!c.hasAccess(),
+     '...and does NOT open the app — hasAccess is an allow-list, not a deny-list');
+}
+
 await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

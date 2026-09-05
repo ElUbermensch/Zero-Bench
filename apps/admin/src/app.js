@@ -90,6 +90,30 @@ async function load() {
       : r.error);
     return { customers: r.data.users || [], truncated: !!r.data.truncated };
   }
+  /* The beta queue comes straight off the table, not through the edge
+   * function, and that is the difference between the two owner screens.
+   *
+   * Customers is a list of auth.users, which PostgREST cannot see and should
+   * not; it needs the service role and therefore an endpoint. access_request
+   * is an ordinary table in the public schema with a policy that already says
+   * "an admin with a second factor, and nobody else". Routing it through the
+   * function as well would mean writing the same rule twice, in two languages,
+   * with nothing keeping them in step.
+   *
+   * No date range: a request from six weeks ago that nobody has answered is
+   * exactly the row this screen exists to surface, and a 30-day window would
+   * hide it. */
+  if (UI.tab === 'access') {
+    const res = await CORE.selectView('access_request',
+      'select=*&order=requested_at.desc&limit=5000');
+    if (!res.ok) {
+      throw new Error(res.status === 404
+        ? 'The table access_request does not exist — apply migration 0021 to the '
+          + 'Supabase project first.'
+        : `Could not read the access queue${res.status ? ` (HTTP ${res.status})` : ''}.`);
+    }
+    return { requests: res.data || [] };
+  }
   const views = UI.tab === 'site' ? {
     /* The marketing site's own tables. Loaded only when that tab is open: an
      * owner watching app usage should not pay for four extra reads a minute
@@ -385,6 +409,163 @@ function supportTab() {
     </section>
 
     ${s.result ? supportDetail(s.result) : ''}
+  </main>`;
+}
+
+/* ==========================================================================
+   The beta queue.
+
+   This is the screen the gate exists for. Everything else in this dashboard
+   reports on what happened; this one is the only place in the product where
+   the owner changes something about somebody else's account, and the only
+   place a person gets into the beta.
+
+   Pending first, always, and not by a sort the reader can change. The rest of
+   the table is reference; the top of it is a to-do list, and a queue that
+   opens on a fortnight of settled decisions is a queue nobody works through.
+
+   Money sits beside the decision rather than driving it. `balance_cents` is
+   due minus paid, so "the balance is met" is `<= 0` -- shown as a chip next to
+   the approve button, because approving on payment is the workflow and
+   approving BECAUSE of payment automatically is a promise this code should not
+   make on the owner's behalf.
+   ========================================================================== */
+
+/* Cents in the database, dollars on screen. Stored as integers because a
+ * balance that has ever been a float is a balance that is eventually out by a
+ * cent, and the one number on this page that must be exact is the one the
+ * approve decision is made against. */
+const money = (cents) => {
+  const n = Math.round(+cents || 0);
+  const sign = n < 0 ? '−' : '';
+  return `${sign}$${(Math.abs(n) / 100).toFixed(2)}`;
+};
+
+const STATUS_LABEL = {
+  pending: 'waiting', approved: 'in', denied: 'refused', revoked: 'withdrawn',
+};
+
+function accessTab() {
+  const d = UI.data || {};
+  const all = d.requests || [];
+  const s = UI.access || {};
+  const q = (s.filter || '').trim().toLowerCase();
+
+  const match = (r) => !q
+    || (r.email || '').toLowerCase().includes(q)
+    || (r.heard_from || '').toLowerCase().includes(q)
+    || (r.note || '').toLowerCase().includes(q);
+
+  const rank = { pending: 0, approved: 1, revoked: 2, denied: 3 };
+  const rows = all.filter(match).sort((a, b) =>
+    (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
+    || String(b.requested_at || '').localeCompare(String(a.requested_at || '')));
+
+  const count = (st) => all.filter(r => r.status === st).length;
+  const pending = count('pending');
+  /* What is owed by people who are still waiting: the figure that says how
+   * much of the queue is a billing question rather than a judgement call. */
+  const owedPending = all.filter(r => r.status === 'pending')
+    .reduce((n, r) => n + Math.max(0, +r.balance_cents || 0), 0);
+
+  const when = (iso) => (iso ? new Date(iso).toLocaleDateString() : '—');
+
+  /* How they heard, counted. The reason the sign-up form asks at all, and the
+   * only place in the product that reads the answer -- kept on this screen
+   * rather than on Website because the population it describes is this one:
+   * people who asked for access, not visitors. */
+  const heard = new Map();
+  for (const r of all) {
+    const k = r.heard_from || null;
+    if (k) heard.set(k, (heard.get(k) || 0) + 1);
+  }
+  const heardRows = [...heard.entries()].sort((a, b) => b[1] - a[1]);
+  const unanswered = all.filter(r => !r.heard_from).length;
+
+  return `
+  <main>
+    <section>
+      <h2>Beta access</h2>
+      <p class="note">Every account that has asked to use the apps. Nothing they do
+        works until a row here says <code>approved</code> — that is enforced by the
+        database, not by this page.</p>
+      <div class="tiles">
+        ${tile('Waiting', fmt(pending), pending ? 'needs a decision' : 'queue is clear')}
+        ${tile('In', fmt(count('approved')), 'using the apps')}
+        ${tile('Refused', fmt(count('denied') + count('revoked')),
+               `${fmt(count('denied'))} denied · ${fmt(count('revoked'))} withdrawn`)}
+        ${tile('Owed by the queue', money(owedPending),
+               owedPending ? 'across accounts still waiting' : 'nothing outstanding')}
+      </div>
+    </section>
+
+    <section>
+      <div class="card">
+        <form id="afilter" class="support" onsubmit="return false">
+          <input id="afilter-q" type="search" placeholder="Filter by email, source or note…"
+                 value="${esc(s.filter || '')}" autocomplete="off" spellcheck="false">
+          ${q ? `<button type="button" data-act="clearafilter">Clear</button>` : ''}
+        </form>
+        ${s.error ? `<div class="banner bad">${esc(s.error)}</div>` : ''}
+        ${s.notice ? `<div class="banner ok">${esc(s.notice)}</div>` : ''}
+        <p class="note">${q ? `${fmt(rows.length)} of ${fmt(all.length)} shown`
+                            : `${fmt(all.length)} requests`}</p>
+        <div class="scroll"><table>
+          <thead><tr>
+            <th>Email</th><th>Status</th><th>Heard from</th><th>Asked</th>
+            <th class="n">Balance</th><th>Note</th><th></th>
+          </tr></thead>
+          <tbody>${rows.length ? rows.map(r => {
+            const bal = +r.balance_cents || 0;
+            const met = bal <= 0;
+            const busy = s.busy === r.user_id;
+            return `<tr>
+            <td>${esc(r.email || '—')}</td>
+            <td><span class="chip"${r.status === 'pending'
+                 ? ' style="color:var(--warn)"' : ''}>${esc(STATUS_LABEL[r.status] || r.status)}</span></td>
+            <td>${r.heard_from
+                 ? esc(r.heard_from) + (r.heard_detail
+                     ? `<div class="note">${esc(r.heard_detail)}</div>` : '')
+                 : '<span style="color:var(--ink3)">not asked</span>'}</td>
+            <td>${esc(when(r.requested_at))}</td>
+            <td class="n">${r.amount_due_cents || r.amount_paid_cents
+                 ? `${money(bal)}<div class="note">${met ? 'paid up' : 'outstanding'}</div>`
+                 : '<span style="color:var(--ink3)">—</span>'}</td>
+            <td>${r.note ? esc(r.note) : '<span style="color:var(--ink3)">—</span>'}</td>
+            <td class="acts">
+              ${r.status !== 'approved'
+                ? `<button data-decide="approved" data-user="${esc(r.user_id)}"
+                     ${busy ? 'disabled' : ''}>Approve</button>` : ''}
+              ${r.status === 'approved'
+                ? `<button data-decide="revoked" data-user="${esc(r.user_id)}"
+                     ${busy ? 'disabled' : ''}>Revoke</button>` : ''}
+              ${r.status === 'pending'
+                ? `<button data-decide="denied" data-user="${esc(r.user_id)}"
+                     ${busy ? 'disabled' : ''}>Deny</button>` : ''}
+              <button data-bill="${esc(r.user_id)}" ${busy ? 'disabled' : ''}>Billing</button>
+            </td>
+          </tr>`; }).join('')
+            : `<tr><td colspan="7" class="empty">${q ? 'No request matches that.'
+                                                     : 'Nobody has asked yet.'}</td></tr>`}
+          </tbody></table></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>How they heard about it</h2>
+      <p class="note">Asked once, at sign-up. The only marketing question the product
+        puts to anybody${unanswered ? `, and ${fmt(unanswered)} account${unanswered === 1 ? ' has' : 's have'} not answered it` : ''}.</p>
+      <div class="card">
+        <div class="scroll"><table>
+          <thead><tr><th>Source</th><th class="n">Accounts</th><th class="n">Share</th></tr></thead>
+          <tbody>${heardRows.length ? heardRows.map(([k, n]) => `<tr>
+            <td>${esc(k)}</td><td class="n">${fmt(n)}</td>
+            <td class="n">${((n / Math.max(1, all.length - unanswered)) * 100).toFixed(0)}%</td>
+          </tr>`).join('')
+            : `<tr><td colspan="3" class="empty">No answers recorded yet.</td></tr>`}
+          </tbody></table></div>
+      </div>
+    </section>
   </main>`;
 }
 
@@ -737,9 +918,16 @@ function siteDashboard(d) {
  * refuse would be an invitation to a dead end. */
 function tabbar() {
   if (UI.view !== 'ready') return '';
+  /* Access sits beside Customers rather than inside it, and the two are not
+   * the same list. Customers is every account that exists; Access is every
+   * account that has asked to be let in and what was decided. They overlap
+   * almost entirely and answer different questions -- "who is this person"
+   * against "what do I owe them an answer about" -- and folding the second
+   * into the first would bury a queue inside a directory. */
   const TABS = [
     ['apps', '▤', 'Apps'],
     ['site', '◰', 'Website'],
+    ['access', '⊙', 'Access'],
     ['support', '≡', 'Customers'],
   ];
   return `<nav class="tabbar">${TABS.map(([k, g, label]) =>
@@ -754,7 +942,7 @@ function header() {
     <h1>Zero Suite</h1>
     <span class="sub">owner dashboard</span>
     <span class="spacer"></span>
-    ${UI.tab === 'support' ? '' : `<span class="range">
+    ${UI.tab === 'support' || UI.tab === 'access' ? '' : `<span class="range">
       ${RANGES.map(([n, label]) => `<button data-range="${n}"
         aria-pressed="${UI.range === n}">${label}</button>`).join('')}
     </span>`}
@@ -904,7 +1092,8 @@ function render() {
   }
   if (UI.view === 'loading') { app.innerHTML = header() + '<main><p class="note">Loading…</p></main>'; return; }
   app.innerHTML = header() + (UI.tab === 'site' ? siteDashboard(UI.data)
-    : UI.tab === 'support' ? supportTab() : dashboard(UI.data)) + tabbar();
+    : UI.tab === 'support' ? supportTab()
+    : UI.tab === 'access' ? accessTab() : dashboard(UI.data)) + tabbar();
 }
 
 /* -------------------------------------------------------------------- flow */
@@ -1126,6 +1315,98 @@ async function runOwnerTool(action, email) {
   render();
 }
 
+/* ------------------------------------------------------------ beta access */
+/*
+ * The decision, and the money, are two RPCs rather than a PATCH on the table.
+ *
+ * access_request has no update policy for anybody, including this account.
+ * That is not an oversight to be worked around with a service-role endpoint --
+ * it is how migration 0021 guarantees that every decision is accompanied by
+ * its audit row: decide_access() writes both in one transaction, and there is
+ * no path that writes one without the other. A PATCH from here would have been
+ * a second way to change the same column, and the second way is always the one
+ * that leaves no record.
+ *
+ * The row is patched locally on success rather than the whole tab reloaded.
+ * The queue is what the owner is working DOWN, and re-fetching would re-sort
+ * it under the pointer between one approval and the next -- which is exactly
+ * how the wrong person gets approved.
+ */
+async function decideAccess(userId, status, note) {
+  UI.access = { ...(UI.access || {}), busy: userId, error: null, notice: null };
+  render();
+  const r = await CORE.rpc('decide_access',
+    { p_user_id: userId, p_status: status, p_note: note || null });
+  applyAccessResult(userId, r, {
+    approved: 'Let in.', denied: 'Refused.', revoked: 'Access withdrawn.',
+  }[status] || 'Updated.');
+}
+
+/* Amounts are typed in DOLLARS and stored in cents. A prompt is the whole UI
+ * here on purpose: this is the seam monetisation will replace, and building a
+ * form for it now would be building the thing that gets thrown away. What must
+ * be right today is the number, the audit row and the RPC -- all of which are
+ * the same whatever asks for them. */
+async function editBilling(userId) {
+  const row = ((UI.data || {}).requests || []).find(r => r.user_id === userId);
+  if (!row) return;
+  const ask = (label, cents) => {
+    const v = prompt(`${label} for ${row.email || 'this account'}, in dollars:`,
+                     ((+cents || 0) / 100).toFixed(2));
+    if (v === null) return null;                 // cancelled: leave it alone
+    const n = Math.round(parseFloat(v) * 100);
+    return Number.isFinite(n) && n >= 0 ? n : NaN;
+  };
+  const due = ask('Amount due', row.amount_due_cents);
+  if (due === null) return;
+  if (Number.isNaN(due)) {
+    UI.access = { ...(UI.access || {}), error: 'That is not an amount.' };
+    return render();
+  }
+  const paid = ask('Amount paid', row.amount_paid_cents);
+  if (paid === null) return;
+  if (Number.isNaN(paid)) {
+    UI.access = { ...(UI.access || {}), error: 'That is not an amount.' };
+    return render();
+  }
+
+  UI.access = { ...(UI.access || {}), busy: userId, error: null, notice: null };
+  render();
+  const r = await CORE.rpc('set_access_billing',
+    { p_user_id: userId, p_plan: null,
+      p_amount_due_cents: due, p_amount_paid_cents: paid });
+  applyAccessResult(userId, r,
+    `Balance is now ${money(due - paid)}${due - paid <= 0 ? ' — met.' : '.'}`);
+}
+
+/* Both RPCs return the whole row, so the table can be corrected from the
+ * server's answer rather than from what this page assumed it would become. */
+function applyAccessResult(userId, r, notice) {
+  const st = { ...(UI.access || {}), busy: null, error: null, notice: null };
+  if (!r.ok) {
+    const msg = (r.error && (r.error.message || r.error.hint)) || '';
+    st.error = /not permitted/.test(msg)
+      ? 'Refused by the database. This needs a second factor verified in this '
+        + 'session — sign out and back in.'
+      : (msg || `The change was refused${r.status ? ` (HTTP ${r.status})` : ''}.`);
+  } else {
+    st.notice = notice;
+    const rows = (UI.data || {}).requests || [];
+    const i = rows.findIndex(x => x.user_id === userId);
+    if (i >= 0 && r.data && typeof r.data === 'object') rows[i] = r.data;
+  }
+  UI.access = st;
+  render();
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'afilter-q') return;
+  UI.access = { ...(UI.access || {}), filter: e.target.value };
+  render();
+  const el = $('afilter-q');
+  if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+});
+
 /* Filtering is local and immediate — no request per keystroke against an
  * endpoint that holds the service key. */
 document.addEventListener('input', (e) => {
@@ -1143,6 +1424,32 @@ document.addEventListener('click', (e) => {
     UI.support = { ...(UI.support || {}), filter: '' };
     return render();
   }
+  if (b.dataset.act === 'clearafilter') {
+    UI.access = { ...(UI.access || {}), filter: '' };
+    return render();
+  }
+  /* Letting somebody in, and taking it back. Confirmed first, all three of
+   * them, for the reason the mail buttons are: this table is sorted and
+   * filtered under the pointer, and a decision that fires on one click is a
+   * decision that eventually lands on the row that moved. Approve is
+   * confirmed as well as the two refusals -- an accidental approval is not
+   * the harmless direction, it is a stranger in the beta. */
+  if (b.dataset.decide) {
+    const id = b.dataset.user;
+    const row = ((UI.data || {}).requests || []).find(r => r.user_id === id);
+    const who = (row && row.email) || 'this account';
+    const verb = { approved: 'Let', denied: 'Refuse', revoked: 'Withdraw access for' };
+    const bal = row ? (+row.balance_cents || 0) : 0;
+    /* The balance is put in front of the owner at the moment of approving,
+     * because "approve once the balance is met" is the workflow and the
+     * number lives one column away from a button that does not read it. */
+    const owing = (b.dataset.decide === 'approved' && bal > 0)
+      ? `\n\nThey still owe ${money(bal)}.` : '';
+    if (!confirm(`${verb[b.dataset.decide] || 'Change'} ${who}`
+      + (b.dataset.decide === 'approved' ? ' into the beta?' : '?') + owing)) return;
+    return decideAccess(id, b.dataset.decide);
+  }
+  if (b.dataset.bill) return editBilling(b.dataset.bill);
   if (b.dataset.pick) return runOwnerTool('lookup', b.dataset.pick);
   if (b.dataset.range) { UI.range = +b.dataset.range; return enter(); }
   if (b.dataset.tab && b.dataset.tab !== UI.tab) {
@@ -1151,7 +1458,8 @@ document.addEventListener('click', (e) => {
   if (b.dataset.act === 'refresh') return enter();
   if (b.dataset.act === 'signout') {
     CORE.signOut();
-    UI.view = 'signin'; UI.data = null; UI.error = null; UI.support = null;
+    UI.view = 'signin'; UI.data = null; UI.error = null;
+    UI.support = null; UI.access = null;
     stopRefresh();
     return render();
   }

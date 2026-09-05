@@ -8,6 +8,12 @@ Two offline-first shooting PWAs over one shared Supabase backend.
 - **Bench** — the reloading log: brass lots by colour code, load recipes, serialised
   batches, printable QR labels.
 
+Both are **invitation-only**. Signing up files a request; nothing in either app works
+until the owner approves it from the dashboard's Access tab. The hold screen the user
+waits on is a courtesy — the refusal is restrictive row-level security on every table
+(`supabase/migrations/0021_access_requests.sql`), which a static bundle served with a
+public key cannot argue with. See **The owner dashboard** in [DEPLOY.md](DEPLOY.md).
+
 They are not two copies of one app. Zero records what happened downrange; Bench
 records what you loaded. The interesting part is the seam: a batch loaded in Bench
 becomes a selectable load in Zero, and the group it shoots flows back to that batch.
@@ -15,7 +21,7 @@ becomes a selectable load in Zero, and the group it shoots flows back to that ba
 ```
 apps/bench           the reloading PWA (vanilla, single-file build)
 apps/zero            Zero (React, bundled with esbuild)
-apps/admin           the owner dashboard: traffic, sign-ups, feature usage
+apps/admin           the owner dashboard: traffic, sign-ups, feature usage, beta access
 packages/zero-core   shared auth + offline sync, embedded byte-identically in both
 supabase/            migrations and the RLS test suites
 tools/               preflight, live verification, the zero-core embed step

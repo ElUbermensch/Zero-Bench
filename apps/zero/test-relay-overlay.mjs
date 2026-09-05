@@ -18,6 +18,7 @@
  * the relay API to make something appear.
  */
 import { chromium } from 'playwright';
+import { applyBetaFixture } from '../../tools/test-beta-session.mjs';
 import fsx from 'node:fs';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -48,27 +49,21 @@ const errs = [];
 
 async function device(label, { seed, email } = {}) {
   const ctx = await browser.newContext({ viewport: { width: 430, height: 900 } });
+  /* An approved account per device, seeded before the first paint. Since
+     migration 0021 there is no home screen to type credentials into until one
+     exists, and a relay suite needs its devices to be different people -- so
+     the fixture is applied per context rather than once to the browser. The
+     longer version of this reasoning is in test-relay.mjs. */
+  await applyBetaFixture(ctx, mock.issueSession(email || `${label}-overlay@example.com`));
   const page = await ctx.newPage();
   page.on('pageerror', e => errs.push(`${label}: ${e.message}`));
   await page.goto(BASE);
+  // No localStorage.clear(): it would take the session with it.
   await page.evaluate(s => {
-    localStorage.clear();
     if (s) localStorage.setItem('sessions_v1', JSON.stringify(s));
   }, seed || null);
   await page.reload();
   await page.waitForTimeout(700);
-  if (email) {
-    await page.fill('input[placeholder="email"]', email);
-    await page.fill('input[placeholder="password"]', 'pw12345');
-    await page.click('button:has-text("create account")');
-    await page.waitForTimeout(700);
-    /* Signing in from the home screen lands on More -> Cloud sync: signed in,
-     * that card is a status readout and belongs in the menu, and vanishing
-     * with no acknowledgement would read as a failure. Back to the sessions,
-     * which is what this suite is about. */
-    await page.click('.tabbar button:has-text("Sessions")');
-    await page.waitForTimeout(300);
-  }
   return { ctx, page, label };
 }
 

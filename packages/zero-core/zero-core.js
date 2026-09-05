@@ -32,6 +32,11 @@ const ZeroCore = (() => {
     AUTH_SIGNED_OUT:     'auth:signed-out',     // { reason: 'user'|'refresh-failed'|'revoked' }
     AUTH_TOKEN_REFRESHED:'auth:token-refreshed',// { expiresAt }
     AUTH_ERROR:          'auth:error',          // { phase, error }
+    /* The owner's decision on this account changed -- { status, record }.
+     * Fires only on a CHANGE, so an app can keep the hold screen polling
+     * without re-rendering it every few seconds, and so "you are in" arrives
+     * as an event rather than as something the user has to go looking for. */
+    ACCESS_CHANGED:      'access:changed',      // { status, record }
     NET_ONLINE:          'net:online',          // {}
     NET_OFFLINE:         'net:offline',         // {}
     SYNC_START:          'sync:start',          // { trigger }
@@ -210,6 +215,12 @@ const ZeroCore = (() => {
     const ns = 'zerocore.' + (cfg.appId || 'unknown');
     const K = {
       session: 'zerocore.session',     // shared across both apps, deliberately
+      /* Unnamespaced for the same reason the session is: the beta decision is
+       * about the ACCOUNT, not about which of the two apps is asking. A user
+       * approved in Zero is approved in Bench, and holding two copies of that
+       * would let them disagree -- which is to say, would let one app open
+       * while the other holds. */
+      access:  'zerocore.access',
       cursors: ns + '.cursors',
       outbox:  ns + '.outbox',
       rejected:ns + '.rejected',
@@ -484,6 +495,17 @@ const ZeroCore = (() => {
        * SOMEONE ELSE that strands them -- that is the point at which the
        * server will refuse those rows on every sync from then on. */
       if (nextUid && nextUid !== prevUid) dropOrphanTelemetry(nextUid);
+      /* The cached beta status belongs to the identity that fetched it.
+       *
+       * It is held so the hold screen does not flash the app for a moment on
+       * every launch while the round trip runs -- which, for a user who has
+       * been refused, would be a flash of the thing they were refused. That
+       * only works while the cache is about the CURRENT account: leaving one
+       * user's `approved` in place across a sign-out would open the app for
+       * the next person to sign in on the same phone, for as long as it took
+       * one request to come back and correct it. Cleared on any change of
+       * identity, sign-out included. */
+      if (nextUid !== prevUid) clearAccessCache();
       if (s) emit(EVENTS.AUTH_SIGNED_IN, { user: s.user });
       else emit(EVENTS.AUTH_SIGNED_OUT, { reason: reason || 'user' });
     }
@@ -499,11 +521,30 @@ const ZeroCore = (() => {
       };
     }
 
-    async function signUp(email, password) {
+    /**
+     * Create an account.
+     *
+     * `meta` carries the sign-up form's answers -- how they heard about the
+     * app -- into GoTrue's `data` field, which lands in raw_user_meta_data,
+     * which is where migration 0021's trigger reads them to file the access
+     * request. It is sent HERE rather than POSTed afterwards because with
+     * email confirmation switched on there is no afterwards: sign-up returns a
+     * user and no tokens, so there is no authenticated moment in which a
+     * follow-up call could be made. The answer would be lost for exactly the
+     * users the owner most needs to know about -- the new ones.
+     *
+     * Nothing else about the call changed. In particular the client does not
+     * and cannot file the request itself; the trigger does, so an account
+     * created by any other means still arrives in the queue.
+     */
+    async function signUp(email, password, meta) {
+      const data = {};
+      if (meta && meta.heardFrom) data.heard_from = String(meta.heardFrom).slice(0, 60);
+      if (meta && meta.heardDetail) data.heard_detail = String(meta.heardDetail).slice(0, 280);
       const t = await authRaw('signUp', '/auth/v1/signup', {
         method: 'POST',
         headers: { apikey: cfg.anonKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, data }),
       });
       if (t.failure) return t.failure;
       const res = t.res;
@@ -572,6 +613,138 @@ const ZeroCore = (() => {
       trackOpen();
       track('sign_in_anonymous', {});
       return { ok: true, session };
+    }
+
+    /* --------------------------------------------------------- beta access */
+    /*
+     * Whether the owner has let this account in yet.
+     *
+     * The whole mechanism is in migration 0021 and the enforcement is there,
+     * in restrictive policies the browser cannot reach. Everything in this
+     * section is the COURTESY half: it exists so the apps can show a hold
+     * screen that says "waiting on approval" instead of a working interface
+     * that refuses every save with a policy error. Nothing here is a security
+     * boundary and none of it should ever be treated as one -- a client that
+     * lied about the answer would find every table shut regardless.
+     *
+     * Four states come back, and the apps must handle all four:
+     *
+     *   approved  in. Everything behaves as it did before the gate existed.
+     *   pending   waiting on the owner. The hold screen, and a poll.
+     *   denied    refused. The hold screen, without the poll's optimism.
+     *   revoked   was in, is not any more. Distinct from denied so support can
+     *             tell "it never worked" from "it stopped this morning".
+     *
+     * and a fifth the server invents for a row it cannot find:
+     *
+     *   unknown   treated exactly as `pending`. It covers an account created
+     *             while the migration was mid-deploy. Anything other than
+     *             fail-closed here would make a missing row the way in.
+     */
+    function accessRecordFor(uid) {
+      const rec = store.get(K.access);
+      // Belongs to somebody else, or to nobody: not an answer about this user.
+      if (!rec || !uid || rec.userId !== uid) return null;
+      return rec;
+    }
+
+    function clearAccessCache() { store.set(K.access, null); }
+
+    /** The last known answer for the signed-in account, or null if none has
+     *  come back yet on this device. Synchronous, so a first paint has
+     *  something to render; `refreshAccess()` is what makes it true. */
+    function accessStatus() {
+      const uid = session && session.user && session.user.id;
+      const rec = accessRecordFor(uid);
+      return rec ? rec.status : null;
+    }
+
+    /** The whole cached record -- status, when it was asked for, when it was
+     *  decided, and the marketing answer on file -- for the hold screen. */
+    function accessRecord() {
+      const uid = session && session.user && session.user.id;
+      const rec = accessRecordFor(uid);
+      return rec ? Object.assign({}, rec) : null;
+    }
+
+    /**
+     * True only for a positive `approved`.
+     *
+     * Written as an allow-list rather than `status !== 'denied'` on purpose.
+     * The negative form opens the app for every value the client has not heard
+     * of -- a status added by a later migration, a null from a failed request,
+     * the string 'unknown' -- and each of those is a case where the honest
+     * answer is "we do not know yet", which is not a yes.
+     *
+     * Anonymous pair-fire guests are their own answer: they have no account to
+     * approve, they are not what the gate is about, and 0021 lets them relay
+     * and nothing else. Zero asks this before showing its own interface, and a
+     * guest is never shown it.
+     */
+    function hasAccess() {
+      return accessStatus() === 'approved';
+    }
+
+    /**
+     * Ask the server. Returns { ok, status, record } and caches the answer.
+     *
+     * A failure leaves the previous cache ALONE rather than clearing it. The
+     * common failure is no signal, and a shooter at a range with an approved
+     * account should not be locked out of their own logbook because a poll
+     * could not complete -- the device data is local, and the server refuses
+     * anything that matters on its own account. The reverse case, a cached
+     * `approved` that has since been revoked, is closed by the server: their
+     * sync stops working the moment the revocation lands, whatever this says.
+     */
+    async function refreshAccess() {
+      const uid = session && session.user && session.user.id;
+      if (!uid) return { ok: false, status: null, error: { message: 'not signed in' } };
+      /* A RESULT, not a rejection, for the reason authRaw() gives one aisle
+       * over: a transport failure never produced a response, so it threw
+       * straight out of the promise. Both apps call this from an effect and
+       * from a timer, neither of which has anywhere to put a throw -- so a
+       * phone with no signal produced an unhandled rejection rather than
+       * "could not check". */
+      let r;
+      try {
+        r = await rpc('my_access_status', {});
+      } catch (e) {
+        return { ok: false, status: accessStatus(),
+                 error: { message: 'could not reach the server', transport: true } };
+      }
+      if (!r.ok) return { ok: false, status: accessStatus(), error: r.error };
+      const d = r.data || {};
+      const rec = {
+        userId: uid,
+        status: d.status || 'unknown',
+        requestedAt: d.requested_at || null,
+        decidedAt: d.decided_at || null,
+        heardFrom: d.heard_from || null,
+        heardDetail: d.heard_detail || null,
+        at: nowMs(),
+      };
+      const before = accessStatus();
+      store.set(K.access, rec);
+      if (before !== rec.status) emit(EVENTS.ACCESS_CHANGED, { status: rec.status, record: rec });
+      return { ok: true, status: rec.status, record: rec };
+    }
+
+    /**
+     * Answer the marketing question after the fact.
+     *
+     * Normally this never runs: the answer travels in the sign-up metadata and
+     * the trigger files it. It is here for the account that arrived without
+     * one, so the hold screen can ask rather than leaving the owner to decide
+     * on a blank row. The server refuses it once a decision has been made.
+     */
+    async function submitAccessDetails(heardFrom, heardDetail) {
+      const r = await rpc('submit_access_details', {
+        p_heard_from: heardFrom ? String(heardFrom).slice(0, 60) : null,
+        p_heard_detail: heardDetail ? String(heardDetail).slice(0, 280) : null,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      await refreshAccess();
+      return { ok: true, status: accessStatus() };
     }
 
     /** The access token's payload, or null if it is not a readable JWT.
@@ -2195,6 +2368,7 @@ const ZeroCore = (() => {
       backupPut, backupGet, backupList, BACKUP_MAX_BYTES,
       adoptSessionFromUrl,
       signInAnonymously, isAnonymous, ensureIdentity,
+      accessStatus, accessRecord, hasAccess, refreshAccess, submitAccessDetails,
       mfaEnroll, mfaChallenge, mfaVerify, mfaUnenroll, mfaFactors, aal,
       claimHandle, publishEntry, retractEntry, leaderboard,
       createRelay, joinRelay, stopRelay, endRelay, leaveRelay, pollRelayOnce,

@@ -413,6 +413,25 @@ input[type=range]{min-height:0;padding:0;background:none;border:0}
 .btn.sm{padding:7px 11px;min-height:36px;font-size:13px}
 .btnrow{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}
 
+/* The beta gate. A card centred in an otherwise empty page -- there is no tab
+ * bar under it and nothing else on it, which is the point: a gate with the
+ * navigation still showing is a gate somebody taps past. */
+.gate{max-width:400px;margin:24px auto}
+.gate h2{margin-bottom:6px}
+.gate label{display:block;font-size:12.5px;color:var(--ink2);
+  margin:11px 0 4px}
+.gate .muted{color:var(--ink3)}
+.gate hr{margin:16px 0 4px}
+.gate .btn.wide{margin-top:14px}
+.gate-modes{display:flex;gap:8px;margin:12px 0 14px}
+.gate-modes .btn{flex:1}
+/* The selected half of the pair. Filled rather than merely bordered, because
+ * "sign in" and "request access" ask for different fields and the user has to
+ * be able to see which question they are answering. */
+.gate-modes .btn.on{background:var(--brass);border-color:var(--brass);color:var(--on-brass)}
+.gate-actions{display:flex;gap:9px;margin-top:16px}
+.gate-actions .btn{flex:1}
+
 .serialbox{display:flex;gap:9px}
 .serialbox input{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:19px;
   letter-spacing:.10em;text-transform:uppercase;text-align:center}

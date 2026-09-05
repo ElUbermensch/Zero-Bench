@@ -536,7 +536,23 @@ function accessTab() {
               ${r.status !== 'approved'
                 ? `<button data-decide="approved" data-user="${esc(r.user_id)}"
                      ${busy ? 'disabled' : ''}>Approve</button>` : ''}
-              ${r.status === 'approved'
+              ${/* Revoke is offered on EVERY row that is not already revoked,
+                    not only on approved ones.
+
+                    Scoping it to `approved` looked tidy and quietly made the
+                    button a function of a status the owner may not trust. The
+                    case it fails is the one it exists for: an account that
+                    ought to be shut off right now, whose row happens to read
+                    `pending` because nobody has got to it, or `denied` from a
+                    decision somebody wants to make unambiguous. Needing to
+                    approve somebody first in order to revoke them is not a
+                    kill switch.
+
+                    0022 is what makes the button mean the same thing on every
+                    row: an explicit refusal now outranks the admin exemption
+                    as well, so this reaches every account including another
+                    owner's. */''}
+              ${r.status !== 'revoked'
                 ? `<button data-decide="revoked" data-user="${esc(r.user_id)}"
                      ${busy ? 'disabled' : ''}>Revoke</button>` : ''}
               ${r.status === 'pending'

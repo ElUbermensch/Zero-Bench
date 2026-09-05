@@ -139,6 +139,7 @@ paste each one whole rather than in pieces.
 | `0016_analytics_events.sql` | `analytics_event` and the four rollups the owner dashboard reads |
 | `0017_admin_mfa.sql` | requires a verified second factor (`aal2`) to read the analytics |
 | `0021_access_requests.sql` | the beta gate: `access_request`, the trigger that files one per sign-up, and the restrictive policies that refuse every table until you approve it |
+| `0022_revoke_is_absolute.sql` | makes a revoke outrank the admin exemption, so the switch reaches every account — including another admin |
 
 If you have the Supabase CLI instead:
 
@@ -337,9 +338,24 @@ What a new user does:
    yes. They never have to be told, and never have to reinstall anything.
 
 What you do: open `/admin/`, go to the **Access** tab, and press **Approve**.
-Waiting requests sort to the top. **Deny** refuses; **Revoke** takes access back from
-somebody who had it, and takes effect on their next request — there is no session to
-wait out.
+Waiting requests sort to the top. **Deny** refuses a request that is still waiting.
+
+**Revoke shuts an account off, and it reaches every account.** It is offered on every
+row that is not already revoked — you do not have to approve somebody before you can
+revoke them — and it takes effect on their **next request**: row-level security is
+re-evaluated per query, so there is no session to wait out and nothing to expire.
+Their data is not deleted, it goes dark; approving again puts it back exactly as they
+left it.
+
+That includes **another admin**. `0021` let an admin through on `is_admin()` alone, so
+revoking one changed the row and nothing else — the one account most worth being able
+to switch off was the one the switch could not reach. `0022` puts an explicit refusal
+in front of the exemption: denied or revoked wins, whoever you are.
+
+It does **not** touch the dashboard, and that is what makes it safe to use. The Access
+tab is gated on `is_admin_mfa()`, a separate predicate. An admin you revoke loses the
+two apps and keeps the dashboard; if you revoke *yourself* by accident, one button on
+the same screen puts it back, with no SQL.
 
 **Billing is on the same row, ready for when the apps are paid for.** Each request
 carries an amount due and an amount paid, both in cents, and the difference is the

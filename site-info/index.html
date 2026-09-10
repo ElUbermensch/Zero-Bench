@@ -390,6 +390,62 @@ footer { padding: 56px 0 72px; color: var(--faint); font-size: 14px; }
 .cardlink { color: var(--acc); text-decoration: none; white-space: nowrap; }
 .cardlink:hover { text-decoration: underline; }
 
+/* ── Pricing ───────────────────────────────────────────────────────────── */
+.plans { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(14px, 1.6vw, 20px); margin-top: clamp(28px, 3.4vw, 44px); }
+@media (max-width: 620px) { .plans { grid-template-columns: 1fr; } }
+.plan {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+  padding: clamp(20px, 2.2vw, 28px);
+}
+/* The year is the one being recommended, so it is the one wearing the accent.
+   A border rather than a badge: a "MOST POPULAR" ribbon is a claim about other
+   people, and this page does not make those. */
+.plan.best { border-color: var(--acc); }
+.price {
+  font-family: 'Instrument Serif', Georgia, serif; font-size: clamp(40px, 5vw, 58px);
+  line-height: 1; letter-spacing: -.02em; color: var(--ink); margin-top: 14px;
+}
+.price .cur { font-size: .5em; vertical-align: .55em; color: var(--dim); margin-right: 2px; }
+.price .per { font-family: 'Space Mono', monospace; font-size: 12px; letter-spacing: .08em;
+              color: var(--faint); margin-left: 8px; vertical-align: .18em; }
+.plannote { color: var(--dim); font-size: 14px; margin-top: 12px; line-height: 1.55; }
+.plannote strong { color: var(--ink); font-weight: 600; }
+
+.calc {
+  margin-top: clamp(28px, 3.4vw, 44px);
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); overflow: hidden;
+}
+.calc-head { padding: 12px clamp(12px, 1.5vw, 18px); border-bottom: 1px solid var(--line); background: var(--raised); }
+.calc-body { padding: clamp(20px, 2.4vw, 28px); }
+.calc-in { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(14px, 1.8vw, 22px); }
+@media (max-width: 520px) { .calc-in { grid-template-columns: 1fr; } }
+.calc-in label {
+  display: block; font-family: 'Space Mono', monospace; font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
+}
+.calc-in input {
+  display: block; width: 100%; margin-top: 8px;
+  font-family: 'Space Mono', monospace; font-size: 19px; color: var(--ink);
+  background: var(--ground); border: 1px solid var(--line); border-radius: 3px;
+  padding: 11px 12px; outline: none; -webkit-appearance: none; appearance: none;
+}
+.calc-in input:focus { border-color: var(--acc); }
+/* Chrome draws its spinner regardless of appearance:none on the input itself,
+   and a stepper on a figure you type once is clutter that also shifts the
+   text when the pointer crosses it. */
+.calc-in input::-webkit-outer-spin-button,
+.calc-in input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.calc-in input[type=number] { -moz-appearance: textfield; }
+.calc-out {
+  margin-top: clamp(20px, 2.4vw, 28px); font-size: clamp(16px, 1.5vw, 19px);
+  line-height: 1.6; color: var(--dim);
+}
+.calc-out b { color: var(--acc); font-weight: 700; font-family: 'Space Mono', monospace;
+              font-variant-numeric: tabular-nums; }
+.calc-out .said { color: var(--ink); font-weight: 500; }
+.calc-fine { margin-top: 16px; font-size: 11px; line-height: 1.7; color: var(--faint); max-width: 68ch; }
+
 /* ── Prose ─────────────────────────────────────────────────────────────── */
 .prose p { color: var(--dim); }
 #about .prose { margin-top: 24px; }
@@ -522,6 +578,7 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
       <a href="#bench">Bench</a>
       <a href="#solver">The solver</a>
       <a href="#together">Together</a>
+      <a href="#pricing">Pricing</a>
       <a href="manual/">Manual</a>
     </nav>
     <button id="themeBtn" class="themetoggle" type="button" aria-label="Switch theme">Paper</button>
@@ -920,6 +977,75 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
   </div>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════════════════
+     Pricing, argued in the reader's own units.
+
+     The coffee comparison was the obvious move and it is the wrong one here:
+     it is the default every reader has seen a hundred times, it argues "small
+     purchase" rather than "worth it", and it is off-domain — this audience
+     does not meter its spending in lattes, it meters it in components, to the
+     tenth of a grain. So the anchor is the primer, and the arithmetic is done
+     with the reader's numbers rather than asserted with ours. The page's whole
+     claim is that it does arithmetic; the price block should be an instance of
+     that rather than an exception to it.
+     ══════════════════════════════════════════════════════════════════════ -->
+<section id="pricing">
+  <div class="wrap">
+    <div class="sec-head"><p class="eyebrow">Pricing</p></div>
+    <h2 class="display">Less than the primer.</h2>
+    <p class="sec-sub">Fifty dollars a year, against a few thousand rounds, is under two cents a shot &mdash; which for most reloaders is less than the cheapest component in the case. Work it out with your own numbers below; that is rather the point of the whole app.</p>
+
+    <div class="plans">
+      <div class="plan">
+        <span class="tag">Monthly</span>
+        <p class="price"><span class="cur">$</span>5<span class="per">/month</span></p>
+        <p class="plannote">Cancel whenever. Everything below, immediately.</p>
+      </div>
+      <div class="plan best">
+        <span class="tag">Yearly</span>
+        <p class="price"><span class="cur">$</span>50<span class="per">/year</span></p>
+        <p class="plannote"><strong>Two months free.</strong> One box of match bullets, once a season.</p>
+      </div>
+    </div>
+
+    <!-- The calculator. Two numbers in, three out, no server and no account.
+         Defaults are a plausible High Power season rather than a flattering
+         one; a reader who shoots less will see a worse number and should. -->
+    <div class="calc">
+      <div class="calc-head"><span class="eyebrow">What a year actually costs you</span></div>
+      <div class="calc-body">
+        <div class="calc-in">
+          <label for="cRounds">Rounds you fire a year
+            <input id="cRounds" type="number" inputmode="numeric" min="1" step="50" value="3000">
+          </label>
+          <label for="cCost">Your cost per round
+            <input id="cCost" type="number" inputmode="decimal" min="0" step="0.01" value="0.62">
+          </label>
+        </div>
+        <p class="calc-out" id="calcOut" aria-live="polite"></p>
+        <p class="calc-fine mono">Bench works your real cost per round out of the lots you actually loaded from &mdash; bullet, powder by the grain, primer, and brass amortised over the firings you expect to get from it. The figure above is only the arithmetic you could do yourself; the app is the part that knows the number.</p>
+      </div>
+    </div>
+
+    <div class="cards two">
+      <div class="card">
+        <span class="tag">Free, and staying that way</span>
+        <h3>The logbook</h3>
+        <p>Every shot, every score, group statistics, matches, DOPE, the trajectory solver, all forty-two target faces, position analytics, and the whole of Bench &mdash; lots, recipes, batches, brass, annealing, labels, workups. It installs to the home screen and it runs with the phone in airplane mode. No account, no signal, no charge.</p>
+      </div>
+      <div class="card">
+        <span class="tag">What the five dollars is for</span>
+        <h3>The parts that need a server</h3>
+        <p>Cloud sync between your phone and your bench, whole-device cloud backup, importing a Bench batch into Zero as a load, the leaderboard, and hosting pair fire. These are the five things that cannot work offline, because they are the five things that are not on your device alone.</p>
+      </div>
+    </div>
+
+    <div class="note-inline">
+      <p><strong>Your data leaves with you, subscription or not.</strong> Export writes a file you keep, it works offline, and it is not behind the paywall &mdash; today or on the day you stop paying. If a subscription lapses, the logbook on your phone keeps working exactly as it does now; what stops is the syncing, not the shooting. A record you cannot take with you is not a record, it is a hostage.</p>
+    </div>
+  </div>
+</section>
+
 <section id="about">
   <div class="wrap">
     <div class="sec-head"><p class="eyebrow">About</p></div>
@@ -989,5 +1115,66 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
     label();
   });
   try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', label); } catch (e) {}
+}());
+
+/* The price, in the reader's own units.
+ *
+ * Everything here is arithmetic on two numbers the reader typed, which is the
+ * only kind of pricing claim this page is entitled to make. Nothing is sent
+ * anywhere and nothing is stored; it is a calculator, not a lead form. */
+(function () {
+  var YEAR = 50;
+  var rounds = document.getElementById('cRounds');
+  var cost = document.getElementById('cCost');
+  var out = document.getElementById('calcOut');
+  if (!rounds || !cost || !out) return;
+
+  /* Grouped. A four-figure number with no separator reads as a typo in a
+   * sentence that is asking to be trusted with arithmetic. */
+  function money(n) {
+    return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function draw() {
+    var n = Math.max(0, parseFloat(rounds.value) || 0);
+    var c = Math.max(0, parseFloat(cost.value) || 0);
+
+    if (!n) {
+      out.innerHTML = 'Put a round count in and this works itself out.';
+      return;
+    }
+    var perRound = YEAR / n;                    // dollars of subscription per shot
+    var cents = perRound * 100;
+    var spend = n * c;                          // what the shooting itself costs
+    var equivalent = c > 0 ? YEAR / c : null;   // the year, priced in rounds
+    var share = spend > 0 ? (YEAR / spend) * 100 : null;
+
+    var bits = [];
+    bits.push('At <b>' + n.toLocaleString() + '</b> rounds a year, fifty dollars is <b>'
+      + (cents < 1 ? cents.toFixed(2) : cents.toFixed(1)) + '\u00A2</b> a shot');
+    if (equivalent !== null && isFinite(equivalent)) {
+      bits.push('the same as <b>' + Math.round(equivalent).toLocaleString() + '</b> rounds of what you load');
+    }
+    if (share !== null && isFinite(share)) {
+      bits.push('and <b>' + (share < 0.1 ? share.toFixed(2) : share.toFixed(1))
+        + '%</b> of the ' + money(spend) + ' you will put downrange');
+    }
+    var line = bits.join(', ') + '.';
+
+    /* The headline claim, checked rather than asserted. A primer is the
+     * cheapest thing in the case; if the subscription is not below it at this
+     * volume, the page says so instead of pretending otherwise. */
+    var PRIMER_LOW = 0.08;
+    if (cents / 100 < PRIMER_LOW) {
+      line += ' <span class="said">That is less than the primer it goes off with.</span>';
+    } else {
+      line += ' <span class="said">At that volume it is worth the yearly rate rather than the monthly one.</span>';
+    }
+    out.innerHTML = line;
+  }
+
+  rounds.addEventListener('input', draw);
+  cost.addEventListener('input', draw);
+  draw();
 }());
 </script>

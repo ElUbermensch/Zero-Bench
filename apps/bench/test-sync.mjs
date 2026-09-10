@@ -364,15 +364,39 @@ section('a pulled session Bench cannot place holds the cursor');
 }
 
 section('cloud backup');
+/* It lives with sync now. Both are the same server and the same sign-in, and
+ * on two screens with different names a user who found one had no reason to
+ * think the other existed. */
+const openCloud = async () => {
+  await page.click('[data-act="tab"][data-arg="more"]');
+  await page.waitForTimeout(200);
+  await page.click('[data-act="nav"][data-arg="sync"]');
+  await page.waitForTimeout(500);
+};
 const openData = async () => {
   await page.click('[data-act="tab"][data-arg="more"]');
   await page.waitForTimeout(200);
   await page.click('[data-act="nav"][data-arg="data"]');
   await page.waitForTimeout(500);
 };
+await openCloud();
+{
+  const v = await page.textContent('#view');
+  ok(v.includes('Cloud backup'), 'the backup card is on the cloud sync screen');
+  ok(/Sync now/.test(v), '...under the sync control, on the same account');
+}
 await openData();
-ok((await page.textContent('#view')).includes('Cloud backup'),
-   'the backup card is on the data screen, beside the file export');
+{
+  const v = await page.textContent('#view');
+  /* Asserted on the CARD, not on the words: the screen still says the phrase,
+     in the line that says where the card went. */
+  ok(!(await page.$('#view button[data-act="cbUp"]')),
+     'the data screen no longer carries a second, differently-named cloud card');
+  ok(/Backup · file/.test(v), '...only the file backup, which needs neither account nor signal');
+  ok(/Cloud backup moved in with sync/.test(v),
+     '...and it says where the cloud half went rather than losing it silently');
+}
+await openCloud();
 
 await page.click('button[data-act="cbUp"]');
 await page.waitForTimeout(900);
@@ -400,7 +424,7 @@ await page.evaluate(() => {
     lot: 'L-1', qty: 1000, unit: 'ea', cost: 99 }];
   save();
 });
-await openData();
+await openCloud();
 await page.click('button[data-act="cbMerge"]');
 await page.waitForTimeout(900);
 
@@ -457,7 +481,7 @@ section('a session that came down the sync, restored from another device');
 
   // The other device backs up, holding the row under ITS local id.
   await seed('seA');
-  await openData();
+  await openCloud();
   await page.click('button[data-act="cbUp"]');
   await page.waitForTimeout(900);
 
@@ -471,7 +495,7 @@ section('a session that came down the sync, restored from another device');
   await page.waitForTimeout(700);
   await seed('seB');
 
-  await openData();
+  await openCloud();
   await page.click('button[data-act="cbMerge"]');
   await page.waitForTimeout(900);
 

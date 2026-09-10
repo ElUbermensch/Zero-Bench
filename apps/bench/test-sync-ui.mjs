@@ -281,6 +281,70 @@ section('approved');
   ok(!/act/.test(c.cls), 'and stopped advertising sign-in');
 }
 
+/* ================================ the chip's two gestures, and what is behind it */
+/* A tap has never fired a write and still must not: the chip sits at the top
+ * right of every screen, where a thumb rests while scrolling. A HELD press
+ * does fire one, from wherever the user happens to be, which is the whole
+ * reason it is a hold. */
+section('tap navigates, hold syncs');
+{
+  ok(/Cloud backup/.test(await page.textContent('#view')),
+     'cloud backup is on the sync screen now, with the sync it shares an account with');
+
+  // Somewhere else entirely, with something local to send.
+  await page.click('[data-act="tab"][data-arg="brass"]');
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    DB.firearms.push({ id: 'fa-hold', name: 'Held rifle', cartridge: DB.cartridges[0]?.id || null });
+    save();
+  });
+  /* Present on every screen, which is the claim the chip exists to make. */
+  for (const t of ['lookup', 'brass', 'ammo', 'more']) {
+    await page.click(`[data-act="tab"][data-arg="${t}"]`);
+    await page.waitForTimeout(150);
+    ok(await page.locator('#syncchip').isVisible(), `the chip is on the ${t} tab`);
+  }
+  await page.click('[data-act="tab"][data-arg="brass"]');
+  await page.waitForTimeout(150);
+
+  const beforeTap = hits.push.length;
+  await page.click('#syncchip');
+  await page.waitForTimeout(400);
+  ok(/Sync now/.test(await page.textContent('#view')), 'a tap lands on the cloud screen');
+  ok(hits.push.length === beforeTap, '...and pushes nothing on the way');
+
+  await page.click('[data-act="tab"][data-arg="brass"]');
+  await page.waitForTimeout(250);
+  const beforeHold = hits.push.length;
+  const box = await page.locator('#syncchip').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(750);           // past the 550ms threshold
+  await page.mouse.up();
+  await page.waitForTimeout(1200);
+  ok(hits.push.length > beforeHold, 'a held press fires the sync');
+  ok(!/Sync now/.test(await page.textContent('#view')),
+     '...without also navigating, which is what the tap does');
+  ok(await page.locator('.toast').isVisible(),
+     '...and reports itself, because this screen has nowhere else to say so');
+
+  /* A press that becomes a scroll is a scroll. */
+  await page.waitForTimeout(2900);          // let the toast clear
+  await page.evaluate(() => {
+    DB.firearms.push({ id: 'fa-scroll', name: 'Scrolled rifle', cartridge: DB.cartridges[0]?.id || null });
+    save();
+  });
+  const beforeScroll = hits.push.length;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 40, { steps: 4 });
+  await page.waitForTimeout(750);
+  await page.mouse.up();
+  await page.waitForTimeout(600);
+  ok(hits.push.length === beforeScroll,
+     'a press that moves more than 10px is a scroll, not a hold');
+}
+
 /* ============================================== relaunch picks up by itself */
 section('relaunch');
 {

@@ -117,10 +117,12 @@ const benchSync = async () => {
   await bench.click('button[data-act="sySync"]');
   await bench.waitForTimeout(900);
 };
-/* Zero's sync panel lives under More -> Cloud sync now: signed in it is a
- * status readout, and a status readout has no business sitting under the
- * session list. Navigating each time is what a user does, and it also proves
- * the destination survives a reload. */
+/* Zero's sync panel lives under More -> Cloud sync & backup now: signed in it
+ * is a status readout, and a status readout has no business sitting under the
+ * session list. The cloud BACKUP card is on that same screen -- one server,
+ * one sign-in, one destination -- which is why the backup assertions below
+ * navigate here rather than to the file screen. Navigating each time is what a
+ * user does, and it also proves the destination survives a reload. */
 const zeroMore = async (title) => {
   await zero.click('.tabbar button:has-text("More")');
   await zero.waitForTimeout(250);
@@ -459,7 +461,7 @@ section('rounds fired in Zero come back to the bench');
  * account looks like. */
 section('a second device, same account');
 {
-  await zeroMore('Backup & data');
+  await zeroMore('Cloud sync');
   await zero.click('button:has-text("⤒ Back up now")');
   await zero.waitForTimeout(700);
   const bodyAfterUp = await zero.textContent('body');
@@ -497,7 +499,7 @@ section('a second device, same account');
      'the second device is signed in to the same account');
   ok((await zeroFirearms()).length === 0, '...and starts with none of the data');
 
-  await zeroMore('Backup & data');
+  await zeroMore('Cloud sync');
   await zero.click('button:has-text("⤓ Restore")');
   await zero.waitForTimeout(900);
   const after = await zero.evaluate(() => ({
@@ -542,7 +544,7 @@ section('a second device, same account');
   }, { rid });
   await zero.reload();
   await zero.waitForTimeout(900);
-  await zeroMore('Backup & data');
+  await zeroMore('Cloud sync');
   await zero.click('button:has-text("⤓ Restore")');
   await zero.waitForTimeout(900);
   const rifles = await zero.evaluate(() => JSON.parse(localStorage.getItem('rifles_v1') || '[]'));

@@ -2220,8 +2220,75 @@ const S = `
 body{background:var(--bg);color:var(--ink);font-family:var(--fh);font-size:14px;-webkit-font-smoothing:antialiased}
 .app{max-width:430px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column;padding-bottom:var(--safe-b)}
 .hdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:calc(11px + var(--safe-t)) calc(15px + var(--safe-r)) 11px calc(15px + var(--safe-l));display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
-.htitle{font-family:var(--fh);font-size:17px;font-weight:700;letter-spacing:.01em}
-.hsub{font-family:var(--fm);font-size:9px;color:var(--dim);letter-spacing:.12em;margin-top:1px}
+.htitle{font-family:var(--fh);font-size:17px;font-weight:700;letter-spacing:.01em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hsub{font-family:var(--fm);font-size:9px;color:var(--dim);letter-spacing:.12em;margin-top:1px;
+  /* The header now carries the sync chip on every screen, and on the sessions
+     tab three buttons besides. Something has to give when the row runs out of
+     width, and it should be the strapline rather than a control: min-width:0
+     on the brand makes it shrinkable at all (a flex item's default is
+     min-content, which is what pushed the row wider than the phone), and the
+     ellipsis makes shrinking look deliberate. */
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The wordmark is a control. Tapping it goes where the chip goes -- one more
+   target for the same destination, and the one people reach for by habit. */
+.hbrand{background:none;border:none;padding:0;margin:0;font:inherit;color:inherit;
+  text-align:left;cursor:pointer;min-width:0;overflow:hidden;
+  -webkit-tap-highlight-color:transparent}
+/* The header's own action buttons, which are not the app's .badd.
+   Sessions carries three of them plus the chip on a 320px phone, and .badd's
+   14px side padding at 13px is sized for a card, not for a row that also has
+   to hold a wordmark. Without this the brand shrinks to nothing and "Zero"
+   slides UNDER the buttons -- the clip above stops the sliding, this is what
+   stops the shrinking. */
+.badd.hact{padding:6px 9px;font-size:12px}
+.hactions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+/* The header cloud chip. Same three states as Bench's, same colours by
+   meaning: accent = sign in (an action not yet taken), gold = records waiting,
+   dim = everything sent.
+
+   A tap opens the cloud screen; a press HELD fires the sync. The hold styling
+   is not decoration -- a gesture with no feedback reads as a dead control, and
+   the user lets go at 300ms and concludes it does not work. */
+.syncchip{flex:0 0 auto;background:none;border:1px solid var(--bdr);border-radius:999px;
+  color:var(--dim);font-family:var(--fm);font-size:11px;line-height:1;padding:7px 10px;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;
+  white-space:nowrap;min-height:38px;min-width:44px;transition:box-shadow .12s,border-color .12s;
+  /* A long press is a gesture this control owns. Without these iOS raises the
+     selection callout and Android the context menu partway through the hold,
+     which cancels the pointer stream and the sync never runs. */
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation;
+  -webkit-tap-highlight-color:transparent}
+.syncchip.act{border-color:var(--acc);color:var(--acc)}
+.syncchip.wait{border-color:var(--gold);color:var(--gold)}
+.syncchip.busy{opacity:.55}
+.syncchip.held{border-color:var(--acc);color:var(--acc);box-shadow:0 0 0 3px var(--tint-acc)}
+/* An iPhone SE 1 is 320 CSS px, and on the sessions tab this row carries a
+   wordmark, three actions and the chip. Measured there, the wordmark overflows
+   its box by 1px -- and one pixel is not a hairline, because text-overflow is
+   quantised: to lose it the browser drops two glyphs and spends eight on the
+   ellipsis, so the header reads "Ze...". Ten pixels are available without
+   touching a control: two off each of the three gaps, and four off the chip's
+   minimum width, which is a floor for the thumb rather than a design width
+   (40 is still well over the suite's 36). At 360 there are already 39px of
+   slack, so nothing above 340 changes.
+
+   This has to sit AFTER the .syncchip rule, not beside .hactions: a media
+   query carries no extra specificity, so from up there the plain .syncchip
+   below it won on source order and the chip stayed 44 wide. */
+@media (max-width:340px){
+  .hactions{gap:4px}
+  .syncchip{min-width:40px;padding:7px 8px}
+}
+}
+/* Where a sync fired from the header reports itself. The panel has its own
+   message line; a sync started from a screen that is not the panel had
+   nowhere at all to say "17 rows pulled" or, more to the point, "failed". */
+.toast{position:fixed;left:50%;bottom:calc(80px + var(--safe-b));transform:translateX(-50%);
+  width:max-content;max-width:min(400px,calc(100vw - 26px));background:var(--surf2);
+  border:1px solid var(--bdr);border-radius:8px;padding:9px 13px;font-family:var(--fm);
+  font-size:10px;line-height:1.5;color:var(--ink);z-index:200;box-shadow:0 6px 20px #00000033}
+.toast.err{border-color:var(--red);color:var(--red)}
 .badd{background:var(--acc);color:var(--on-acc);border:none;border-radius:5px;padding:6px 14px;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer}
 .bback{background:none;border:none;color:var(--acc);font-family:var(--fh);font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:3px;letter-spacing:.01em}
 /* Every screen starts the same distance below the header. It used to be
@@ -6199,35 +6266,21 @@ function RelayCard({ core, live, hostName, onHostName, onGoLive, onJoinLive, onE
   );
 }
 
-function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn, onSessionsUpdated, onAmmoUpdated,
-                    firearms, onFirearmsUpdated, onGoToAmmo }) {
-  const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
-  const [handle, setHandle] = useState('');
-  const [handleSaved, setHandleSaved] = useState(false);
-  const [url, setUrl] = useState(cfg?.url || '');
-  const [key, setKey] = useState(cfg?.anonKey || '');
-  const [email, setEmail] = useState('');
-  const [pw, setPw] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState(null);       // {kind:'ok'|'err', text}
-  const [, bump] = useState(0);               // re-render on core events
-
-  useEffect(() => {
-    if (!core) return undefined;
-    const offs = [core.EVENTS.AUTH_SIGNED_IN, core.EVENTS.AUTH_SIGNED_OUT,
-                  core.EVENTS.OUTBOX_CHANGED, core.EVENTS.SYNC_DONE, core.EVENTS.SYNC_ERROR]
-      .map(e => core.on(e, () => bump(n => n + 1)));
-    return () => offs.forEach(off => off());
-  }, [core]);
-
-  const linkedLoads = ammo.filter(a => a.batchId).length;
-  const lbl = { fontFamily:'var(--fm)', fontSize:9, color:'var(--dim)',
-                letterSpacing:'.1em', textTransform:'uppercase', marginBottom:8 };
-  const note = { fontFamily:'var(--fm)', fontSize:8, color:'var(--dim)', lineHeight:1.5, marginTop:8 };
-  const inp = { width:'100%', background:'var(--surf2)', border:'1px solid var(--bdr)',
-                borderRadius:5, padding:'8px 10px', color:'var(--ink)',
-                fontFamily:'var(--fm)', fontSize:11, marginBottom:7 };
-
+/* ── One sync, one implementation ──────────────────────────────────────────
+ *
+ * This was a closure inside SyncPanel, which meant the only way to fire a sync
+ * was to be looking at the panel. The header chip fires the same sync from any
+ * screen, and a second copy of a routine that mints remote ids and persists
+ * them BEFORE the network runs is the kind of duplication that ends with one
+ * copy fixed and the other quietly duplicating every row on retry.
+ *
+ * It RETURNS its message rather than rendering one, so the caller decides
+ * whether the result lands in the panel's message line or in a toast. Busy
+ * state belongs to the caller for the same reason: two callers, one sync in
+ * flight, and both have to be able to see that it is running.
+ */
+async function runZeroSync({ core, sessions, ammo, getTarget, firearms,
+                             onSessionsUpdated, onAmmoUpdated, onFirearmsUpdated }) {
   /* A sync is the natural moment to re-read Bench: it is when the user
    * already expects the two apps to agree. Doing it here rather than on a
    * timer means a batch quarantined this morning is blocked before the first
@@ -6240,8 +6293,7 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
   }
 
   async function doSync() {
-    if (!core || !core.isSignedIn()) return;
-    setBusy(true); setMsg(null);
+    if (!core || !core.isSignedIn()) return { ok: false, text: 'Not signed in.' };
     try {
       /* Firearms first, and not for queue order — zero-core's table order
          already guarantees a firearm reaches the server before a session that
@@ -6289,11 +6341,51 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
       const notSent = guns.skipped
         ? ` ${guns.skipped} firearm${guns.skipped===1?'':'s'} not sent — no chambering recorded.`
         : '';
-      setMsg(r.ok
-        ? { kind:'ok', text:`Synced — ${out.queued} linked session${out.queued===1?'':'s'} and ${guns.queued} firearm${guns.queued===1?'':'s'} pushed, ${r.stats.pulled} row${r.stats.pulled===1?'':'s'} pulled.${fromBench}${notSent}` }
-        : { kind:'err', text:'Sync failed: ' + r.reason });
-    } catch (e) { setMsg({ kind:'err', text:'Sync failed: ' + (e?.message || e) }); }
-    setBusy(false);
+      return r.ok
+        ? { ok:true,  text:`Synced — ${out.queued} linked session${out.queued===1?'':'s'} and ${guns.queued} firearm${guns.queued===1?'':'s'} pushed, ${r.stats.pulled} row${r.stats.pulled===1?'':'s'} pulled.${fromBench}${notSent}` }
+        : { ok:false, text:'Sync failed: ' + r.reason };
+    } catch (e) { return { ok:false, text:'Sync failed: ' + (e?.message || e) }; }
+  }
+  return doSync();
+}
+
+function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn, onSessionsUpdated, onAmmoUpdated,
+                    firearms, onFirearmsUpdated, onGoToAmmo, onSync, syncBusy }) {
+  const [edit, setEdit] = useState(!cfg && !HAS_SHARED);
+  const [handle, setHandle] = useState('');
+  const [handleSaved, setHandleSaved] = useState(false);
+  const [url, setUrl] = useState(cfg?.url || '');
+  const [key, setKey] = useState(cfg?.anonKey || '');
+  const [email, setEmail] = useState('');
+  const [pw, setPw] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);       // {kind:'ok'|'err', text}
+  const [, bump] = useState(0);               // re-render on core events
+
+  useEffect(() => {
+    if (!core) return undefined;
+    const offs = [core.EVENTS.AUTH_SIGNED_IN, core.EVENTS.AUTH_SIGNED_OUT,
+                  core.EVENTS.OUTBOX_CHANGED, core.EVENTS.SYNC_DONE, core.EVENTS.SYNC_ERROR]
+      .map(e => core.on(e, () => bump(n => n + 1)));
+    return () => offs.forEach(off => off());
+  }, [core]);
+
+  const linkedLoads = ammo.filter(a => a.batchId).length;
+  const lbl = { fontFamily:'var(--fm)', fontSize:9, color:'var(--dim)',
+                letterSpacing:'.1em', textTransform:'uppercase', marginBottom:8 };
+  const note = { fontFamily:'var(--fm)', fontSize:8, color:'var(--dim)', lineHeight:1.5, marginTop:8 };
+  const inp = { width:'100%', background:'var(--surf2)', border:'1px solid var(--bdr)',
+                borderRadius:5, padding:'8px 10px', color:'var(--ink)',
+                fontFamily:'var(--fm)', fontSize:11, marginBottom:7 };
+
+  /* The panel no longer owns the sync -- the app does, because the header chip
+   * fires the same one. What is left here is the part that is about this
+   * screen: showing the answer. */
+  async function doSync() {
+    if (!core || !core.isSignedIn() || !onSync) return;
+    setMsg(null);
+    const res = await onSync({ toast: false });
+    if (res) setMsg({ kind: res.ok ? 'ok' : 'err', text: res.text });
   }
 
   async function doAuth(mode) {
@@ -6354,8 +6446,8 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
             <button onClick={()=>{ core.signOut(); }} style={{background:'none', border:'none', color:'var(--dim)', fontFamily:'var(--fm)', fontSize:9, cursor:'pointer', padding:0}}>sign out</button>
           </div>
           <div style={{display:'flex', gap:8, marginTop:9}}>
-            <button className="badd" style={{flex:1, opacity:busy?0.5:1}} disabled={busy} onClick={doSync}>
-              {busy ? 'syncing…' : `⇅ Sync now${core.pendingCount() ? ` (${core.pendingCount()})` : ''}`}</button>
+            <button className="badd" style={{flex:1, opacity:(busy||syncBusy)?0.5:1}} disabled={busy||syncBusy} onClick={doSync}>
+              {syncBusy ? 'syncing…' : `⇅ Sync now${core.pendingCount() ? ` (${core.pendingCount()})` : ''}`}</button>
           </div>
 
           {/* Public handle: the ONLY thing other shooters see. Claiming one is
@@ -6411,6 +6503,95 @@ function SyncPanel({ core, cfg, onSaveCfg, sessions, ammo, getTarget, onSignedIn
         build {(typeof window !== 'undefined' && window.__BUILD__) || 'unknown'}
       </div>
     </div>
+  );
+}
+
+/* ── The header chip ───────────────────────────────────────────────────────
+ *
+ * Present on every screen the tab shell owns, which is the answer to "where is
+ * the sync button" -- the same answer Bench already gives, in the same place,
+ * with the same three states, so learning one app teaches the other.
+ *
+ * TAP navigates to the cloud screen. PRESS AND HOLD fires the sync.
+ *
+ * The split is not a flourish. This control sits at the top right of every
+ * screen, which is exactly where a thumb rests while scrolling a session list,
+ * and a plain tap that fired a network write would fire by accident several
+ * times a range day. A press held for 550ms is not an accident. It also buys
+ * back the case the chip exists for: drive home, open the app, hold the chip,
+ * put the phone down -- rather than More, Cloud sync, Sync now.
+ *
+ * Pointer events rather than touch events, so a mouse behaves the same; a move
+ * of more than 10px cancels the hold, because that is a scroll that happened
+ * to start on the chip rather than a press. `fired` suppresses the click that
+ * follows the pointerup, or a completed hold would sync AND navigate.
+ */
+function SyncChip({ core, busy, onOpen, onSync }) {
+  const [held, setHeld] = useState(false);
+  const timer = useRef(null);
+  const from = useRef(null);
+  const fired = useRef(false);
+  const [, bump] = useState(0);
+
+  /* The chip is a status light, so it has to repaint on the events that change
+   * the status -- not only when the screen around it happens to re-render. */
+  useEffect(() => {
+    if (!core) return undefined;
+    const offs = [core.EVENTS.AUTH_SIGNED_IN, core.EVENTS.AUTH_SIGNED_OUT,
+                  core.EVENTS.OUTBOX_CHANGED, core.EVENTS.SYNC_DONE, core.EVENTS.SYNC_ERROR]
+      .map(e => core.on(e, () => bump(n => n + 1)));
+    return () => offs.forEach(off => off());
+  }, [core]);
+
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  if (!core) return null;
+
+  const signedIn = core.isSignedIn();
+  const pending = signedIn ? core.pendingCount() : 0;
+  const hint = ' Tap for cloud sync and backup; hold to sync now.';
+  let text, label, cls;
+  if (!signedIn) {
+    text = 'Sign in'; label = 'Not signed in — set up cloud sync and backup'; cls = 'act';
+  } else if (busy) {
+    text = '⇅'; label = 'Syncing'; cls = 'busy';
+  } else if (pending) {
+    text = `⇅ ${pending}`;
+    label = `${pending} record${pending === 1 ? '' : 's'} waiting to send.` + hint; cls = 'wait';
+  } else {
+    text = '⇅'; label = 'Signed in — everything sent.' + hint; cls = '';
+  }
+
+  const cancel = () => { clearTimeout(timer.current); timer.current = null; setHeld(false); };
+  const start = (e) => {
+    if (!signedIn || busy) return;          // nothing to sync, so the tap is all there is
+    from.current = { x: e.clientX, y: e.clientY };
+    fired.current = false;
+    setHeld(true);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      fired.current = true;
+      setHeld(false);
+      /* The only feedback a finger still on the glass can get. Absent on iOS,
+       * which is why the ring above it is the real signal and this is a bonus. */
+      try { if (navigator.vibrate) navigator.vibrate(12); } catch (_) {}
+      onSync();
+    }, 550);
+  };
+  const move = (e) => {
+    if (!from.current || !timer.current) return;
+    if (Math.abs(e.clientX - from.current.x) > 10 || Math.abs(e.clientY - from.current.y) > 10) cancel();
+  };
+
+  return (
+    <button className={`syncchip${cls ? ' ' + cls : ''}${held ? ' held' : ''}`}
+      aria-label={label} title={label}
+      onPointerDown={start} onPointerMove={move} onPointerUp={cancel}
+      onPointerCancel={cancel} onPointerLeave={cancel}
+      onContextMenu={e => e.preventDefault()}
+      onClick={() => { if (fired.current) { fired.current = false; return; } onOpen(); }}>
+      {text}
+    </button>
   );
 }
 
@@ -7349,6 +7530,45 @@ function App() {
 
   const getTarget = id => allTargets.find(t => t.id === id) || defaultTarget();
 
+  /* ── The sync, owned by the app rather than by the panel ─────────────────
+   *
+   * Two things fire it now -- the wide button on the cloud screen and a held
+   * press on the header chip -- and they have to share one in-flight flag or
+   * the chip will happily start a second sync over the first. `runningRef`
+   * rather than the state variable because the guard is read inside a
+   * callback: state closes over the value it was created with, and the second
+   * press would see `false` however carefully the dependency list was
+   * written. */
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncToast, setSyncToast] = useState(null);   // {ok, text} | null
+  const syncRunning = useRef(false);
+  const runSync = useCallback(async (opts) => {
+    if (syncRunning.current) return { ok: false, text: 'A sync is already running.' };
+    syncRunning.current = true; setSyncBusy(true);
+    let res;
+    try {
+      res = await runZeroSync({ core, sessions, ammo, getTarget, firearms,
+        onSessionsUpdated: saveSessions, onAmmoUpdated: saveAmmo,
+        onFirearmsUpdated: saveFirearms });
+    } finally { syncRunning.current = false; setSyncBusy(false); }
+    /* A sync fired from the header has nowhere on screen to report itself, so
+     * it says so in a toast. One fired from the panel does not -- the panel
+     * prints the same text in its own message line, and two copies of it is
+     * how a UI starts shouting. */
+    if (opts && opts.toast) setSyncToast(res);
+    return res;
+  }, [core, sessions, ammo, firearms, getTarget, saveSessions, saveAmmo, saveFirearms]);
+
+  useEffect(() => {
+    if (!syncToast) return undefined;
+    const t = setTimeout(() => setSyncToast(null), 6000);
+    return () => clearTimeout(t);
+  }, [syncToast]);
+
+  /* Where the chip and the wordmark go. Signed in this is the cloud screen;
+   * with no backend at all there is no cloud screen, so it is the file one. */
+  const openCloud = () => { setTab('more'); setMore(core ? 'sync' : 'backup'); };
+
   const linkedLoadCount = ammo.filter(a => a.batchId).length;
   const moreItems = [
     ['firearms', 'Firearms & loads',
@@ -7359,10 +7579,14 @@ function App() {
       'extrapolate your DOPE to distances you have not shot'],
     ...(core ? [['bench', 'Loads from Bench',
       linkedLoadCount ? `${linkedLoadCount} linked to a batch` : 'import batches you have loaded']] : []),
-    ...(core ? [['sync', 'Cloud sync',
+    /* One destination for everything that moves data over the network:
+       per-record sync with Bench AND the whole-device cloud backup, which used
+       to be a card on a different screen with a different name for the same
+       account. */
+    ...(core ? [['sync', 'Cloud sync & backup',
       core.isSignedIn() ? `signed in as ${core.getUser()?.email || 'you'}` : 'not signed in']] : []),
-    ['backup', 'Backup & data',
-      backupNudge ? 'needs attention' : 'cloud and file'],
+    ['backup', 'Data file',
+      backupNudge ? 'needs attention' : 'export and restore a file'],
     ['appearance', 'Appearance', themePref === 'system'
       ? `follows this device — ${effectiveTheme('system') === 'dark' ? 'night' : 'day'} right now`
       : themePref === 'dark' ? 'night, always' : 'day, always'],
@@ -7597,15 +7821,33 @@ function App() {
               </div>
             </>
           ) : (
-            <div><div className="htitle">Zero</div><div className="hsub">Precision shooting log</div></div>
+            /* The wordmark is the other half of "put it behind the sync
+               button and the logo": a tap here lands on the same cloud screen
+               the chip opens. It is the target people reach for out of habit
+               from every other app, and it costs nothing to honour. */
+            <button className="hbrand" onClick={openCloud}
+              aria-label="Cloud sync and backup">
+              <div className="htitle">Zero</div>
+              <div className="hsub">Precision shooting log</div>
+            </button>
           )}
-          {tab==='sessions' && (
-            <div style={{display:'flex',gap:7}}>
-              {core && <button className="badd" style={{background:'none',border:'1px solid var(--bdr)',color: showJoin ? 'var(--acc)' : 'var(--ink)'}} onClick={()=>setShowJoin(v=>!v)}>● join</button>}
-              <button className="badd" style={{background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}} onClick={()=>setScreen('new_match')}>+ match</button>
-              <button className="badd" onClick={()=>setScreen('new')}>+ session</button>
-            </div>
-          )}
+          {/* One right-hand group, not two. The chip has to be the last thing
+              in the header on EVERY screen -- including the More sub-screens,
+              which have a back button and a title and previously nothing else
+              -- and a separate top-level child would have let
+              `justify-content:space-between` scatter three items across the
+              row differently on each tab. */}
+          <div className="hactions">
+            {tab==='sessions' && (
+              <>
+                {core && <button className="badd hact" style={{background:'none',border:'1px solid var(--bdr)',color: showJoin ? 'var(--acc)' : 'var(--ink)'}} onClick={()=>setShowJoin(v=>!v)}>● join</button>}
+                <button className="badd hact" style={{background:'none',border:'1px solid var(--bdr)',color:'var(--ink)'}} onClick={()=>setScreen('new_match')}>+ match</button>
+                <button className="badd hact" onClick={()=>setScreen('new')}>+ session</button>
+              </>
+            )}
+            <SyncChip core={core} busy={syncBusy} onOpen={openCloud}
+              onSync={() => runSync({ toast: true })} />
+          </div>
         </div>
         <div className="content">
           {tab==='sessions' && (
@@ -7713,12 +7955,25 @@ function App() {
                 pinned={pinnedTargets}
                 onTogglePin={id=>savePinnedTargets(pinnedTargets.includes(id) ? pinnedTargets.filter(p=>p!==id) : [...pinnedTargets, id])} />}
               {more==='bench' && <BenchImportCard core={core} ammo={ammo} onSaveAmmo={saveAmmo} />}
+              {/* Sync and cloud backup, one screen, one account.
+                  They were two: per-record sync here, a whole-device snapshot
+                  under "Backup & data" beside the file export. Both are the
+                  same server and the same sign-in, and splitting them meant a
+                  user who found one had no reason to think the other existed.
+                  What is left on the file screen is the thing that genuinely
+                  is different in kind -- a file you keep, that works with no
+                  signal and no account. */}
               {more==='sync' && (
-                <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
-                  sessions={sessions} ammo={ammo} getTarget={getTarget}
-                  onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
-                  firearms={firearms} onFirearmsUpdated={saveFirearms}
-                  onGoToAmmo={()=>setMore('firearms')} />
+                <>
+                  <SyncPanel core={core} cfg={effCfg} onSaveCfg={saveSyncCfg}
+                    sessions={sessions} ammo={ammo} getTarget={getTarget}
+                    onSessionsUpdated={saveSessions} onAmmoUpdated={saveAmmo}
+                    firearms={firearms} onFirearmsUpdated={saveFirearms}
+                    onSync={runSync} syncBusy={syncBusy}
+                    onGoToAmmo={()=>setMore('firearms')} />
+                  <CloudBackupCard core={core} data={localData}
+                    onMerge={applyRestored} onReplace={applyRestored} />
+                </>
               )}
               {more==='appearance' && (
                 <AppearanceCard pref={themePref} failedToSave={themeSaveFailed}
@@ -7726,8 +7981,6 @@ function App() {
               )}
               {more==='backup' && (
                 <>
-                  <CloudBackupCard core={core} data={localData}
-                    onMerge={applyRestored} onReplace={applyRestored} />
                   <div style={{margin:'0 13px 7px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                     <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>Data backup · file</div>
                     <div style={{display:'flex',gap:8}}>
@@ -7737,6 +7990,17 @@ function App() {
                     <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',lineHeight:1.5,marginTop:8}}>
                       A file you keep. Restore from a file REPLACES local data — unlike a cloud restore, which merges. Data otherwise lives only in this browser.
                     </div>
+                    {/* The cloud half moved, so this says where. A screen that
+                        silently loses a feature reads as a feature that was
+                        removed. */}
+                    {core && (
+                      <button onClick={()=>setMore('sync')}
+                        style={{background:'none',border:'none',padding:0,marginTop:6,
+                                color:'var(--acc)',fontFamily:'var(--fm)',fontSize:8,
+                                cursor:'pointer',textDecoration:'underline'}}>
+                        ⇅ Cloud backup is under Cloud sync &amp; backup
+                      </button>
+                    )}
                     {backupNudge && (
                       <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',lineHeight:1.5,marginTop:6}}>⚠ {backupNudge}</div>
                     )}
@@ -7748,6 +8012,13 @@ function App() {
             </>
           )}
         </div>
+        {/* A sync fired from the header, reporting itself. `role="status"`
+            rather than `alert`: it is the outcome of something the user asked
+            for, not an interruption. */}
+        {syncToast && (
+          <div className={`toast${syncToast.ok ? '' : ' err'}`} role="status"
+               onClick={()=>setSyncToast(null)}>{syncToast.text}</div>
+        )}
         <div className="tabbar">
           {[['sessions','▤','Sessions'],['analytics','◰','Analytics'],['dope','▦','DOPE'],['more','≡','More']].map(([t,ico,lbl])=>(
             <button key={t} className={`tab ${tab===t?'on':''}`}

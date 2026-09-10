@@ -641,9 +641,14 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
           <tr><td>Sessions</td><td>Every range outing, searchable and filterable, with matches grouping their stages. The header carries <span class="ui">+ session</span>, <span class="ui">+ match</span> and &mdash; when a backend is configured &mdash; <span class="ui">● join</span> for pair fire.</td></tr>
           <tr><td>Analytics</td><td>Trends across every session you have logged: group size by position and distance, cold-shot behaviour, how your corrections actually land, classification pace, wind-call accuracy.</td></tr>
           <tr><td>DOPE</td><td>Your confirmed zeros, filed by firearm, then range, then distance and position. Includes a printable card.</td></tr>
-          <tr><td>More</td><td>Everything you set up once: <span class="ui">Firearms &amp; loads</span>, <span class="ui">Targets</span>, <span class="ui">Trajectory</span>, <span class="ui">Loads from Bench</span>, <span class="ui">Cloud sync</span>, <span class="ui">Backup &amp; data</span>.</td></tr>
+          <tr><td>More</td><td>Everything you set up once: <span class="ui">Firearms &amp; loads</span>, <span class="ui">Targets</span>, <span class="ui">Trajectory</span>, <span class="ui">Loads from Bench</span>, <span class="ui">Cloud sync &amp; backup</span>, <span class="ui">Data file</span>.</td></tr>
         </tbody>
       </table></div></div>
+      <p>A <strong>sync chip</strong> sits in the header on every screen, the same one Bench has: <span class="ui">Sign in</span>, or <span class="ui">&#8645;</span> with a count of records still waiting to send. <strong>Tap</strong> it &mdash; or the <span class="ui">Zero</span> wordmark beside it &mdash; to open <span class="ui">Cloud sync &amp; backup</span>. <strong>Press and hold</strong> it for about half a second to sync where you stand, without leaving the screen; the result appears in a small message above the tab bar.</p>
+      <div class="note">
+        <div class="nh">Why a hold and not a tap</div>
+        <p>The chip is at the top right of every screen, which is where a thumb rests while scrolling a session list. A tap that fired a sync would fire one by accident several times a range day. A hold does not happen by accident &mdash; and a press that turns into a scroll is treated as a scroll, so nothing is sent.</p>
+      </div>
       <div class="note">
         <div class="nh">Naming</div>
         <p>The trajectory solver is called <span class="ui">Trajectory</span> in the menu, not &ldquo;solver&rdquo;. Firearms and loads share one screen. There is no separate Firearms tab &mdash; if you have seen that written anywhere, it is out of date.</p>
@@ -855,10 +860,10 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
           <tr><td>Identify</td><td>Work out which lot a case belongs to, either from the colours marked on it or from a serial you type or scan.</td></tr>
           <tr><td>Brass</td><td>Brass lots and their whole lifecycle: firings, trim, annealing, culls, retirement.</td></tr>
           <tr><td>Ammo</td><td>Loaded batches. This is the thing that actually leaves the bench.</td></tr>
-          <tr><td>More</td><td><span class="ui">Inventory</span>, <span class="ui">Recipes</span>, <span class="ui">Firearms</span>, <span class="ui">Cartridges</span>, <span class="ui">Marking scheme</span>, <span class="ui">Cloud sync</span>, <span class="ui">Data</span>, <span class="ui">Display diagnostics</span>.</td></tr>
+          <tr><td>More</td><td><span class="ui">Inventory</span>, <span class="ui">Recipes</span>, <span class="ui">Firearms</span>, <span class="ui">Cartridges</span>, <span class="ui">Marking scheme</span>, <span class="ui">Cloud sync &amp; backup</span>, <span class="ui">Data</span>, <span class="ui">Display diagnostics</span>.</td></tr>
         </tbody>
       </table></div></div>
-      <p>A sync chip sits in the header on every screen: <span class="ui">Sign in</span>, or <span class="ui">⇅</span> with a count of records waiting. Tapping it takes you to Cloud sync &mdash; it does not sync by itself.</p>
+      <p>A sync chip sits in the header on every screen: <span class="ui">Sign in</span>, or <span class="ui">&#8645;</span> with a count of records waiting. <strong>Tapping</strong> it takes you to <span class="ui">Cloud sync &amp; backup</span> &mdash; it never syncs by itself. <strong>Pressing and holding</strong> it for about half a second does sync, from whatever screen you are on, and says what happened in a message at the bottom. A press that turns into a scroll is a scroll: nothing is sent.</p>
     </section>
 
     <section id="b-lots">
@@ -947,12 +952,14 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
         </tbody>
       </table></div></div>
       <p>In words: <strong>firearms are the only record that syncs both ways.</strong> Shot data flows Zero to Bench. Batches come to Zero only when you import them, deliberately, from <span class="ui">More</span> &rarr; <span class="ui">Loads from Bench</span> &mdash; that is a read of one view, not a sync, and nothing is pushed by it. Component lots, recipes and brass go up to the server but do not come back down; each needs a defensible merge rule before it can, and cloud backup covers moving a whole bench to a new device meanwhile.</p>
-      <p>Two smaller rules explain most surprises. A firearm with no chambering is never sent. And Bench pushes are chained: a batch whose recipe <em>could not</em> sync cannot sync either, and a session whose batch could not sync waits on that. Anything in that state appears in the <strong>Not sent</strong> list on the Cloud sync screen, each row naming what is wrong with it.</p>
+      <p>Two smaller rules explain most surprises. A firearm with no chambering is never sent. And Bench pushes are chained: a batch whose recipe <em>could not</em> sync cannot sync either, and a session whose batch could not sync waits on that. Anything in that state appears in the <strong>Not sent</strong> list on the <span class="ui">Cloud sync &amp; backup</span> screen, each row naming what is wrong with it.</p>
     </section>
 
     <section id="backup">
       <h2>Backup, restore, and second devices</h2>
       <p>Three separate things, and they behave differently on purpose.</p>
+      <div class="nav-path">cloud: the header <b>&#8645;</b> chip, or <b>More</b> &rarr; <b>Cloud sync &amp; backup</b> &nbsp;&middot;&nbsp; file: Zero <b>More</b> &rarr; <b>Data file</b>, Bench <b>More</b> &rarr; <b>Data</b></div>
+      <p><strong>Cloud backup now lives on the same screen as cloud sync</strong>, in both apps. It used to be a card of its own under a different menu entry, which meant a user who had found one half had no reason to suppose the other existed &mdash; and both are the same server and the same sign-in. The <em>file</em> export and import stayed where they were, because a file is genuinely a different thing: it needs no account and no signal.</p>
       <div class="mtable"><div class="tablewrap"><table>
         <thead><tr><th>What</th><th>Behaviour</th></tr></thead>
         <tbody>
@@ -966,7 +973,7 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
         <div class="nh">A merge cannot carry an edit or a deletion</div>
         <p>Cloud restore is additive. If you correct a session on one device, that correction does not reach the other by restoring &mdash; the older copy is already there and a merge will not overwrite it. To make two devices agree exactly, use <em>replace</em>. Firearms are the exception, but not here: they carry modification times and deletion markers, so their edits and deletions cross on the per-record sync rather than on a restore.</p>
       </div>
-      <p>Back up before you experiment. The nudge on the Sessions tab that says a backup needs attention is worth acting on.</p>
+      <p>Back up before you experiment. The nudge on the Sessions tab that says a backup needs attention is worth acting on &mdash; it takes you to the file export, which is the one that works with no signal.</p>
     </section>
 
     <section id="trouble">
@@ -991,7 +998,7 @@ th, td { padding-left: clamp(12px, 1.5vw, 18px); padding-right: clamp(12px, 1.5v
       <p>The relay needs a live connection at both ends &mdash; there is no offline queue for it, by design, since a mirrored shot that arrives ten minutes late is worse than one that never arrives. If the message mentions anonymous sign-in, that is a server setting rather than anything on the phone.</p>
 
       <h3>&ldquo;Cloud backup says anonymous devices cannot back up.&rdquo;</h3>
-      <p>Using pair fire signs you in as a guest, and a guest identity has no account to back up to. Sign in with an email on <span class="ui">More</span> &rarr; <span class="ui">Cloud sync</span> and it will work.</p>
+      <p>Using pair fire signs you in as a guest, and a guest identity has no account to back up to. Sign in with an email &mdash; tap the header <span class="ui">&#8645;</span> chip, or <span class="ui">More</span> &rarr; <span class="ui">Cloud sync &amp; backup</span> &mdash; and it will work.</p>
 
       <h3>&ldquo;The app says it is out of storage.&rdquo;</h3>
       <p>Take it seriously &mdash; it means the last change was <em>not</em> saved. Export a file backup immediately, then free space on the device.</p>

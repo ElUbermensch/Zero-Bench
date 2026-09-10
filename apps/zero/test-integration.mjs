@@ -158,7 +158,7 @@ console.log('\nboot');
   await page.click('.tabbar button:has-text("More")');
   await page.waitForTimeout(300);
   const menu = await page.textContent('body');
-  for (const dest of ['Firearms & loads', 'Targets', 'Cloud sync', 'Backup & data']) {
+  for (const dest of ['Firearms & loads', 'Targets', 'Cloud sync & backup', 'Data file']) {
     ok(menu.includes(dest), `More lists ${dest}`);
   }
   /* A menu that only says where things are is worse than the tabs it replaced.
@@ -206,10 +206,10 @@ console.log('\nvertical rhythm');
                      await page.click('.tabbar button:has-text("More")');
                      await page.waitForTimeout(200);
                      await page.click('button:has-text("Firearms & loads")'); }],
-                   ['Backup & data', async () => {
+                   ['Data file', async () => {
                      await page.click('.tabbar button:has-text("More")');
                      await page.waitForTimeout(200);
-                     await page.click('button:has-text("Backup & data")'); }]];
+                     await page.click('button:has-text("Data file")'); }]];
 
   for (const [label, go] of screens) {
     await go(); await page.waitForTimeout(400);
@@ -266,7 +266,7 @@ console.log('\nbackup export');
       return click.apply(this, arguments);
     };
   });
-  await openMore('Backup & data');
+  await openMore('Data file');
   await page.click('button:has-text("⤓ Export")');
   await page.waitForTimeout(400);
   const shared = await page.evaluate(() => ({
@@ -334,7 +334,7 @@ console.log('\nserver config + account');
   const home = await page.textContent('body');
   ok(!/Sync now/.test(home), 'the sync panel is not on the sessions screen');
 
-  await openMore('Cloud sync');
+  await openMore('Cloud sync & backup');
   const syncScreen = await page.textContent('body');
   ok(syncScreen.includes('jaxon@example.com'), 'signed in, email shown');
   ok(/Sync now/.test(syncScreen), '...on the sync screen under More');
@@ -390,7 +390,7 @@ await page.click('button:has-text("Sync now")');
 await page.waitForTimeout(700);
 await page.reload();                      // remote ids must have been persisted
 await page.waitForTimeout(700);
-await openMore('Cloud sync');             // a reload lands on Sessions
+await openMore('Cloud sync & backup');             // a reload lands on Sessions
 await page.click('button:has-text("Sync now")');
 await page.waitForTimeout(700);
 ok((mock.state.rows.get('range_sessions')?.size || 0) === 1,
@@ -412,6 +412,203 @@ const remoteId = await page.evaluate(() =>
   JSON.parse(localStorage.getItem('sessions_v1'))[0].remoteId);
 ok(remoteId === [...mock.state.rows.get('range_sessions').keys()][0],
    'the remote id is persisted on the local session record');
+
+/* ================================================== the header chip and the cloud screen
+ *
+ * "Where is the sync button" was answered once for Bench with a header chip
+ * and never for Zero, where the only sync control lived two taps under More.
+ * These assert the three claims the chip makes: it is on every screen the tab
+ * shell owns, a tap goes to the cloud screen, and a HELD press syncs without
+ * going anywhere -- which is the whole reason it is a hold and not a tap.
+ */
+console.log('\nthe sync chip is on every screen');
+{
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
+
+  for (const tab of ['Sessions', 'Analytics', 'DOPE', 'More']) {
+    await page.click(`.tabbar button:has-text("${tab}")`);
+    await page.waitForTimeout(250);
+    ok(await page.isVisible('.syncchip'), `the chip is on ${tab}`);
+  }
+  /* And on a sub-screen of More, which is where it was missing in the first
+     draft: the header renders a back button and a title there, and a chip
+     hung off the other branch of that ternary would have vanished. */
+  await openMore('Targets');
+  ok(await page.isVisible('.syncchip'), 'the chip survives into a More sub-screen');
+
+  /* The header has to fit. Four controls and a wordmark on a 430px shell is
+     the widest this row ever gets, and the strapline is what gives. */
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
+  const over = await page.evaluate(() => {
+    const h = document.querySelector('.hdr');
+    const sub = h.querySelector('.hsub');
+    /* Natural width measured off a clone, because the live one is already
+       clipped by the flex row it is being measured inside. */
+    const clone = sub.cloneNode(true);
+    clone.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;'
+                        + 'overflow:visible;width:auto';
+    document.body.appendChild(clone);
+    const subNatural = Math.ceil(clone.getBoundingClientRect().width);
+    clone.remove();
+    return { scroll: h.scrollWidth, client: h.clientWidth,
+             doc: document.documentElement.scrollWidth,
+             view: document.documentElement.clientWidth,
+             subShown: Math.round(sub.getBoundingClientRect().width), subNatural };
+  });
+  ok(over.scroll <= over.client + 1,
+     `the header row does not overflow itself (${over.scroll} <= ${over.client})`);
+  ok(over.doc <= over.view + 1,
+     `...and the page does not scroll sideways (${over.doc} <= ${over.view})`);
+  /* The chip cost the row 44px, and the header's three action buttons were
+     sized for a card rather than for a row that also carries a wordmark. On a
+     430px shell the strapline has to survive that. */
+  ok(over.subShown >= over.subNatural - 1,
+     `the strapline still fits beside the chip (${over.subShown} of ${over.subNatural}px)`);
+
+  /* And on the narrowest phone anyone still carries. The strapline is what
+     gives here -- it ellipsises rather than pushing the controls off the
+     right-hand edge, which is what `min-width:0` on .hbrand buys. */
+  for (const w of [320, 360, 390]) {
+    await page.setViewportSize({ width: w, height: 844 });
+    await page.waitForTimeout(200);
+    const narrow = await page.evaluate(() => {
+      const h = document.querySelector('.hdr');
+      const chip = document.querySelector('.syncchip').getBoundingClientRect();
+      const group = h.lastElementChild.getBoundingClientRect();
+      const brandEl = h.firstElementChild;
+      const brand = brandEl.getBoundingClientRect();
+      const title = h.querySelector('.htitle');
+      return { scroll: h.scrollWidth, client: h.clientWidth,
+               doc: document.documentElement.scrollWidth,
+               view: document.documentElement.clientWidth,
+               chipW: Math.round(chip.width), chipH: Math.round(chip.height),
+               chipRight: Math.round(chip.right),
+               brandRight: Math.round(brand.right), groupLeft: Math.round(group.left),
+               /* The two halves of "the wordmark cannot run under the
+                  buttons": the box has to end before they start, AND
+                  anything that does not fit the box has to be clipped
+                  rather than painted. min-width:0 alone gives the first
+                  and not the second, which is the state this caught. */
+               brandClips: getComputedStyle(brandEl).overflow === 'hidden',
+               /* NOT scrollWidth. `text-overflow:ellipsis` replaces glyphs
+                  until the content fits, so an ellipsised element reports a
+                  scrollWidth equal to its clientWidth give or take a rounding
+                  pixel -- it can never show you that the word was cut. The
+                  natural width has to come off a clone that is allowed to
+                  overflow, the same way the strapline is measured above. */
+               titleCut: (() => {
+                 const c = title.cloneNode(true);
+                 c.style.cssText = 'position:absolute;visibility:hidden;'
+                                 + 'white-space:nowrap;overflow:visible;'
+                                 + 'text-overflow:clip;width:auto';
+                 document.body.appendChild(c);
+                 const natural = Math.ceil(c.getBoundingClientRect().width);
+                 c.remove();
+                 return natural - title.clientWidth;
+               })() };
+    });
+    ok(narrow.doc <= narrow.view + 1,
+       `no sideways scroll at ${w}px (${narrow.doc} <= ${narrow.view})`);
+    ok(narrow.chipRight <= narrow.view + 1,
+       `...and the chip is still on screen at ${w}px (right edge ${narrow.chipRight})`);
+    /* The suite's floor everywhere else in both apps. A header control is hit
+       with a thumb at arm's length. */
+    ok(narrow.chipW >= 36 && narrow.chipH >= 36,
+       `...at a thumb-sized target (${narrow.chipW}x${narrow.chipH})`);
+    /* The failure this guards, which the chip introduced and the clip fixes:
+       the brand is the only shrinkable item in the row, so it shrank to
+       nothing and the word "Zero" carried on rendering UNDER the buttons. */
+    ok(narrow.brandRight <= narrow.groupLeft + 1 && narrow.brandClips,
+       `...and the wordmark cannot run under the buttons at ${w}px `
+       + `(ends ${narrow.brandRight}, buttons start ${narrow.groupLeft}, `
+       + `clipped ${narrow.brandClips})`);
+    /* A truncated strapline is a trim; a truncated app name is a fault. That
+       holds at 320 too — an iPhone SE 1 — which the narrow media query buys
+       back out of the gaps and the chip's minimum rather than by dropping a
+       control from the row. */
+    /* Zero, not one. `text-overflow:ellipsis` is quantised: to shed a single
+       pixel it drops two glyphs and spends eight on the "...". So one pixel
+       over the box is not a hairline, it is "Ze..." on screen, and a
+       tolerance here hides exactly the case worth catching. */
+    ok(narrow.titleCut <= 0,
+       `...with the wordmark itself untruncated at ${w}px (${narrow.titleCut}px over)`);
+    ok(narrow.chipW >= 36,
+       `...and the chip is still over the 36px floor at ${w}px (${narrow.chipW}px)`);
+  }
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.waitForTimeout(200);
+  try {
+    fsx.mkdirSync('shots', { recursive: true });
+    for (const w of [430, 390, 360, 320]) {
+      await page.setViewportSize({ width: w, height: 844 });
+      await page.waitForTimeout(200);
+      await page.screenshot({ path: `shots/hdr-${w}.png`, clip: { x: 0, y: 0, width: w, height: 70 } });
+    }
+    await page.setViewportSize({ width: 430, height: 900 });
+    await page.waitForTimeout(200);
+  } catch (_) { /* a screenshot is a convenience, never a reason to fail */ }
+
+  /* A TAP navigates. It must not sync: this control sits where a thumb rests
+     while scrolling a session list. */
+  const pushesBefore = mock.state.rows.get('range_sessions')?.size || 0;
+  await page.click('.syncchip');
+  await page.waitForTimeout(500);
+  const landed = await page.textContent('body');
+  ok(/Sync now/.test(landed), 'a tap on the chip lands on the cloud screen');
+  ok(landed.includes('Cloud backup'),
+     '...which is also where cloud backup lives now, not on a screen of its own');
+  ok(!(await page.isVisible('.toast')), '...and a tap does not fire a sync');
+  ok((mock.state.rows.get('range_sessions')?.size || 0) === pushesBefore,
+     '...nothing was pushed by it');
+
+  /* A HELD press syncs, in place, and reports itself in a toast because the
+     screen it was fired from has nowhere else to say so. */
+  await page.click('.tabbar button:has-text("Sessions")');
+  await page.waitForTimeout(300);
+  const chip = await page.$('.syncchip');
+  const box = await chip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(750);          // past the 550ms threshold
+  await page.mouse.up();
+  await page.waitForTimeout(1200);
+  ok(await page.isVisible('.toast'), 'a held press fires a sync and says so');
+  const toast = await page.textContent('.toast');
+  ok(/Synced/.test(toast), `...with the result in it (${toast.slice(0, 60)})`);
+  ok(!/Sync now/.test(await page.textContent('body')),
+     '...without navigating away from the screen the user was on');
+
+  /* A press that turns into a scroll is a scroll. */
+  await page.evaluate(() => { const t = document.querySelector('.toast'); if (t) t.click(); });
+  await page.waitForTimeout(200);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 40, { steps: 4 });
+  await page.waitForTimeout(750);
+  await page.mouse.up();
+  await page.waitForTimeout(600);
+  ok(!(await page.isVisible('.toast')),
+     'a press that moves more than 10px is a scroll, not a hold');
+}
+
+console.log('\ncloud backup moved in with sync');
+{
+  await openMore('Data file');
+  const fileScreen = await page.textContent('body');
+  ok(/Data backup · file/.test(fileScreen), 'the file export is still its own screen');
+  ok(!/⤒ Back up now/.test(fileScreen),
+     '...and the cloud backup card is no longer on it');
+  ok(/Cloud backup is under/.test(fileScreen),
+     '...but the screen says where it went, rather than losing it silently');
+
+  await openMore('Cloud sync & backup');
+  const cloudScreen = await page.textContent('body');
+  ok(/Sync now/.test(cloudScreen) && /Cloud backup/.test(cloudScreen),
+     'sync and cloud backup are one screen, one account');
+  ok(/⤒ Back up now/.test(cloudScreen), '...with the backup button on it');
+}
 
 console.log('\nbatch picker');
 const userId = mock.state.users.get('jaxon@example.com').id;
@@ -1231,7 +1428,7 @@ console.log('\na pin that survives the device');
     URL.createObjectURL = (b) => { window.__blob = b; return real(b); };
     HTMLAnchorElement.prototype.click = function () { if (!this.download) return; };
   });
-  await openMorePage(p, 'Backup & data');
+  await openMorePage(p, 'Data file');
   await p.click('button:has-text("⤓ Export")');
   await p.waitForTimeout(600);
   const exported = await p.evaluate(() => window.__blob ? window.__blob.text() : null);
@@ -1268,7 +1465,7 @@ console.log('\na pin that survives the device');
   ok(Array.isArray(before) && before.join() === 'sr,ct-local',
      `the receiving device already has a pinned custom target of its own (${JSON.stringify(before)})`);
   p2.on('dialog', d => d.accept());
-  await openMorePage(p2, 'Backup & data');
+  await openMorePage(p2, 'Data file');
   await p2.setInputFiles('input[type="file"]',
     { name: 'zero-backup.json', mimeType: 'application/json', buffer: Buffer.from(exported) });
   await p2.waitForTimeout(900);

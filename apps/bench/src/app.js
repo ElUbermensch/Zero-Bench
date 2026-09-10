@@ -1627,7 +1627,7 @@ const TITLES = {
   settings: ['Marking scheme', ''],
   appearance: ['Appearance', 'day, night, or follow the device'],
   data: ['Data', 'backup and reset'],
-  sync: ['Cloud sync', 'shared with Zero'],
+  sync: ['Cloud sync & backup', 'shared with Zero, and a copy of the bench'],
   form: ['', ''],
 };
 
@@ -1716,9 +1716,14 @@ function render() {
 /* The header chip. Short label, long aria-label: the visible text has to fit
  * beside a title on a phone, but a screen reader gets the whole sentence.
  *
- * The chip navigates; it never syncs. A control that fires a network write
- * from a spot the thumb rests on while scrolling is a control that fires by
- * accident, and this one is present on every screen. */
+ * A TAP navigates. It has never fired a write and still does not: a control
+ * that syncs on a tap, from the spot a thumb rests on while scrolling, is a
+ * control that syncs by accident, and this one is on every screen.
+ *
+ * A press HELD for 550ms does fire one -- see armSyncChip at the foot of this
+ * file. A hold is not something a thumb does by accident, and it is what makes
+ * the drive-home case (open the app, hold the chip, put the phone down) one
+ * gesture instead of three taps. */
 function paintSyncChip() {
   const el = document.getElementById('syncchip');
   if (!el) return;
@@ -1727,14 +1732,16 @@ function paintSyncChip() {
   const st = UI.sync || {};
   const pending = CORE.isSignedIn() ? CORE.pendingCount() : 0;
   let text, label, cls;
+  const hint = ' Tap for cloud sync and backup; hold to sync now.';
   if (!CORE.isSignedIn()) {
-    text = 'Sign in'; label = 'Not signed in — set up cloud sync with Zero'; cls = 'act';
+    text = 'Sign in'; label = 'Not signed in — set up cloud sync and backup with Zero'; cls = 'act';
   } else if (st.busy) {
     text = '⇅'; label = 'Syncing'; cls = 'busy';
   } else if (pending) {
-    text = '⇅ ' + pending; label = `${pending} record${pending === 1 ? '' : 's'} waiting to send`; cls = 'wait';
+    text = '⇅ ' + pending;
+    label = `${pending} record${pending === 1 ? '' : 's'} waiting to send.` + hint; cls = 'wait';
   } else {
-    text = '⇅'; label = 'Signed in — everything sent'; cls = '';
+    text = '⇅'; label = 'Signed in — everything sent.' + hint; cls = '';
   }
   el.textContent = text;
   el.setAttribute('aria-label', label);
@@ -2690,9 +2697,25 @@ VIEWS.sync = () => {
 
   if (!signedIn) return syncCard();
 
+  /* Fired off rather than awaited: the view is synchronous, and a card that
+   * says "nothing backed up yet" for 200ms beats a screen that waits on the
+   * network before it draws anything at all. This used to sit in VIEWS.data,
+   * which is where the card used to be. */
+  if (!UI.cloud) { UI.cloud = {}; loadCloudInfo(); }
+
   const rejected = CORE.rejectedList ? CORE.rejectedList() : [];
   const blocked = st.blocked || [];
+  /* Sync and cloud backup, one screen, one account.
+   *
+   * They were two, on screens with different names: per-record sync here, and
+   * a whole-device snapshot under More > Data beside the file export. Both are
+   * the same server and the same sign-in, and a user who found one had no
+   * reason to suppose the other existed. What stays on the Data screen is the
+   * thing that is genuinely different in kind: a file you keep, which needs
+   * neither an account nor a signal. */
   return `${syncCard()}
+
+  ${cloudCard()}
 
   ${blocked.length ? `<div class="card"><h2>Not sent</h2>
     <p class="small muted">These could not be represented in the shared schema. Everything
@@ -2742,13 +2765,12 @@ VIEWS.sync = () => {
  * Replace exists beside it, separately confirmed, for making two devices match.
  */
 function cloudCard() {
-  if (!CORE) return '';
+  /* Signed out this renders nothing at all, rather than a card explaining
+   * where to sign in: the sign-in form is now the card directly above it on
+   * the same screen, and "sign in under Cloud sync" pointing at the screen you
+   * are standing on is worse than silence. */
+  if (!CORE || !CORE.isSignedIn()) return '';
   const st = UI.cloud || {};
-  if (!CORE.isSignedIn()) {
-    return `<div class="card"><h2>Cloud backup</h2>
-      <p class="small muted">Sign in under Cloud sync to keep a copy of this whole
-        bench on your account, and pull it onto another device.</p></div>`;
-  }
   const row = st.row || null;
   return `<div class="card"><h2>Cloud backup</h2>
     <div class="btnrow">
@@ -2872,7 +2894,10 @@ async function loadCloudInfo() {
       UI.cloud.ok = false;
     }
   } catch (e) { /* leave the card in its "nothing yet" state */ }
-  if (cur().v === 'data') render();
+  /* The card moved to the sync screen, and so must the repaint. Left pointing
+   * at 'data' this fetched the row and then never drew it, so the card said
+   * "nothing backed up yet on this account" over a backup that existed. */
+  if (cur().v === 'sync') render();
 }
 
 /* ------------------------------------------------------------- Appearance */
@@ -2902,10 +2927,6 @@ VIEWS.appearance = () => {
 };
 
 VIEWS.data = () => {
-  /* Fired off rather than awaited: the view is synchronous, and a card that
-   * says "nothing backed up yet" for 200ms is better than a screen that waits
-   * on the network before it draws anything at all. */
-  if (CORE && CORE.isSignedIn() && !UI.cloud) { UI.cloud = {}; loadCloudInfo(); }
   const counts = [['Cartridges', DB.cartridges.length], ['Firearms', DB.firearms.length],
     ['Component lots', DB.componentLots.length], ['Brass lots', DB.brassLots.length],
     ['Recipes', DB.recipes.length], ['Batches', DB.batches.length], ['Sessions', DB.sessions.length]];
@@ -2914,7 +2935,6 @@ VIEWS.data = () => {
         ? 'Data is saved on this device. Clearing site data erases it — export regularly.'
         : '<b>Not persisting.</b> This browser is blocking local storage, so everything is in memory and will vanish on reload. Export before closing.'}
     </div></div>
-    ${cloudCard()}
     <div class="card"><h2>Backup · file</h2>
       <div class="btnrow">
         <button class="btn primary" data-act="export">Export JSON</button>
@@ -2923,6 +2943,10 @@ VIEWS.data = () => {
       </div>
       <p class="tiny dim mt10">A file you keep. Importing one REPLACES this device —
         unlike a cloud restore, which merges.</p>
+      ${CORE ? `<p class="tiny dim mt6">Cloud backup moved in with sync — the ⇅ chip in
+        the header, or <button class="linkish" data-act="nav" data-arg="sync">Cloud
+        sync &amp; backup</button>. A screen that quietly loses a feature reads as a
+        feature that was removed.</p>` : ''}
     </div>
     <div class="card"><h2>Contents</h2><dl class="kv">${counts.map(([k, v]) =>
       `<dt>${k}</dt><dd class="mono">${v}</dd>`).join('')}</dl></div>
@@ -4037,6 +4061,70 @@ document.addEventListener('click', (e) => {
 });
 
 document.getElementById('back').addEventListener('click', back);
+
+/* ── The chip's second gesture ─────────────────────────────────────────────
+ *
+ * Tap navigates (the delegated [data-act="nav"] handler above). Press and HOLD
+ * syncs, from whatever screen you are on.
+ *
+ * Bound once, to the element in the shell, because paintSyncChip only ever
+ * rewrites that element's text and class -- it is never replaced, so these
+ * listeners survive every render. `held` is applied here and cleared by the
+ * next paint, which is exactly when the sync starts.
+ *
+ * Three details that are the whole difference between this working on a phone
+ * and not:
+ *   - pointer events, so a mouse behaves identically and a test can drive it;
+ *   - a 10px movement threshold, because a scroll that begins on the chip is a
+ *     scroll, not a press;
+ *   - a CAPTURE-phase click listener that swallows the click a completed hold
+ *     leaves behind. Without it the hold syncs and then navigates, which looks
+ *     like the tap it was deliberately not.
+ * `contextmenu` is refused for the same reason the CSS turns off the callout:
+ * the platform's own long-press gesture cancels the pointer stream halfway
+ * through, and the sync never runs. */
+(function armSyncChip() {
+  const el = document.getElementById('syncchip');
+  if (!el) return;
+  const HOLD_MS = 550;
+  let timer = null, from = null, fired = false;
+  const cancel = () => { clearTimeout(timer); timer = null; el.classList.remove('held'); };
+
+  el.addEventListener('pointerdown', (e) => {
+    /* Signed out there is nothing to sync, so the tap is the whole control. */
+    if (!CORE || !CORE.isSignedIn() || (UI.sync && UI.sync.busy)) return;
+    from = { x: e.clientX, y: e.clientY };
+    fired = false;
+    el.classList.add('held');
+    timer = setTimeout(async () => {
+      timer = null; fired = true; el.classList.remove('held');
+      /* The only feedback a finger still on the glass can get, and absent on
+       * iOS -- which is why the ring is the real signal and this is a bonus. */
+      try { if (navigator.vibrate) navigator.vibrate(12); } catch (_) {}
+      await doSync();
+      /* doSync prints its result in syncCard, which exists on two screens. A
+       * sync fired from any of the others has nowhere to say what happened,
+       * and "it did nothing" is indistinguishable from "it failed". */
+      const v = cur().v;
+      if (v !== 'sync' && v !== 'lookup' && UI.sync && UI.sync.msg) {
+        toast(UI.sync.msg);
+        render();
+      }
+    }, HOLD_MS);
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (!from || !timer) return;
+    if (Math.abs(e.clientX - from.x) > 10 || Math.abs(e.clientY - from.y) > 10) cancel();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => el.addEventListener(t, cancel));
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+  el.addEventListener('click', (e) => {
+    if (!fired) return;
+    fired = false;
+    e.stopPropagation(); e.preventDefault();
+  }, true);
+})();
 
 document.addEventListener('change', (e) => {
   const el = e.target;

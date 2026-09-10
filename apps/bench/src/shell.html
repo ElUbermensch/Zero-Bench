@@ -215,6 +215,16 @@ header .sub{font-size:12px;color:var(--ink3);font-weight:400}
 .syncchip.act{border-color:var(--brass);color:var(--brass)}
 .syncchip.wait{border-color:var(--warn);color:var(--warn)}
 .syncchip.busy{opacity:.6}
+/* Held. A gesture with no feedback reads as a dead control: the thumb comes
+   off at 300ms and the user concludes the chip does not do anything. */
+.syncchip.held{border-color:var(--brass);color:var(--brass);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--brass) 22%,transparent)}
+/* A long press is a gesture this control owns. Without these iOS raises the
+   selection callout and Android the context menu partway through the hold,
+   which cancels the pointer stream and the sync never runs. */
+.syncchip{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  transition:box-shadow .12s,border-color .12s}
 /* The only scrolling element in the app. `overscroll-behavior:contain` stops a
  * scroll that reaches the end of a list from rubber-banding the whole page,
  * which on iOS is what makes a fixed shell feel like it is coming apart. */
@@ -533,9 +543,11 @@ svg.casemini{width:76px;height:auto;flex:none}
   <!-- Cloud status lives in the header because the question it answers ("am I
        signed in, is anything waiting to send") is asked from whatever screen
        the user happens to be on, and the answer used to be two taps deep under
-       More. It is a status light and an entry point, not the sync trigger --
-       the trigger is the wide button on the Identify screen and on the Cloud
-       sync page, so tapping this never fires a network write by surprise. -->
+       More. It is a status light and an entry point: TAPPING it never fires a
+       network write, it goes to Cloud sync & backup. HOLDING it for half a
+       second does sync, from any screen — see armSyncChip in app.js. The wide
+       button on the Identify screen and on the Cloud sync page is still the
+       obvious, discoverable trigger; the hold is the fast one. -->
   <button class="syncchip hidden" id="syncchip" data-act="nav" data-arg="sync"></button>
 </header>
 <main id="view"></main>

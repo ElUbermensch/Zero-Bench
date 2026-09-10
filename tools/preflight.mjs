@@ -434,6 +434,32 @@ if (has('apps/bench/src/shell.html') && has('apps/zero/Zero.jsx')) {
      'both apps offer sign-in on their first screen'
      + (benchHome && zeroHome ? '' : ` (bench ${benchHome ? 'does' : 'does NOT'}, zero ${zeroHome ? 'does' : 'does NOT'})`),
      'a sync feature nobody can find is a sync feature nobody uses');
+
+  /* And once signed in, it has to be reachable from wherever you are.
+   *
+   * Bench's chip has been in the shell since firearms sync; Zero's is new, and
+   * it is in the shell header rather than on any one screen for the same
+   * reason -- a control that is only on the screen about the control is a
+   * control you have to already know about. */
+  const benchChip = /id="syncchip"/.test(has('apps/bench/src/shell.html') ? read('apps/bench/src/shell.html') : '');
+  const zeroChip = /<SyncChip\b/.test(zero);
+  ok(benchChip && zeroChip,
+     'both apps carry the sync chip in the shell header, on every screen'
+     + (benchChip && zeroChip ? '' : ` (bench ${benchChip ? 'does' : 'does NOT'}, zero ${zeroChip ? 'does' : 'does NOT'})`),
+     'the chip is the answer to "where is the sync button"; it only answers it '
+     + 'if it is on the screen the question is asked from');
+
+  /* Cloud backup and per-record sync are the same server and the same
+   * sign-in. They were on separate screens with different names, and a user
+   * who found one had no reason to suppose the other existed. */
+  const benchCloudWithSync = /VIEWS\.sync[\s\S]{0,3000}?\$\{cloudCard\(\)\}/.test(app);
+  const zeroCloudWithSync = /more==='sync'[\s\S]{0,1400}?<CloudBackupCard/.test(zero);
+  ok(benchCloudWithSync && zeroCloudWithSync,
+     'cloud backup sits on the cloud sync screen in both apps'
+     + (benchCloudWithSync && zeroCloudWithSync ? ''
+        : ` (bench ${benchCloudWithSync ? 'does' : 'does NOT'}, zero ${zeroCloudWithSync ? 'does' : 'does NOT'})`),
+     'one account, one server, one destination — splitting them is what made '
+     + 'the backup undiscoverable in the first place');
 }
 
 /* ─────────────────────────────────────────────── safe areas on notched phones */

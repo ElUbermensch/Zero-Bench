@@ -51,7 +51,8 @@ const grabComponent = (name) => {
   throw new Error(`test-geometry: could not read the body of ${name}`);
 };
 const NAMES = ['pointInShape', 'shapeBoundR', 'rayHit', 'rayToEdge', 'zoneInnerR', 'zoneMidR',
-               'xyToZone', 'synthRingsFromZones', 'ringMidR', 'clockToXY', 'shotXY'];
+               'xyToZone', 'synthRingsFromZones', 'ringMidR', 'clockToXY', 'shotXY',
+               'scaleShape', 'scaleDiam', 'scaleTargetToRange', 'transcribedEquivalent', 'xyToRing'];
 const G = new Function(NAMES.map(grab).join('\n') + `\nreturn {${NAMES.join(',')}};`)();
 const mk = (zones) => ({ zones, rings: G.synthRingsFromZones(zones) });
 
@@ -660,6 +661,129 @@ section('the components that read and write these numbers');
      'doSave refuses to invent one');
   ok((entry.match(/disabled=\{!canLog\}/g) || []).length === 2,
      'and both Log buttons are dead until the shot is placed');
+}
+
+/* ====================================== reductions, against the printed library */
+/* The rescaler claims to be NRA's own rule rather than an approximation of it:
+ *
+ *     reduced  =  k · original  −  (1 − k) · bullet
+ *
+ * That claim is checkable, because the library is transcribed from the rule
+ * books and several of its targets are published reductions of others in it.
+ * If the rule is right, it reproduces them to the thousandth of an inch. If it
+ * is ever wrong, this fails with the target and the ring that broke it -- and
+ * a silently wrong reduction is a target that scores every string on it wrong.
+ */
+section('the reduction rule reproduces the transcribed targets');
+{
+  /* Five of these six are EXACT at the nominal bullet. MR-52 → MR-31 is out
+   * by 0.005" on every ring, and the offset is dead constant across them --
+   * so it is the published table rounding, implying a 0.29" bullet, and not a
+   * different rule.
+   *
+   * That 0.005" is precisely why transcribed stays transcribed. The rule is
+   * right, and it is still not the book. */
+  const CASES = [
+    ['sr',    'sr1',   0.30, 0.0005],
+    ['mr52',  'mr31',  0.30, 0.0055],   // rounding in the printed table: implies .29
+    ['mr63',  'mr31',  0.30, 0.0005],
+    ['mr1',   'mr31',  0.30, 0.0005],
+    ['mr1',   'mr63',  0.30, 0.0005],
+    ['a25',   'a23',   0.22, 0.0005],
+  ];
+  for (const [parentId, childId, bullet, tol] of CASES) {
+    const parent = BUILTINS[parentId], child = BUILTINS[childId];
+    if (!parent || !child) { ok(false, `library still has ${parentId} and ${childId}`); continue; }
+    const made = G.scaleTargetToRange(parent, parent.yards, child.yards, bullet);
+    const worst = made && Math.max(...made.rings.map((r, i) => Math.abs(r.diam - child.rings[i].diam)));
+    ok(!!made && worst <= tol,
+       `${parent.name} ${parent.yards}yd → ${child.name} ${child.yards}yd with a ${bullet}" bullet`
+       + ` (off by ${made ? worst.toFixed(4) : '—'}", allowed ${tol}")`);
+  }
+
+  /* The correction is the whole difference between this and a naive scaling,
+   * so prove a naive scaling would have been wrong rather than assuming it. */
+  const naive = G.scaleTargetToRange(BUILTINS.sr, 200, 100, 0);
+  ok(naive.rings.every((r, i) => Math.abs(r.diam - BUILTINS.sr1.rings[i].diam - 0.15) < 1e-9),
+     'and without it every SR-1 ring comes out 0.150" too big — which is (1−k)·0.30');
+}
+
+section('rescaling to a distance the library does not cover');
+{
+  /* The case this exists for: an SR reduced for a 25-yard range, which NRA
+   * does not publish and the library therefore does not have. */
+  const SR = BUILTINS.sr, k = 25 / 200;
+  const red = G.scaleTargetToRange(SR, 200, 25, 0);      // plain angular
+
+  ok(!!red && red.rings.length === SR.rings.length,
+     `the SR scaled to 25 yd keeps all ${SR.rings.length} rings`);
+  ok(red.rings.every((r, i) => Math.abs(r.diam - SR.rings[i].diam * k) < 1e-6),
+     'with every ring the original times the distance ratio');
+  ok(red.rings.every((r, i) => r.score === SR.rings[i].score),
+     'and its own score label carried across');
+  ok(red.yards === 25 && red.scaledFrom && red.scaledFrom.yards === 200 && !red.builtin,
+     'the result knows what it came from and does not claim to be built in');
+
+  /* The point of the exercise, stated the way a shooter would notice it: a
+   * shot the same number of minutes off centre scores the same ring. */
+  const moaIn = (moa, yards) => (moa / 60) * (Math.PI / 180) * (yards * 36);
+  ok([0.5, 1.5, 2.5, 4, 6, 9].every(moa =>
+       G.xyToRing(SR, moaIn(moa, 200), 0).ring === G.xyToRing(red, moaIn(moa, 25), 0).ring),
+     'a shot the same minutes off centre scores the same ring on both');
+
+  const back = G.scaleTargetToRange(red, 25, 200, 0);
+  ok(back.rings.every((r, i) => Math.abs(r.diam - SR.rings[i].diam) < 0.002),
+     'and scaling back up returns the original diameters');
+
+  /* A .30 hole is wider than the X-ring of an SR reduced to 25 yards. Saying
+   * so is the only honest answer; producing a zero or negative ring is not. */
+  ok(G.scaleTargetToRange(SR, 200, 25, 0.30) === null,
+     'a reduction that would leave a ring narrower than the bullet is refused, not clamped');
+
+  ok(G.scaleTargetToRange(SR, 0, 25, 0) === null
+     && G.scaleTargetToRange(SR, 200, 0, 0) === null
+     && G.scaleTargetToRange(SR, 200, NaN, 0) === null,
+     'a zero or missing distance is refused rather than producing Infinity');
+}
+
+section('rescaling carries a zone target with it');
+{
+  /* Offsets and polygon points are the two things a naive scaler forgets, and
+   * both put the zone somewhere the rings are not. */
+  const zoned = { id: 'z', name: 'Z', yards: 100, zones: [
+    { score: '5', color: '#fff', shape: { kind: 'circle', d: 10, cy: 20 } },
+    { score: '3', color: '#aaa', shape: { kind: 'rect', w: 12, h: 8, rx: 1, cx: -6 } },
+    { score: '1', color: '#888', shape: { kind: 'poly', pts: [[0, 0], [8, 0], [8, 6]], cy: -10 } },
+  ] };
+  zoned.rings = G.synthRingsFromZones(zoned.zones);
+  const half = G.scaleTargetToRange(zoned, 100, 50, 0.30);
+
+  ok(half.zones[0].shape.d === 5 && half.zones[0].shape.cy === 10,
+     'a circle zone scales its diameter AND its offset');
+  ok(half.zones[1].shape.w === 6 && half.zones[1].shape.h === 4
+     && half.zones[1].shape.rx === 0.5 && half.zones[1].shape.cx === -3,
+     'a rect scales width, height, corner radius and offset');
+  ok(half.zones[2].shape.pts.every(([x, y], i) => x === zoned.zones[2].shape.pts[i][0] / 2
+                                              && y === zoned.zones[2].shape.pts[i][1] / 2)
+     && half.zones[2].shape.cy === -5,
+     'a polygon scales every point and its offset');
+  ok(half.rings.every((r, i) => Math.abs(r.diam - zoned.rings[i].diam / 2) < 1e-9),
+     'and the synthetic rings are rebuilt from the scaled shapes, not copied');
+  ok(G.xyToZone(zoned, 0, 20).ring === '5' && G.xyToZone(half, 0, 10).ring === '5',
+     'the same angular point hits the same zone on both');
+}
+
+section('the library is offered before the arithmetic is');
+{
+  const lib = Object.values(BUILTINS);
+  const srTo100 = G.scaleTargetToRange(BUILTINS.sr, 200, 100, 0.30);
+  const found = G.transcribedEquivalent(srTo100, lib);
+  ok(found && found.id === 'sr1',
+     `the SR reduced to 100 yd is recognised as SR-1 (${found ? found.name : 'nothing'})`);
+
+  const srTo25 = G.scaleTargetToRange(BUILTINS.sr, 200, 25, 0);
+  ok(G.transcribedEquivalent(srTo25, lib) === null,
+     'and at 25 yd, where the library has nothing, it says so rather than reaching');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

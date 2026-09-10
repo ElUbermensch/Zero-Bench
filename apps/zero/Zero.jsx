@@ -1206,6 +1206,106 @@ function xyToZone(target, x, y) {
 }
 // Bounding-circle rings so ring-based consumers work unchanged. Sorted
 // ascending like real rings; duplicate scores collapse to the smallest.
+/* ── Rescaling a target to a different distance ────────────────────────────
+ *
+ * A reduced target is not simply a smaller one, and the difference is the
+ * bullet. NRA scores a shot by the hole BREAKING the ring, and the hole does
+ * not shrink when the paper does -- so a ring scaled by distance alone scores
+ * looser at the shorter range by exactly the width the bullet gained. The rule
+ * books correct for it:
+ *
+ *     reduced  =  k · original  −  (1 − k) · bullet          k = to / from
+ *
+ * That is not a guess. It reproduces the transcribed library exactly, which is
+ * how it was found: every High Power reduction in here is the parent target
+ * under this rule with a 0.30" bullet, to the thousandth of an inch --
+ *
+ *     SR    200 → SR-1  100   k=1/2   bullet .30   every ring exact
+ *     MR-52 200 → MR-31 100   k=1/2                every ring exact
+ *     MR-63 300 → MR-31 100   k=1/3                every ring exact
+ *     MR-1  600 → MR-31 100   k=1/6                every ring exact
+ *     MR-1  600 → MR-63 300   k=1/2                every ring exact
+ *     A-25  100 → A-23   50   k=1/2   bullet .22   every ring exact  (smallbore)
+ *
+ * -- and it explains the note above BUILTIN_TARGETS, which observed that a
+ * plain scaling reproduces the B-19 as 1.80/3.60/5.40/7.20 where the book says
+ * 1.78/3.58/5.38/7.18. The missing 0.02" is (1 − k) · bullet. The rule was
+ * always there; what was wrong was scaling without it.
+ *
+ * This does NOT make the library computable, and it is not licence to try. The
+ * published tables round, several targets are reductions of parents that are
+ * not in the library, and where a book and a formula disagree the book wins.
+ * Transcribed stays transcribed. This exists for the shooter holding paper the
+ * library does not contain.
+ *
+ * bullet = 0 gives the plain angular scaling, which is the right answer for a
+ * face you printed yourself: identical minutes, no scoring-gauge correction.
+ * ────────────────────────────────────────────────────────────────────────── */
+function scaleShape(shape, k) {
+  const out = { ...shape };
+  /* The offsets scale with everything else. A zone drawn 20" above centre on a
+   * 200-yard target is 2.5" above centre on the 25-yard reduction, and a
+   * scaling that moved the rings without moving the zone would put the shape
+   * off the paper it belongs to. */
+  if (shape.cx) out.cx = shape.cx * k;
+  if (shape.cy) out.cy = shape.cy * k;
+  if (shape.kind === 'circle') out.d = shape.d * k;
+  if (shape.kind === 'rect') { out.w = shape.w * k; out.h = shape.h * k; if (shape.rx) out.rx = shape.rx * k; }
+  if (shape.kind === 'poly') out.pts = shape.pts.map(([x, y]) => [x * k, y * k]);
+  return out;
+}
+
+/* Rounded to the thousandth of an inch, the precision the rule books print and
+ * one place finer than any face is cut. Rounded here rather than at the input
+ * so the ratio stays exact through the multiply and 1.3499999999999999 never
+ * reaches the ring editor. */
+function scaleDiam(d, k, bullet) { return Math.round((k * d - (1 - k) * (bullet || 0)) * 1000) / 1000; }
+
+function scaleTargetToRange(target, fromYards, toYards, bulletDiam) {
+  const from = Number(fromYards), to = Number(toYards);
+  const bullet = Math.max(0, Number(bulletDiam) || 0);
+  if (!(from > 0) || !(to > 0) || !target) return null;
+  const k = to / from;
+  const out = { ...target, yards: to,
+                scaledFrom: { id: target.id, name: target.name, yards: from, bullet } };
+  delete out.builtin;
+  if (Array.isArray(target.zones) && target.zones.length) {
+    /* Shapes scale plainly. The gauge correction is defined for a scoring RING
+     * -- a diameter with an inside and an outside -- and there is no published
+     * meaning for it on an arbitrary silhouette, so inventing one here would be
+     * the exact mistake the note above warns about. */
+    out.zones = target.zones.map(z => ({ ...z, shape: scaleShape(z.shape, k) }));
+    out.rings = synthRingsFromZones(out.zones);
+    return out;
+  }
+  out.rings = (target.rings || []).map(r => ({ ...r, diam: scaleDiam(r.diam, k, bullet) }));
+  /* A reduction can eat a ring alive. An SR taken to 25 yards leaves an
+   * X-ring of 0.113" -- positive, and narrower than the 0.30" hole that would
+   * be scoring it, so every shot near centre breaks it and the ring means
+   * nothing. Refused rather than clamped or quietly emitted: a ring the bullet
+   * cannot fit inside is not a scoring ring, and a target carrying one scores
+   * every string fired on it wrong. A bullet of 0 asks for a plain angular
+   * scale, and then only the impossible case applies. */
+  if (out.rings.some(r => !(r.diam > 0) || (bullet > 0 && r.diam <= bullet))) return null;
+  return out;
+}
+
+/* Does the library already contain this, transcribed?
+ *
+ * Now that the rule is exact this is a real check rather than a fuzzy one: a
+ * computed reduction that matches a printed target matches it to within the
+ * rounding in the published table. A tenth of a tenth of an inch is wide
+ * enough for that and far too narrow for two different faces to collide. */
+function transcribedEquivalent(scaled, library) {
+  if (!scaled || !Array.isArray(scaled.rings) || !scaled.rings.length) return null;
+  return library.find(t => {
+    if (!t.builtin || t.id === scaled.id || !Array.isArray(t.rings)) return false;
+    if (t.yards !== scaled.yards || t.rings.length !== scaled.rings.length) return false;
+    return t.rings.every((r, i) => r.score === scaled.rings[i].score
+                                && Math.abs(r.diam - scaled.rings[i].diam) <= 0.01);
+  }) || null;
+}
+
 function synthRingsFromZones(zones) {
   const seen = new Set();
   return zones
@@ -12828,6 +12928,11 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
     return <AddTargetForm
       onBack={()=>setAdding(false)}
       onSave={t=>{ onSave([...customTargets, t]); setAdding(false); }}
+      /* Everything the picker in Rescale offers, and everything
+         transcribedEquivalent checks a computed reduction against. Deleted
+         built-ins are excluded: a target hidden from the library should not
+         come back as the source of a new one. */
+      library={[...BUILTIN_TARGETS.filter(t => !deletedBuiltins.includes(t.id)), ...customTargets]}
     />;
   }
 
@@ -13912,8 +14017,8 @@ function AddFirearmForm({ initial, onBack, onSave }) {
 }
 
 /* ── Add custom target form with color picker ── */
-function AddTargetForm({ onBack, onSave }) {
-  const [mode, setMode] = useState('rings'); // rings | quick | plate
+function AddTargetForm({ onBack, onSave, library = [] }) {
+  const [mode, setMode] = useState('rings'); // rings | quick | scale | plate
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [rings, setRings] = useState([
@@ -13929,6 +14034,14 @@ function AddTargetForm({ onBack, onSave }) {
   const [qOuter, setQOuter] = useState('');
   const [qCount, setQCount] = useState('5');
   const [qX, setQX] = useState(true);
+  /* Rescale: an existing target, the distance it is drawn for, and the
+   * distance the paper in your hand is meant to be shot at. */
+  const [sSrc, setSSrc] = useState('');
+  const [sFrom, setSFrom] = useState('');
+  const [sTo, setSTo] = useState('');
+  /* .30 by default because that is what every High Power reduction in the
+   * library is built with, and High Power is what most of the library is. */
+  const [sBullet, setSBullet] = useState('0.30');
   // Plate: parametric hit/miss (or point-valued) steel.
   const [pShape, setPShape] = useState('circle'); // circle | square | rect
   const [pW, setPW] = useState(''); const [pH, setPH] = useState('');
@@ -13944,6 +14057,36 @@ function AddTargetForm({ onBack, onSave }) {
     setRings(scores.map((s,i)=>({ score:s, diam:(outer*(i+1)/n).toFixed(2), color: DEFAULT_RING_COLORS[s]||defColors[i]||'#888888' })));
     setError(''); setMode('rings');
   }
+  const scaleSource = library.find(t => t.id === sSrc) || null;
+  const scaled = scaleSource ? scaleTargetToRange(scaleSource, sFrom, sTo, sBullet) : null;
+  const alreadyHave = scaled ? transcribedEquivalent(scaled, library) : null;
+
+  function genScaled() {
+    if (!scaleSource) { setError('Pick a target to rescale.'); return; }
+    const from = parseFloat(sFrom), to = parseFloat(sTo);
+    if (!(from > 0) || !(to > 0)) { setError('Rescaling needs both distances, in yards.'); return; }
+    const t = scaleTargetToRange(scaleSource, from, to, sBullet);
+    if (!t) {
+      setError(`At ${to} yd a ${sBullet}" bullet is wider than the innermost ring of that target — `
+             + 'reduce less, or set the bullet to 0 for a plain angular scale.');
+      return;
+    }
+    const nm = name.trim() || `${scaleSource.name}@${to}`;
+    const ds = desc.trim() || `${scaleSource.name} rescaled for ${to} yd · same angles as ${from} yd`;
+    setName(nm.slice(0, 10)); setDesc(ds);
+    /* A zone target has no ring editor to drop into -- its geometry is shapes,
+     * not diameters -- so it saves straight out. A ring target goes to the
+     * editor, like Quick rings, because a computed reduction is a starting
+     * point and the printed paper is the authority. */
+    if (t.zones && t.zones.length) {
+      setError('');
+      onSave({ ...t, id: uid(), name: nm.slice(0, 10), desc: ds, builtin: false });
+      return;
+    }
+    setRings(t.rings.map(r => ({ score: r.score, diam: String(r.diam), color: r.color || '#888888' })));
+    setError(''); setMode('rings');
+  }
+
   function saveZoneTarget(zones, fallbackName, fallbackDesc) {
     if (!zones.length) { setError('No zones defined.'); return; }
     onSave({
@@ -13996,7 +14139,7 @@ function AddTargetForm({ onBack, onSave }) {
           <div className="form">
             {/* Creation mode */}
             <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-              {[['rings','Rings'],['quick','Quick rings'],['plate','Plate']].map(([m,lbl])=>(
+              {[['rings','Rings'],['quick','Quick rings'],['scale','Rescale'],['plate','Plate']].map(([m,lbl])=>(
                 <button key={m} onClick={()=>{setMode(m);setError('');}} style={{
                   padding:'5px 10px',borderRadius:5,border:'1.5px solid',cursor:'pointer',
                   fontFamily:'var(--fm)',fontSize:10,
@@ -14019,6 +14162,106 @@ function AddTargetForm({ onBack, onSave }) {
                 </label>
                 <button className="badd" onClick={genQuickRings}>generate → edit rings</button>
                 <div style={{fontFamily:'var(--fm)',fontSize:8.5,color:'var(--dim)'}}>Diameters spaced evenly to the outer edge. Adjust any of them in the Rings editor before saving.</div>
+              </div>
+            )}
+
+            {mode==='scale' && (
+              <div style={{background:'var(--surf2)',border:'1px solid var(--bdr)',borderRadius:7,padding:'11px 12px',display:'flex',flexDirection:'column',gap:8}}>
+                <div className="lbl">Rescale a target to another distance</div>
+                <select className="inp" value={sSrc}
+                  onChange={e=>{
+                    const t = library.find(x => x.id === e.target.value);
+                    setSSrc(e.target.value);
+                    /* The source's own distance is the sensible "from", and it
+                       is prefilled rather than assumed: a custom target may
+                       carry no yards at all, and then only the shooter knows. */
+                    setSFrom(t && t.yards ? String(t.yards) : '');
+                    setError('');
+                  }}>
+                  <option value="">pick a target…</option>
+                  {Object.entries(library.reduce((g,t)=>{
+                    const k = t.discipline || (t.builtin ? 'Other' : 'Custom');
+                    (g[k] ||= []).push(t); return g;
+                  }, {})).map(([disc, list]) => (
+                    <optgroup key={disc} label={disc}>
+                      {list.slice().sort((a,b)=>(a.yards||0)-(b.yards||0)).map(t=>(
+                        <option key={t.id} value={t.id}>{t.name}{t.yards?` · ${t.yards} yd`:''}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:7}}>
+                  <input className="inp" type="number" step="1" value={sFrom} onChange={e=>{setSFrom(e.target.value);setError('');}} placeholder='Drawn for (yd)'/>
+                  <input className="inp" type="number" step="1" value={sTo} onChange={e=>{setSTo(e.target.value);setError('');}} placeholder='Shoot it at (yd)'/>
+                </div>
+                <div>
+                  <div className="lbl" style={{marginBottom:5}}>Bullet diameter (scoring gauge)</div>
+                  <div style={{display:'flex',gap:5,alignItems:'center'}}>
+                    <input className="inp" type="number" step="0.001" style={{flex:1}} value={sBullet}
+                      onChange={e=>{setSBullet(e.target.value);setError('');}} placeholder='0.30'/>
+                    {[['0.30','.30'],['0.22','.22'],['0','none']].map(([v,lbl])=>(
+                      <button key={v} onClick={()=>{setSBullet(v);setError('');}} style={{
+                        padding:'7px 9px',borderRadius:5,cursor:'pointer',fontFamily:'var(--fm)',fontSize:10,
+                        border:`1.5px solid ${sBullet===v?'var(--acc)':'var(--bdr)'}`,
+                        background:sBullet===v?'var(--surf)':'transparent',
+                        color:sBullet===v?'var(--acc)':'var(--dim)',
+                      }}>{lbl}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {scaled && (
+                  <>
+                    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+                      <div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:15,color:'var(--acc)',fontWeight:700}}>
+                          ×{(parseFloat(sTo)/parseFloat(sFrom)).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}
+                        </div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>scale</div>
+                      </div>
+                      <div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:15,color:'var(--ink)',fontWeight:700}}>
+                          {scaled.rings.length ? scaled.rings[scaled.rings.length-1].diam.toFixed(2) : '—'}"
+                        </div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>outer ring</div>
+                      </div>
+                      <div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:15,color:'var(--ink)',fontWeight:700}}>
+                          {scaled.rings.length ? scaled.rings[0].diam.toFixed(3) : '—'}"
+                        </div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>innermost</div>
+                      </div>
+                    </div>
+                    {!!scaled.rings.length && (
+                      <TargetPreviewStatic rings={scaled.rings}/>
+                    )}
+                  </>
+                )}
+
+                {alreadyHave && (
+                  <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--acc)',lineHeight:1.6,
+                               border:'1px solid var(--acc)',background:'var(--tint-acc)',borderRadius:5,padding:'8px 10px'}}>
+                    ⚠ The library already has <strong>{alreadyHave.name}</strong> at {alreadyHave.yards} yd, and it
+                    covers the same angles. Use that one — its rings are transcribed from the rule book, and these
+                    are computed.
+                  </div>
+                )}
+
+                <button className="badd" onClick={genScaled}>
+                  {scaled && scaled.zones ? 'create rescaled target' : 'generate → edit rings'}
+                </button>
+                <div style={{fontFamily:'var(--fm)',fontSize:8.5,color:'var(--dim)',lineHeight:1.6}}>
+                  Rings are reduced the way the rule books do it — <strong style={{color:'var(--ink)'}}>k × original − (1−k) × bullet</strong>,
+                  where k is the ratio of the distances. The correction is there because a shot is scored on the hole
+                  breaking the ring and the hole does not shrink with the paper. It reproduces every High Power
+                  reduction in the library exactly: SR → SR-1, MR-1 → MR-31, MR-63 → MR-31, all to the thousandth.
+                  <div style={{marginTop:6}}>
+                    Set the bullet to <strong style={{color:'var(--ink)'}}>none</strong> for a plain angular scale —
+                    identical minutes, no gauge correction — which is what you want for a face you printed yourself.
+                    Either way these numbers are computed: if you are holding an official reduced target, check them
+                    against the paper before you save.
+                  </div>
+                </div>
               </div>
             )}
 

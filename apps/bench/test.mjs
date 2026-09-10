@@ -1779,12 +1779,26 @@ section('installable and offline');
      `Bench's worker is confined to /bench/ (${scope})`);
 
   const errsBefore = errors.length;
+  /* ABORTED, not merely emulated-offline.
+   *
+   * This assertion passed for months on a build that failed it, because
+   * `ctx.setOffline(true)` does not stop Chromium reaching loopback on every
+   * platform: the request got through to the harness and came back an honest
+   * 404. A 404 is a RESOLVED response, so the worker's `.catch(...)` fallback
+   * -- the thing actually under test -- never ran. On a platform where the
+   * fetch does reject, the same build served Bench's shell for Zero's URL.
+   *
+   * Aborting the request makes it reject everywhere, which is what a phone
+   * with no signal does, and makes the outcome the same on every machine. */
+  await ctx.route('**/index.html', route =>
+    route.request().url().includes('/bench/') ? route.continue() : route.abort());
   const strayed = await page.evaluate(async () => {
     try {
       const r = await fetch('/index.html');           // Zero's territory
       return r.ok ? 'body:' + (await r.text()).slice(0, 300) : `status:${r.status}`;
     } catch (e) { return 'network-error'; }
   });
+  await ctx.unroute('**/index.html');
   /* What must NOT come back is Bench's own page.
    *
    * The first version of this asserted `strayed === 'network-error'` on the
@@ -1801,12 +1815,18 @@ section('installable and offline');
   const servedBench = strayed.startsWith('body:') && /id="view"|Bench/.test(strayed);
   ok(!servedBench,
      `...so the root is not served out of Bench's cache (${strayed.slice(0, 60)})`);
-  // That probe deliberately fetches with the network off, and the browser logs
-  // the failed load. Drop exactly those entries rather than muting the hygiene
-  // check, which would then miss a real error raised anywhere else.
+  /* And say what SHOULD come back, so a future change that makes this pass by
+     returning something else entirely is not mistaken for the fix. */
+  ok(strayed === 'network-error',
+     `...the request reaches the network and fails there, as it must (${strayed.slice(0, 40)})`);
+  // That probe deliberately fails a load, and the browser logs it. Drop exactly
+  // those entries -- the splice is bounded to the errors raised BY the probe --
+  // rather than muting the hygiene check, which would then miss a real error
+  // raised anywhere else. ERR_FAILED is what an aborted request logs; the other
+  // two are what the emulated-offline and 404 paths logged before it.
   errors.splice(errsBefore, errors.length - errsBefore,
     ...errors.slice(errsBefore).filter(e =>
-      !/ERR_INTERNET_DISCONNECTED|status of 404/.test(e)));
+      !/ERR_INTERNET_DISCONNECTED|ERR_FAILED|status of 404/.test(e)));
   await shot('08-offline');
   await ctx.setOffline(false);
 }

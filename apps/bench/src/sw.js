@@ -52,17 +52,39 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+/* This worker's own directory, taken from where it was served rather than
+ * hardcoded, so moving the app moves the guard with it. */
+const HERE = new URL('./', self.location).pathname;
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
-  /* Bench is served from /bench/, so this worker's scope is /bench/ and it is
-   * not asked about anything above it. The guard that used to live here --
-   * "leave the other app's directory alone" -- moved to Zero's worker when the
-   * two swapped places, because it belongs to whichever app sits at the root.
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== location.origin) return;
+  /* Leave everything outside /bench/ to the network.
    *
-   * Nothing replaces it here. A scoped worker physically cannot answer for a
-   * sibling directory, and a guard against something that cannot happen reads
-   * as though it can. */
+   * This guard was removed once, on the reasoning that "a scoped worker
+   * physically cannot answer for a sibling directory". That is wrong, and it
+   * is wrong in the way that matters: **scope decides which CLIENTS a worker
+   * controls, not which request URLs it is asked about.** Once /bench/index.html
+   * is a controlled client, EVERY fetch that document makes arrives here --
+   * including one for /index.html, which is Zero's.
+   *
+   * On its own that would be harmless, because the cache lookup below misses
+   * and the request goes to the network. What makes it a bug is the `.catch`
+   * at the end: offline, `fetch(req)` REJECTS, and the fallback hands back
+   * Bench's own shell. A phone with no signal that asks for Zero is shown
+   * Bench -- indistinguishable, on a home-screen icon, from Zero having been
+   * replaced by the wrong app.
+   *
+   * Zero's worker has carried the mirror image of this guard all along
+   * (`/(^|\/)(bench|admin)(\/|$)/`). Only this side lost it.
+   *
+   * Why it hid: with the network merely emulated-offline, Chromium on some
+   * platforms still reaches loopback, so the test harness answered 404 -- a
+   * resolved response, not a rejection, so the `.catch` never ran and the
+   * assertion passed. It reproduces deterministically by ABORTING the request
+   * instead, which is what the suite does now. */
+  if (!url.pathname.startsWith(HERE)) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
       // Only cache real, complete same-origin responses.

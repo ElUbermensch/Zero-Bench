@@ -40,11 +40,12 @@ const mock = await startMock({ ttlSec: 3600 });
 await buildZero({ url: mock.url, anonKey: 'anon-key', outdir: 'dist-cross', single: false });
 execFileSync(process.execPath, [path.join(ROOT, 'apps/bench/build.mjs')], {
   stdio: 'pipe',
-  env: { ...process.env, SUPABASE_URL: mock.url, SUPABASE_ANON_KEY: 'anon-key' },
+  env: { ...process.env, SUPABASE_URL: mock.url, SUPABASE_ANON_KEY: 'anon-key',
+         BENCH_OUT_DIR: 'dist-cross' },
 });
 
 const ZERO_DIR = path.join(ROOT, 'apps/zero/dist-cross');
-const BENCH_DIR = path.join(ROOT, 'apps/bench/dist');
+const BENCH_DIR = path.join(ROOT, 'apps/bench/dist-cross');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json',
   '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2' };

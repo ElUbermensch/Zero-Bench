@@ -18,6 +18,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve('dist');
+
+/* The build about to be served must not point at a loopback backend.
+ *
+ * test-sync.mjs and tools/test-cross-app.mjs each build Bench against a mock
+ * whose port dies with the run that opened it. They build into their own
+ * directories now; while they did not, they left `dist/` aimed at a closed
+ * port, and the next run of THIS file failed on whichever assertion happened
+ * to touch the network first -- a thirty-second locator timeout in
+ * `cartridges`, or the run-wide error check six hundred assertions later.
+ * Neither of those names the cause, and both look like flakiness: the suite
+ * passed immediately after `npm run build` and failed on every run after that,
+ * so the same commit tested green or red depending on what had run before it.
+ *
+ * Fail here instead, before the browser starts, and say which. */
+{
+  const built = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const m = built.match(/const SHARED_SUPABASE = (\{[^}]*\});/);
+  const url = m ? (JSON.parse(m[1]).url || '') : '';
+  if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(url)) {
+    console.error(`\n  dist/ is built against ${url} -- a mock backend that is not running.`);
+    console.error('  Something built a mock-configured Bench over the shipped dist/.');
+    console.error('  Run `npm run build`, then re-run this suite.\n');
+    process.exit(1);
+  }
+}
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json',
   '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 

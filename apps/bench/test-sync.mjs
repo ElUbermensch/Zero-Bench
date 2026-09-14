@@ -25,13 +25,18 @@ const mock = await startMock({ ttlSec: 3600 });
 
 /* Build the way a deploy builds, with the backend baked in — pointed at this
  * run's mock. Bench hides the sync screen entirely when no backend is
- * configured, so testing against an unconfigured build would test nothing. */
+ * configured, so testing against an unconfigured build would test nothing.
+ *
+ * Into dist-sync/, never dist/. The mock dies with this process, so a build of
+ * it written over the shipped dist/ leaves every later run in the tree booting
+ * against a closed port. */
 execFileSync(process.execPath, [path.resolve('build.mjs')], {
   stdio: 'inherit',
-  env: { ...process.env, SUPABASE_URL: mock.url, SUPABASE_ANON_KEY: 'anon-key' },
+  env: { ...process.env, SUPABASE_URL: mock.url, SUPABASE_ANON_KEY: 'anon-key',
+         BENCH_OUT_DIR: 'dist-sync' },
 });
 
-const ROOT = path.resolve('dist');
+const ROOT = path.resolve('dist-sync');
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split('?')[0]);
   if (p === '/' || p === '') p = '/index.html';

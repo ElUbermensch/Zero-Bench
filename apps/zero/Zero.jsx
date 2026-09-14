@@ -2166,6 +2166,7 @@ function dopeCardText(byFirearm) {
   const today = todayLocal();
   lines.push(`ZERO — DOPE CARD · ${today}`);
   lines.push(`E/W in MOA · up/right + · ${MOA_PER_CLICK} MOA/click`);
+  lines.push('dist  position   load             zero');
   for (const [fname, locs] of Object.entries(byFirearm)) {
     lines.push('');
     lines.push(`== ${fname} ==`);
@@ -2174,8 +2175,13 @@ function dopeCardText(byFirearm) {
       for (const cell of cs) {
         const h = cell.sessions[0];
         const zero = h.noDope ? 'no dial logged' : `E${fmtMoaSigned(h.elev)}  W${fmtMoaSigned(h.wind)}`;
-        const meta = [h.date, h.ammo].filter(Boolean).join(' · ');
-        lines.push(`${String(cell.yards).padStart(4)}yd  ${cell.position.padEnd(12).slice(0,12)} ${zero}${meta ? `   (${meta})` : ''}`);
+        /* The load is a column rather than a parenthetical: it is part of what
+           identifies the row now, and a shooter reading this at the line scans
+           down distance and load, not through a comment at the end. */
+        const load = (cell.loadLabel || '').replace(/^No load recorded$/, '—');
+        const meta = [h.date, h.ammo && h.ammo !== cell.loadLabel ? h.ammo : ''].filter(Boolean).join(' · ');
+        lines.push(`${String(cell.yards).padStart(4)}yd  ${cell.position.padEnd(10).slice(0,10)} `
+          + `${load.padEnd(16).slice(0,16)} ${zero}${meta ? `   (${meta})` : ''}`);
       }
     }
   }
@@ -2451,7 +2457,16 @@ select.inp{cursor:pointer}
 .et{font-family:var(--fh);font-size:16px;font-weight:700;color:var(--ink);margin-bottom:6px}
 .es{font-size:13px;line-height:1.6}
 .tcard{background:var(--surf);border:1px solid var(--bdr);border-radius:9px;margin:7px 13px;overflow:hidden}
-.tch{padding:11px 13px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+/* gap, and top alignment.
+   justify-content:space-between puts the LAST item on the right edge and
+   nothing between them: with a flex:1 title column that wraps, the meta line
+   grew until it was flush against the edit button -- measured at zero pixels
+   of separation on a load whose name and batch serial fill the row, which is
+   every load imported from Bench. A gap cannot be eaten by a long word.
+   align-items:center was centring a 24px button stack against a three-line
+   title, which parked "edit" beside the second line instead of the name it
+   edits. */
+.tch{padding:11px 13px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;cursor:pointer}
 .tcn{font-family:var(--fh);font-size:15px;font-weight:700}
 .tcd{font-family:var(--fm);font-size:9px;color:var(--dim)}
 .rt{width:100%;border-collapse:collapse}
@@ -5170,21 +5185,36 @@ function BatchFacts({ a }) {
   ].filter(Boolean);
 
   return (
-    <div style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid var(--bdr)' }}>
+    /* The card's own gutter, which this block did not have.
+     *
+     * .tcard has no padding — every child brings its own, and .tch brings
+     * 13px. This one brought none, so the recipe line, the figures and the
+     * warnings all started hard against the card border while the title above
+     * them sat 13px in. On a screenshot it reads as two cards fused together.
+     * The rule stays full-bleed, which is what a rule is for; the content
+     * inside it lines up with the content above it. */
+    <div style={{ marginTop: 7, paddingTop: 8, paddingLeft: 13, paddingRight: 13,
+                  paddingBottom: 11, borderTop: '1px solid var(--bdr)' }}>
       <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--dim)', marginBottom: 6 }}>
         {[b.powderName && `${b.chargeActualGr ?? b.chargeGr ?? '?'}gr ${b.powderName}`,
           b.primerName, b.coalIn && `COAL ${b.coalIn}"`, b.cbtoIn && `CBTO ${b.cbtoIn}"`]
           .filter(Boolean).join(' · ') || 'No recipe detail on this batch.'}
       </div>
       {cells.length > 0 && (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        /* 18px between figures, not 10. At 10 the gap between two cells was
+           smaller than the gap inside one — "0.182 BC" and "57 rds" read as a
+           single run of text with a row of labels under it, rather than as two
+           figures each with its own name. The label also gets a pixel of air
+           and the same 9px body size the rest of the card uses; 7.5px
+           uppercase was small enough to be furniture. */
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', rowGap: 10 }}>
           {cells.map(([lab, v, u]) => (
             <div key={lab}>
-              <div style={{ fontFamily: 'var(--fm)', fontSize: 12, fontWeight: 700, color: 'var(--acc)' }}>
-                {v}<span style={{ fontSize: 8, color: 'var(--dim)', fontWeight: 400 }}> {u}</span>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 13, fontWeight: 700, color: 'var(--acc)', lineHeight: 1.15 }}>
+                {v}<span style={{ fontSize: 8.5, color: 'var(--dim)', fontWeight: 400 }}> {u}</span>
               </div>
-              <div style={{ fontFamily: 'var(--fm)', fontSize: 7.5, color: 'var(--dim)',
-                letterSpacing: '.08em', textTransform: 'uppercase' }}>{lab}</div>
+              <div style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--dim)',
+                letterSpacing: '.1em', textTransform: 'uppercase', marginTop: 3 }}>{lab}</div>
             </div>
           ))}
         </div>
@@ -8031,8 +8061,8 @@ function App() {
               )}
             </>
           )}
-          {tab==='analytics' && <><LeaderboardCard core={core} /><AnalyticsTab sessions={sessions} getTarget={getTarget} firearms={firearms} matches={matches} /></>}
-          {tab==='dope' && <DopeTab sessions={sessions} firearms={firearms} getTarget={getTarget} />}
+          {tab==='analytics' && <><LeaderboardCard core={core} /><AnalyticsTab sessions={sessions} getTarget={getTarget} firearms={firearms} ammo={ammo} matches={matches} /></>}
+          {tab==='dope' && <DopeTab sessions={sessions} firearms={firearms} ammo={ammo} getTarget={getTarget} />}
 
           {/* ── More ──────────────────────────────────────────────────────
               A menu of submenus, the same shape Bench uses. Firearms and
@@ -9255,17 +9285,23 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
 
   if (addingShot) {
     const last = shots[shots.length-1];
-    // First shot of a session: pre-fill the sight setting from the confirmed
-    // zero for this exact firearm × location × distance × position slot (same
-    // key the DOPE tab uses), so the shooter starts from their known dial
-    // instead of 0/0. Once any shot exists, the in-session last shot wins —
-    // DOPE never overrides live adjustments.
+    /* First shot of a session: pre-fill the sight setting from the confirmed
+       zero for this exact firearm × location × distance × position × LOAD slot
+       (the same key the DOPE tab groups by), so the shooter starts from their
+       known dial instead of 0/0. Once any shot exists, the in-session last
+       shot wins — DOPE never overrides live adjustments.
+
+       The load is in the key because two loads out of one rifle at one
+       distance are two different come-ups: 77gr and 80.5gr at 600 differ by
+       more than the dial resolution, and pre-filling one from the other starts
+       the string on a number the shooter has to discover is wrong. */
     const dopeZero = !last && sessions
       ? findConfirmedZero(sessions, {
           rifleId: session.rifleId,
           location: session.rangeLocation,
           yards: session.rangeYards,
           position: session.position,
+          ammoId: session.ammoId,
         }, session.id)
       : null;
     return <ShotEntry
@@ -11082,6 +11118,57 @@ const POSITION_COLORS = {
 };
 function positionColor(p) { return POSITION_COLORS[p] || 'var(--pos-unspecified)'; }
 
+/* A series is a POSITION AT A DISTANCE, and until now only the position part
+ * of that was in the colour: prone at 600 and prone at 100 were the same green
+ * told apart by a dash pattern, which is a weak signal on a 2px line on a
+ * phone, and no signal at all once three distances are on the chart.
+ *
+ * So the hue stays the position -- that is the fact worth learning once and
+ * reading everywhere -- and the distance moves it along a light/dark ramp.
+ * Every bucket ends up its own colour, and two buckets of the same position
+ * still obviously belong together, which a flat categorical palette would have
+ * thrown away.
+ *
+ * Mixed against the theme's own INK rather than computed in JS, so the ramp
+ * re-derives itself in day and night without this function knowing which one
+ * it is in -- and because ink is by definition the far end from the ground,
+ * every step moves AWAY from what it is drawn on and contrast only improves
+ * along the ramp.
+ *
+ * Toward ink in BOTH themes, which is not symmetric and is the point. In day
+ * the position colours are already dark on paper and there is almost no room
+ * below them: a step mixed toward the ground measured 1.9:1 against the panel,
+ * a line you cannot see. In night there is no room above. The one direction
+ * that is safe in both is toward the ink, whichever end of the scale that is.
+ *
+ * THREE steps, not five. Three points spaced along one hue are as many as stay
+ * told apart -- a fourth lands within about twenty units of RGB of its
+ * neighbour, which on a 2px line is the same line twice. Measured on the shipped
+ * spacing, in day: 38 units between the closest pair, at 5.5 / 8.6 / 12.9
+ * against the panel; in night 86 units, at 6.7 / 9.3 / 12.8. A position with a
+ * fourth distance cycles the colour and is separated by its dash instead, which
+ * is where the chart was before this and is a fair place to degrade to.
+ *
+ * And the colour belongs on the MARK, never on the label: the legend swatch,
+ * the line and a card's dot carry it, every word stays var(--ink). Marks answer
+ * to the 3:1 non-text threshold rather than 4.5:1, which is what makes a ramp
+ * possible at all -- and no amount of shading can make a label hard to read
+ * when no label is shaded.
+ *
+ * The dash pattern stays. It is redundant with the colour now, which is the
+ * point: it is what the chart still has for a shooter who cannot tell the
+ * greens apart, and it carries the sixth distance when the ramp runs out. */
+const BUCKET_RAMP = [
+  (c) => c,
+  (c) => `color-mix(in oklab, ${c} 62%, var(--ink))`,
+  (c) => `color-mix(in oklab, ${c} 22%, var(--ink))`,
+];
+function bucketColor(position, distanceIdx) {
+  const base = positionColor(position);
+  const step = BUCKET_RAMP[Math.max(0, distanceIdx) % BUCKET_RAMP.length];
+  return step(base);
+}
+
 // Course-of-fire ordering (stability order), not alphabetical: prone → sitting →
 // kneeling → standing for rifle, then pistol holds, then rests, unspecified last.
 const POSITION_ORDER = ['Prone','Sitting','Kneeling','Standing','Two-hand','Strong-hand','Weak-hand','Bench','Unsupported','Unspecified'];
@@ -11134,15 +11221,23 @@ function commonestLabel(counts) {
  * Returns null if there's no prior match, or the match has nothing dialed
  * (all-zero elev/wind — "no dope logged") worth carrying forward.
  */
-function findConfirmedZero(sessions, { rifleId, location, yards, position }, excludeSessionId) {
-  const loc = locationKey(location);
-  const pos = (position||'').trim() || 'Unspecified';
+/* The slot a confirmed zero belongs to, and the ONLY place its shape is
+ * written down. The DOPE tab groups by it and the shot screen pre-fills from
+ * it; when the two disagreed about what counts as the same slot, the number on
+ * the DOPE card and the number the app put in the box were different numbers
+ * for the same question. */
+function zeroSlotKey({ rifleId, location, yards, position, ammoId }) {
+  return [rifleId || '', locationKey(location), Number(yards) || 0,
+          (position || '').trim() || 'Unspecified', ammoId || ''].join('|');
+}
+
+function findConfirmedZero(sessions, { rifleId, location, yards, position, ammoId }, excludeSessionId) {
+  const want = zeroSlotKey({ rifleId, location, yards, position, ammoId });
   const matches = (sessions||[])
     .filter(s => s.id !== excludeSessionId)
-    .filter(s => (s.rifleId||'') === (rifleId||''))
-    .filter(s => locationKey(s.rangeLocation) === loc)
-    .filter(s => (Number(s.rangeYards)||0) === (Number(yards)||0))
-    .filter(s => ((s.position||'').trim() || 'Unspecified') === pos)
+    .filter(s => zeroSlotKey({ rifleId: s.rifleId, location: s.rangeLocation,
+                               yards: s.rangeYards, position: s.position,
+                               ammoId: s.ammoId }) === want)
     .filter(s => (s.shots?.length||0) >= 1)
     .sort((a,b) => (b.ts||0) - (a.ts||0)); // newest first
   if (!matches.length) return null;
@@ -11829,10 +11924,26 @@ function SolverTab({ sessions, firearms, ammo }) {
   );
 }
 
-function DopeTab({ sessions, firearms, getTarget }) {
+function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
   const [open, setOpen] = useState(() => new Set());
   const [cardText, setCardText] = useState(null);
   const firearmName = id => (firearms.find(f=>f.id===id)?.name) || (id ? 'Unknown firearm' : 'Unspecified firearm');
+  /* A load's own name if it is still in the library, the serial if it came
+     from Bench and the record has since gone, and 'No load recorded' for a
+     session that never named one — which is a real slot with a real zero in
+     it, not a bucket to hide. */
+  const loadName = (id) => {
+    if (!id) return 'No load recorded';
+    const a = ammo.find(x => x.id === id);
+    if (!a) return 'Unknown load';
+    return (a.name || '').trim() || (a.batchSerial ? 'Batch ' + a.batchSerial : 'Unnamed load');
+  };
+  const loadSub = (id) => {
+    const a = ammo.find(x => x.id === id);
+    if (!a) return '';
+    return [a.bullet, a.charge ? a.charge + 'gr' : '', a.powder,
+            a.batchSerial ? '⛓ ' + a.batchSerial : ''].filter(Boolean).join(' · ');
+  };
 
   // One entry per session that has at least one shot.
   const entries = sessions
@@ -11848,7 +11959,7 @@ function DopeTab({ sessions, firearms, getTarget }) {
       const a = (rec.length>=2) ? analytics(s.shots, tgt, s.rangeYards) : null;
       const ammo = (s.ammoDesc||'').trim() || (s.ammoLot ? `lot ${s.ammoLot}` : '');
       return {
-        sid: s.id, rifleId: s.rifleId||'',
+        sid: s.id, rifleId: s.rifleId||'', ammoId: s.ammoId||'',
         /* Same folding as the solver and findConfirmedZero, so "what the DOPE
            tab shows for this slot", "what the trajectory fits" and "what a new
            session pre-fills with" cannot disagree over a capital letter. */
@@ -11861,13 +11972,30 @@ function DopeTab({ sessions, firearms, getTarget }) {
       };
     });
 
-  // Group: firearm → location → distance × position. A consistent cant differs
-  // by position (offhand canted one way, sitting often the other), so each
-  // position is its own zero slot — same distance, different hold, different zero.
+  /* Group: firearm → location → distance × position × LOAD.
+   *
+   * A consistent cant differs by position (offhand canted one way, sitting
+   * often the other), so each position is its own zero slot — same distance,
+   * different hold, different zero. The load is in the key for a blunter
+   * reason: it is a different bullet leaving at a different speed, so it is a
+   * different trajectory and a different come-up. 77gr SMK and 80.5gr at 600
+   * are far enough apart to matter at the dial, and folding them together
+   * produced one slot whose "confirmed zero" was whichever of the two was
+   * fired last — a number that was right for one load, wrong for the other,
+   * and labelled as though it were right for both.
+   *
+   * A session with no load recorded keeps its own slot rather than joining the
+   * others: an unknown load is not the same load, and quietly pooling it would
+   * reintroduce exactly the mixing this key exists to stop.
+   *
+   * The key is built by zeroSlotKey, which findConfirmedZero also uses, so the
+   * card and the pre-fill cannot drift apart again. */
   const cells = {};
   entries.forEach(e => {
-    const key = `${e.rifleId}|${e.locKey}|${e.yards}|${e.position}`;
-    (cells[key] ||= { rifleId:e.rifleId, locKey:e.locKey, yards:e.yards, position:e.position, sessions:[] }).sessions.push(e);
+    const key = zeroSlotKey({ rifleId: e.rifleId, location: e.location,
+                              yards: e.yards, position: e.position, ammoId: e.ammoId });
+    (cells[key] ||= { rifleId:e.rifleId, locKey:e.locKey, yards:e.yards,
+                      position:e.position, ammoId:e.ammoId, sessions:[] }).sessions.push(e);
   });
   Object.values(cells).forEach(c => c.sessions.sort((a,b)=>b.ts-a.ts)); // newest first
 
@@ -11886,8 +12014,10 @@ function DopeTab({ sessions, firearms, getTarget }) {
 
   // Order cells: firearm name, then location, then distance descending.
   const ordered = Object.entries(cells)
-    .map(([key,c]) => ({ key, ...c, fname: firearmName(c.rifleId) }))
-    .sort((a,b)=> a.fname.localeCompare(b.fname) || a.locKey.localeCompare(b.locKey) || b.yards - a.yards || posRank(a.position) - posRank(b.position));
+    .map(([key,c]) => ({ key, ...c, fname: firearmName(c.rifleId), loadLabel: loadName(c.ammoId) }))
+    .sort((a,b)=> a.fname.localeCompare(b.fname) || a.locKey.localeCompare(b.locKey)
+               || b.yards - a.yards || posRank(a.position) - posRank(b.position)
+               || loadName(a.ammoId).localeCompare(loadName(b.ammoId)));
 
   // Re-group ordered cells under firearm → location headers for rendering.
   const byFirearm = {};
@@ -11899,7 +12029,7 @@ function DopeTab({ sessions, firearms, getTarget }) {
   if (!ordered.length) return (
     <div className="empty">
       <div className="et">No DOPE yet</div>
-      <div className="es">Log a session with a firearm, range location, distance, and position — your confirmed zero (last shot's sight setting) lands here, split by position so a canted offhand zero stays separate from sitting or prone.</div>
+      <div className="es">Log a session with a firearm, range location, distance, position and load — your confirmed zero (last shot's sight setting) lands here, split by position so a canted offhand zero stays separate from sitting or prone, and by load so two bullets out of one rifle keep their own come-ups.</div>
     </div>
   );
 
@@ -11954,13 +12084,23 @@ function DopeTab({ sessions, firearms, getTarget }) {
                       style={{width:'100%',background:'none',border:'none',padding:'10px 12px',display:'flex',alignItems:'center',gap:10,cursor:history.length?'pointer':'default',textAlign:'left'}}>
                       <span style={{fontFamily:'var(--fm)',fontSize:14,fontWeight:700,color:'var(--ink)',minWidth:54}}>{cell.yards}<span style={{fontSize:9,color:'var(--dim)'}}> yd</span></span>
                       <span style={{flex:1}}>
-                        <div style={{fontFamily:'var(--fm)',fontSize:9,letterSpacing:'.06em',textTransform:'uppercase',color:positionColor(cell.position),fontWeight:700,marginBottom:1}}>{cell.position}</div>
+                        <div style={{fontFamily:'var(--fm)',fontSize:9,letterSpacing:'.06em',textTransform:'uppercase',color:positionColor(cell.position),fontWeight:700,marginBottom:1}}>
+                          {cell.position}
+                          <span style={{color:'var(--dim)',fontWeight:400,letterSpacing:'.04em',textTransform:'none'}}>
+                            {' · '}{loadName(cell.ammoId)}
+                          </span>
+                        </div>
                         <Zero e={head} />
+                        {loadSub(cell.ammoId) && (
+                          <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--faint, var(--dim))',marginTop:2}}>
+                            {loadSub(cell.ammoId)}
+                          </div>
+                        )}
                         <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',marginTop:2}}>
                           {head.date}
                           {head.temp && ` · ${head.temp}°`}
                           {head.lighting && head.lighting!=='Clear' && ` · ${head.lighting}`}
-                          {head.ammo && ` · ${head.ammo}`}
+                          {head.ammo && head.ammo !== loadName(cell.ammoId) && ` · ${head.ammo}`}
                           {head.mrMoa!=null && ` · ${head.mrMoa.toFixed(2)} MOA grp`}
                           {head.moved && ' · adjusted in session'}
                         </div>
@@ -11982,7 +12122,7 @@ function DopeTab({ sessions, firearms, getTarget }) {
                         <span style={{flex:1}}>
                           <Zero e={h} faded />
                           <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',marginTop:2}}>
-                            {h.date}{h.temp && ` · ${h.temp}°`}{h.ammo && ` · ${h.ammo}`}{h.mrMoa!=null && ` · ${h.mrMoa.toFixed(2)} MOA grp`}
+                            {h.date}{h.temp && ` · ${h.temp}°`}{h.ammo && h.ammo !== loadName(cell.ammoId) && ` · ${h.ammo}`}{h.mrMoa!=null && ` · ${h.mrMoa.toFixed(2)} MOA grp`}
                           </div>
                         </span>
                       </div>
@@ -12370,9 +12510,20 @@ function LeaderboardCard({ core }) {
   );
 }
 
-function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
+function AnalyticsTab({ sessions, getTarget, firearms, ammo = [], matches }) {
+  /* Which slice of the log the charts are drawn from. Empty means everything,
+     which is what the tab has always shown and stays the default. */
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [fRifle, setFRifle] = useState('');
+  const [fPosition, setFPosition] = useState('');
+  const [fRange, setFRange] = useState('');
+  const [fAmmo, setFAmmo] = useState('');
+  /* Series switched off by tapping their legend entry. Keyed by bucket key so
+     it survives the list re-ordering underneath it. */
+  const [hidden, setHidden] = useState(() => new Set());
+
   // Per-session entries with everything we need downstream
-  const data = sessions
+  const allData = sessions
     .filter(s=>(s.shots?.length||0)>=2)
     .map(s=>{
       const tgt=getTarget(s.targetId);
@@ -12386,6 +12537,7 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
         es:a.esMoa, mr:a.mrMoa,
         score:a.score, xs:a.xs,
         rifleId:s.rifleId,
+        ammoId: s.ammoId || '',
         position: s.position || 'Unspecified',
         n:a.n,
         // 90% CI on pooled σ in MOA — same-bucket sessions share range, so
@@ -12396,6 +12548,31 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
     })
     .filter(Boolean)
     .sort((a,b)=>a.ts - b.ts);
+
+  /* The filter offers only values that are actually in the log, so a dropdown
+     never contains an option that would blank the chart. */
+  const ammoName = id => (ammo.find(a => a.id === id)?.name) || (id ? 'Unknown load' : '');
+  const firearmName = id => (firearms.find(f => f.id === id)?.name)
+    || (id ? 'Unknown firearm' : 'Unspecified firearm');
+  const distinct = (key) => [...new Set(allData.map(d => d[key]).filter(v => v !== '' && v != null))];
+  const distinctRifles = distinct('rifleId');
+  const distinctPositions = distinct('position');
+  const distinctRanges = distinct('range').sort((a, b) => b - a);
+  const distinctAmmo = distinct('ammoId');
+
+  const activeFilterCount =
+    (fRifle ? 1 : 0) + (fPosition ? 1 : 0) + (fRange ? 1 : 0) + (fAmmo ? 1 : 0);
+
+  /* Filtered BEFORE anything downstream reads it. The chart's x-axis is the
+     index of a session within this array, so a filter that ran later would
+     draw the right points against the wrong dates. */
+  const data = allData.filter(d =>
+    (!fRifle || d.rifleId === fRifle) &&
+    (!fPosition || d.position === fPosition) &&
+    (!fRange || String(d.range) === String(fRange)) &&
+    (!fAmmo || d.ammoId === fAmmo));
+
+  const clearFilters = () => { setFRifle(''); setFPosition(''); setFRange(''); setFAmmo(''); };
 
   // Aggregate wind-call accuracy across all sessions
   const allWindItems = [];
@@ -12422,18 +12599,29 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
     .map(b => ({ ...b, count: b.items.length, label: `${b.position} · ${b.range}yd` }))
     .sort((a,b) => posRank(a.position) - posRank(b.position) || b.range - a.range);
 
-  // Distances that share a position also share its color; a dash pattern keeps
-  // them distinguishable (longest distance solid, shorter ones progressively dashed).
+  /* Distances within a position, longest first — the index into that list is
+     what moves a bucket along its position's colour ramp and picks its dash. */
   const distancesByPos = {};
   bucketSeries.forEach(b => { (distancesByPos[b.position] ||= new Set()).add(b.range); });
-  const DASHES = ['', '5 3', '2 3', '7 3 2 3', '1 3'];
-  const dashFor = (position, range) => {
+  const distanceIdx = (position, range) => {
     const ds = [...(distancesByPos[position] || [])].sort((a,b)=>b-a);
-    return DASHES[Math.min(Math.max(ds.indexOf(range), 0), DASHES.length-1)];
+    return Math.max(0, ds.indexOf(range));
   };
+  const DASHES = ['', '5 3', '2 3', '7 3 2 3', '1 3'];
+  const dashFor = (position, range) => DASHES[Math.min(distanceIdx(position, range), DASHES.length-1)];
+  const colorFor = (position, range) => bucketColor(position, distanceIdx(position, range));
 
-  // Renderable series have at least 2 points
+  /* Renderable series have at least 2 points AND have not been switched off in
+     the legend. `chartable` is what the chart draws; `renderable` stays the
+     set that COULD be drawn, so a series toggled off still has a legend entry
+     to toggle back on. */
   const renderable = bucketSeries.filter(s => s.count >= 2);
+  const chartable = renderable.filter(s => !hidden.has(s.key));
+  const toggleSeries = (key) => setHidden(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   const WindCard = rollingWindAcc && (
     <div style={{margin:'14px 13px 0',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
@@ -12486,6 +12674,63 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
       <ClassificationCard sessions={sessions} matches={matches} />
       {WindCard}
 
+      {/* Which data the charts below are drawn from.
+          Closed by default and counting itself when open, the same control the
+          sessions list uses -- a filter that is on and out of sight is how a
+          chart comes to be read as the whole log when it is a slice of it. */}
+      <div style={{margin:'12px 13px 0',display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={()=>setFiltersOpen(o=>!o)} style={{
+          padding:'6px 11px',borderRadius:5,cursor:'pointer',fontFamily:'var(--fm)',fontSize:10,
+          border:'1.5px solid ' + (activeFilterCount > 0 ? 'var(--acc)' : 'var(--bdr)'),
+          background: activeFilterCount > 0 ? 'var(--tint-acc)' : 'var(--surf2)',
+          color: activeFilterCount > 0 ? 'var(--acc)' : 'var(--dim)',
+        }}>
+          {filtersOpen ? '− filters' : '+ filters' + (activeFilterCount > 0 ? ' (' + activeFilterCount + ')' : '')}
+        </button>
+        {activeFilterCount > 0 && (
+          <button onClick={clearFilters} style={{background:'none',border:'none',color:'var(--dim)',
+            fontFamily:'var(--fm)',fontSize:10,cursor:'pointer',textDecoration:'underline'}}>clear</button>
+        )}
+        {activeFilterCount > 0 && (
+          <span style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>
+            {data.length} of {allData.length} sessions
+          </span>
+        )}
+      </div>
+
+      {filtersOpen && (
+        <div style={{margin:'8px 13px 0',background:'var(--surf)',border:'1px solid var(--bdr)',
+                     borderRadius:9,padding:'11px 12px',display:'grid',gap:9}}>
+          {[['Firearm', fRifle, setFRifle, distinctRifles.map(id=>[id, firearmName(id)])],
+            ['Position', fPosition, setFPosition, distinctPositions.map(p=>[p, p])],
+            ['Distance', fRange, setFRange, distinctRanges.map(r=>[String(r), r + ' yd'])],
+            ['Load', fAmmo, setFAmmo, distinctAmmo.map(id=>[id, ammoName(id)])],
+          ].map(([label, value, setter, opts]) => opts.length > 1 && (
+            <div className="field" key={label}>
+              <div className="lbl">{label}</div>
+              <select className="inp" value={value} onChange={e=>setter(e.target.value)}>
+                <option value="">all</option>
+                {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </div>
+          ))}
+          <div style={{fontFamily:'var(--fm)',fontSize:8.5,color:'var(--dim)',lineHeight:1.6}}>
+            A field with only one value in the log is not offered — there is nothing to narrow.
+            Tap a series in the legend below to take that one line off the chart without
+            changing what the summaries are counted from.
+          </div>
+        </div>
+      )}
+
+      {activeFilterCount > 0 && data.length === 0 && (
+        <div style={{margin:'10px 13px',fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',
+                     border:'1px dashed var(--bdr)',borderRadius:9,padding:'18px 12px',textAlign:'center'}}>
+          No session matches that combination. <button onClick={clearFilters} style={{background:'none',
+            border:'none',color:'var(--acc)',fontFamily:'var(--fm)',fontSize:10,cursor:'pointer',
+            textDecoration:'underline',padding:0}}>Clear the filters</button> to see the whole log.
+        </div>
+      )}
+
       <div className="shdr">Group size by position &amp; distance</div>
       <div style={{margin:'0 13px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,overflow:'hidden'}}>
 
@@ -12494,13 +12739,27 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
           <span>ES MOA · position &amp; distance</span>
         </div>
         <div style={{padding:'0 12px 8px',display:'flex',flexWrap:'wrap',gap:'4px 12px'}}>
-          {renderable.map(s => (
-            <div key={s.key} style={{display:'flex',alignItems:'center',gap:5,fontFamily:'var(--fm)',fontSize:9}}>
-              <svg width={16} height={4} style={{display:'block',flexShrink:0}}><line x1={0} y1={2} x2={16} y2={2} stroke={positionColor(s.position)} strokeWidth={2} strokeDasharray={dashFor(s.position,s.range)||undefined}/></svg>
-              <span style={{color:positionColor(s.position),fontWeight:700}}>{s.position}</span>
-              <span style={{color:'var(--dim)'}}>{s.range}yd · {s.count}</span>
-            </div>
-          ))}
+          {renderable.map(s => {
+            const off = hidden.has(s.key);
+            return (
+              <button key={s.key} onClick={()=>toggleSeries(s.key)}
+                aria-pressed={!off}
+                title={off ? 'Show this series' : 'Hide this series'}
+                style={{display:'flex',alignItems:'center',gap:5,fontFamily:'var(--fm)',fontSize:9,
+                        background:'none',border:'none',padding:0,cursor:'pointer',
+                        /* Dimmed rather than removed: the entry is the control that
+                           brings it back, so it has to stay legible while it is off. */
+                        opacity: off ? 0.38 : 1}}>
+                <svg width={16} height={4} style={{display:'block',flexShrink:0}}>
+                  <line x1={0} y1={2} x2={16} y2={2} stroke={colorFor(s.position,s.range)} strokeWidth={2}
+                    strokeDasharray={dashFor(s.position,s.range)||undefined}/>
+                </svg>
+                <span style={{color:'var(--ink)',fontWeight:700,
+                              textDecoration: off ? 'line-through' : 'none'}}>{s.position}</span>
+                <span style={{color:'var(--dim)'}}>{s.range}yd · {s.count}</span>
+              </button>
+            );
+          })}
           {bucketSeries.filter(s=>s.count<2).length > 0 && (
             <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>
               ({bucketSeries.filter(s=>s.count<2).map(s=>s.label).join(', ')} need 2+ to chart)
@@ -12511,6 +12770,10 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
         {renderable.length === 0 ? (
           <div style={{padding:'20px 12px',fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',textAlign:'center'}}>
             No position &amp; distance has 2+ sessions yet. Log more under the same position and distance to see trends.
+          </div>
+        ) : chartable.length === 0 ? (
+          <div style={{padding:'20px 12px',fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)',textAlign:'center'}}>
+            Every series is switched off. Tap one in the legend to put it back.
           </div>
         ) : (
           <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'var(--surf)'}}>
@@ -12526,8 +12789,8 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
             })}
 
             {/* One polyline per position x distance */}
-            {renderable.map(series => {
-              const col = positionColor(series.position);
+            {chartable.map(series => {
+              const col = colorFor(series.position, series.range);
               const dash = dashFor(series.position, series.range);
               // items are the same object refs that live in `data`, so indexOf
               // gives the global chronological x-index directly.
@@ -12573,9 +12836,13 @@ function AnalyticsTab({ sessions, getTarget, firearms, matches }) {
               ? !(fst.sigHi < lst.sigLo || lst.sigHi < fst.sigLo) ? 'noise' : 'real'
               : null;
             return (
-              <div key={s.key} style={{margin:'0 13px 10px',background:'var(--surf)',border:'1px solid var(--bdr)',borderLeft:`3px solid ${positionColor(s.position)}`,borderRadius:7,padding:'10px 12px'}}>
+              <div key={s.key} style={{margin:'0 13px 10px',background:'var(--surf)',border:'1px solid var(--bdr)',borderLeft:`3px solid ${colorFor(s.position, s.range)}`,borderRadius:7,padding:'10px 12px'}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:4}}>
-                  <div style={{fontFamily:'var(--fh)',fontSize:13,fontWeight:700,color:positionColor(s.position)}}>{s.label}</div>
+                  <div style={{fontFamily:'var(--fh)',fontSize:13,fontWeight:700,color:'var(--ink)',display:'flex',alignItems:'center',gap:7}}>
+                    <span aria-hidden="true" style={{width:9,height:9,borderRadius:'50%',flexShrink:0,
+                                                     background:colorFor(s.position, s.range)}}/>
+                    {s.label}
+                  </div>
                   <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>{s.count} sessions</div>
                 </div>
                 <div style={{display:'flex',gap:14,fontFamily:'var(--fm)',fontSize:10}}>
@@ -13155,7 +13422,11 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
               <div style={{flex:1,minWidth:0}}>
                 <div className="tcn">{r.name}</div>
                 <div className="tcd">
-                  {r.caliber||'—'}{r.caliber&&' · '}<span style={{color:'var(--acc)',fontWeight:700}}>{count.toLocaleString()} rds</span>
+                  {/* The separator is unconditional. It used to ride on the caliber
+                      being present, so a firearm entered without one rendered its em-dash
+                      placeholder jammed against the count -- "—1,100 rds" -- which reads
+                      as a negative number rather than as a missing field. */}
+                  {r.caliber||'—'}{' · '}<span style={{color:'var(--acc)',fontWeight:700}}>{count.toLocaleString()} rds</span>
                   {status && <> · <span style={{color:'var(--dim)'}}>of {status.life.toLocaleString()}</span></>}
                 </div>
               </div>
@@ -13813,7 +14084,7 @@ function AmmoSection({ ammo, firearms, sessions, getTarget, onSaveAmmo, core }) 
               </div>
               {a.notes && <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',marginTop:2}}>{a.notes}</div>}
             </div>
-            <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
               {confirmDel === a.id ? (
                 <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0}}>
                   <button style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--red)',background:'none',border:'1px solid var(--red)',borderRadius:3,padding:'2px 7px',cursor:'pointer'}}

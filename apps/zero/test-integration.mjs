@@ -2244,6 +2244,88 @@ console.log('\ncrash floor');
 }
 
 
+/* ── A MIL SIGHT, THROUGH THE ACTUAL PAD ─────────────────────────────────
+ *
+ * test-sight.mjs proves the arithmetic. This proves the arithmetic is WIRED:
+ * that the firearm's sight reaches the shot-entry screen at all, that the pad
+ * prints and steps in the unit the rifle is graduated in rather than in a
+ * hardcoded quarter minute, and that a session reads back through the sight
+ * it was shot on rather than through whatever the rifle wears today.
+ *
+ * That last one is the assertion worth having. A wrong unit label is visible
+ * and would be reported within a day; a session quietly re-decoded through a
+ * changed firearm is not, because there is no screen on which it looks wrong.
+ */
+console.log('\nmil sights, on the pad');
+{
+  const pg = await browser.newPage({ viewport: { width: 430, height: 900 } });
+  await pg.goto(BASE);
+  await pg.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('rifles_v1', JSON.stringify([{
+      id: 'r-mil', name: 'PRS rig', caliber: '6mm Creedmoor', ts: 1, mtime: 1,
+      sight: { unit: 'mil', clickElev: 0.1, clickWind: 0.1 },
+    }]));
+  });
+  await pg.reload(); await pg.waitForTimeout(900);
+
+  await pg.click('.tabbar button:has-text("Sessions")');
+  await pg.waitForTimeout(250);
+  await pg.click('button:has-text("+ session")');
+  await pg.waitForTimeout(500);
+  await pg.click('button:has-text("Create session")');
+  await pg.waitForTimeout(800);
+
+  const stamped = await pg.evaluate(() =>
+    (JSON.parse(localStorage.getItem('sessions_v1') || '[]')[0] || {}).sight);
+  ok(!!stamped && stamped.unit === 'mil' && stamped.clickElev === 0.1,
+     'a new session is stamped with the sight the firearm wore when it was created');
+
+  await pg.click('button:has-text("+ shot")');
+  await pg.waitForTimeout(700);
+  const hdrUnit = await pg.textContent('.hdr');
+  ok(/MIL/.test(hdrUnit) && !/MOA/.test(hdrUnit),
+     'the shot-entry header reads in MIL, not in a hardcoded MOA');
+  ok(/1\/8|1\/4|0\.1 mil/.test(await pg.textContent('body')),
+     '...and the pad names the detent it is stepping in');
+
+  await pg.click('button:has-text("UP")');
+  await pg.waitForTimeout(250);
+  ok(/E\+0\.1(\D|$)/.test(await pg.textContent('.hdr')),
+     'one click of elevation is +0.1 mil, printed to the one decimal a 0.1 detent has');
+  await pg.click('button:has-text("+1↑")');
+  await pg.waitForTimeout(250);
+  ok(/E\+1\.1(\D|$)/.test(await pg.textContent('.hdr')),
+     'the coarse bump is one whole mil — ten clicks, not the four a 1/4-MOA turret takes');
+
+  /* Now the part that cannot be seen: a session already logged, and a rifle
+     re-sighted afterwards. Seeded directly because what is under test is the
+     READ path, and driving the tap target to place a shot would test the tap
+     handler at the same time and report the sum. */
+  await pg.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem('sessions_v1'))[0];
+    s.name = 'mil session'; s.rangeYards = 600;
+    s.shots = [{ id: 's1', ring: '10', clockH: 12, clockM: 0, xy: { x: 0, y: 0 },
+                 elev: 11, wind: 0, isSighter: false }];
+    localStorage.setItem('sessions_v1', JSON.stringify([s]));
+    const g = JSON.parse(localStorage.getItem('rifles_v1'));
+    g[0].sight = { unit: 'moa', clickElev: 0.25, clickWind: 0.25 };   // new glass
+    localStorage.setItem('rifles_v1', JSON.stringify(g));
+  });
+  await pg.reload(); await pg.waitForTimeout(900);
+  await pg.click('.tabbar button:has-text("Sessions")');
+  await pg.waitForTimeout(350);
+  await pg.click('.card');
+  await pg.waitForTimeout(800);
+  const detail = await pg.textContent('body');
+  ok(/\+1\.1(\D|$)/.test(detail),
+     'a session shot on a mil sight still reads +1.1 after the rifle is re-sighted to 1/4 MOA');
+  ok(!/\+2\.75(\D|$)/.test(detail),
+     '...and not the +2.75 that reading its eleven clicks through the NEW sight would give');
+
+  await pg.close();
+}
+
 await browser.close(); server.close(); await mock.stop();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

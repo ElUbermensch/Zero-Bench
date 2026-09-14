@@ -759,12 +759,92 @@ function todayLocal(d = new Date()) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 function inchesToMoa(in_, yd) { return in_ / (yd * MOA_PER_100YD / 100); }
-// Sight turret: elev/wind are stored as integer CLICKS (lossless, matches a
-// detented turret). MOA is the derived display. 1 click = 1/4 MOA on a standard
-// target turret; for 1/8-MOA scopes change this one constant to 0.125.
-const MOA_PER_CLICK = 0.25;
-function clicksToMoa(clicks) { return (clicks || 0) * MOA_PER_CLICK; }
-function fmtMoaSigned(clicks) { const v = clicksToMoa(clicks); return (v > 0 ? '+' : '') + v.toFixed(2); }
+/* ── The sight, and what a click is worth ────────────────────────────────
+ * elev/wind are stored as integer CLICKS. That is lossless and it is what the
+ * shooter actually does -- nobody dials 1.75 MOA, they count seven clicks --
+ * but a click is a property of the SIGHT, not of the app. So the firearm
+ * carries a unit (MOA or mil) and a detent size PER AXIS, because match iron
+ * sights routinely differ between elevation and windage and a single field
+ * would force one of the two to be a lie.
+ *
+ * MOA is the canonical internal angle. Clicks are an encoding on the way in,
+ * the display unit is a skin on the way out, and everything in between --
+ * gain, drift, the solver, the position offsets -- is MOA, so two firearms
+ * with different sights still compare.
+ *
+ * The config is SNAPSHOT onto the session when the session is created, and the
+ * snapshot is what reads that session's shots back. The firearm's config is
+ * the current truth for the NEXT session; it is not retroactive truth, and
+ * letting it be would silently rewrite history -- change a rifle from 1/4 to
+ * 1/2 and every come-up ever logged against it doubles, with no edit, no
+ * warning, and nothing on screen that looks wrong. A session with no snapshot
+ * predates this feature and reads at SIGHT_LEGACY, which is what the app was
+ * actually displaying when those clicks were typed. Same reasoning that made
+ * targets duplicate-and-edit rather than edit in place.
+ */
+const MOA_PER_MIL = 3.43774677078494;       // 180*60/(1000*pi) -- a true milliradian
+const SIGHT_LEGACY = { unit: 'moa', clickElev: 0.25, clickWind: 0.25 };
+const SIGHT_UNITS = [{ v: 'moa', label: 'MOA' }, { v: 'mil', label: 'Mil' }];
+const SIGHT_CLICKS = {
+  moa: [{ v: 0.125, label: '1/8' }, { v: 0.25, label: '1/4' }, { v: 0.5, label: '1/2' }, { v: 1, label: '1' }],
+  mil: [{ v: 0.05, label: '0.05' }, { v: 0.1, label: '0.1' }, { v: 0.2, label: '0.2' }],
+};
+function normSight(s) {
+  const unit = (s && s.unit === 'mil') ? 'mil' : 'moa';
+  const dflt = unit === 'mil' ? 0.1 : 0.25;
+  const pick = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : dflt; };
+  return { unit, clickElev: pick(s && s.clickElev), clickWind: pick(s && s.clickWind) };
+}
+/* Takes a firearm, a session, a bare config or nothing at all. Anything
+ * without one reads as the PRE-FEATURE sight, never as "whatever this rifle
+ * happens to wear today" -- that substitution is the whole bug this avoids. */
+function sightOf(x) { return (x && x.sight) ? normSight(x.sight) : { ...SIGHT_LEGACY }; }
+function sightClick(sight, axis) { return axis === 'w' ? sight.clickWind : sight.clickElev; }
+function moaPerClick(sight, axis) {
+  const v = sightClick(sight, axis);
+  return sight.unit === 'mil' ? v * MOA_PER_MIL : v;
+}
+function clicksToMoa(clicks, sight, axis) { return (clicks || 0) * moaPerClick(sight, axis); }
+function moaToUnit(moa, sight) { return sight.unit === 'mil' ? moa / MOA_PER_MIL : moa; }
+function unitToMoa(v, sight)   { return sight.unit === 'mil' ? v * MOA_PER_MIL : v; }
+function moaToClicks(moa, sight, axis) {
+  const per = moaPerClick(sight, axis);
+  return per > 0 ? Math.round((moa || 0) / per) : 0;
+}
+function sightUnitLabel(sight) { return sight.unit === 'mil' ? 'MIL' : 'MOA'; }
+/* Decimals come from the detent, not from a house style. 1/8 MOA needs three
+ * to print 0.375 at all; 0.1 mil needs exactly one, and giving it two prints
+ * a hundredth of a mil that no turret on earth can be set to. */
+function decOf(v) { const s = String(v); const i = s.indexOf('.'); return i < 0 ? 0 : s.length - i - 1; }
+function dialDecimals(sight, axis) { return Math.min(3, Math.max(1, decOf(sightClick(sight, axis)))); }
+/* Integer clicks -> a signed string in the sight's own unit. */
+function fmtDial(clicks, sight, axis) {
+  const v = moaToUnit(clicksToMoa(clicks, sight, axis), sight);
+  return (v > 0 ? '+' : '') + v.toFixed(dialDecimals(sight, axis));
+}
+/* A canonical-MOA angle -> the same string, for quantities the solver and the
+ * analytics compute in MOA and never saw as clicks. */
+function fmtMoaAsUnit(moa, sight, axis) {
+  const v = moaToUnit(moa || 0, sight);
+  return (v > 0 ? '+' : '') + v.toFixed(dialDecimals(sight, axis || 'e'));
+}
+function fmtMoaAsUnitAbs(moa, sight, axis) {
+  return moaToUnit(Math.abs(moa || 0), sight).toFixed(dialDecimals(sight, axis || 'e'));
+}
+/* "1/4 MOA/click", or both axes when they differ -- a sight whose windage and
+ * elevation disagree is the case this whole model exists for, so the label
+ * must not average them away. */
+function sightLabel(sight) {
+  const one = v => sight.unit === 'mil'
+    ? `${v} mil`
+    : (v === 0.125 ? '1/8 MOA' : v === 0.25 ? '1/4 MOA' : v === 0.5 ? '1/2 MOA' : `${v} MOA`);
+  return sight.clickElev === sight.clickWind
+    ? `${one(sight.clickElev)}/click`
+    : `${one(sight.clickElev)} elev · ${one(sight.clickWind)} wind`;
+}
+/* One whole unit of the display scale, in clicks -- what the coarse bump
+ * buttons move. 4 at 1/4 MOA, 8 at 1/8, 10 at 0.1 mil. */
+function clicksPerUnit(sight, axis) { return Math.max(1, Math.round(1 / sightClick(sight, axis))); }
 function dist(a,b) { return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2); }
 
 // Returns 'A','B','C'... for sighters and '1','2','3'... for record shots
@@ -1679,7 +1759,7 @@ function shotOrderAnalytics(sessions, getTarget) {
  * +wind clicks = POI right (+x) — standard turret behavior. If a firearm is
  * ever mounted with a nonstandard turret sense this analysis inverts for it.
  *
- * gain: for each dial change ≥ 0.5 MOA (2 clicks) with ≥1 shot on each side
+ * gain: for each dial change ≥ 0.5 MOA (two clicks on a 1/4-MOA sight) with ≥1 shot on each side
  * within the session, project the actual POI-centroid shift onto the predicted
  * shift: gain = (Δactual · Δpred)/|Δpred|². 1.0 = POI moves exactly as dialed.
  * Single events are dispersion-noise dominated; only the pooled mean means
@@ -1701,6 +1781,10 @@ function correctionAnalytics(sessions, getTarget) {
     const tgt = getTarget(s.targetId);
     const yards = +s.rangeYards;
     if (!tgt || !yards) return;
+    /* The session's OWN sight, not the firearm's current one. This pools
+       across sessions and firearms, so the clicks have to become minutes
+       before they can be added up at all. */
+    const sight = sightOf(s);
     const events = [];
     for (let k = 1; k < shots.length; k++) {
       const dE = (shots[k].elev||0) - (shots[k-1].elev||0);
@@ -1718,7 +1802,7 @@ function correctionAnalytics(sessions, getTarget) {
       return { x: ps.reduce((a,p)=>a+p.x,0)/ps.length, y: ps.reduce((a,p)=>a+p.y,0)/ps.length };
     };
     for (let i = 0; i < events.length; i++) {
-      const predX = clicksToMoa(events[i].dW), predY = clicksToMoa(events[i].dE);
+      const predX = clicksToMoa(events[i].dW, sight, 'w'), predY = clicksToMoa(events[i].dE, sight, 'e');
       const p2 = predX*predX + predY*predY;
       if (Math.sqrt(p2) < CORRECTION_MIN_PRED_MOA) continue;
       const start = i === 0 ? 0 : events[i-1].k;
@@ -1944,8 +2028,10 @@ const MATCH_TEMPLATES = [
 // be null (its stages just get no ammoId, same as manual session creation).
 // The load name is mirrored into ammoDesc for display continuity in DOPE
 // cells and chips, matching the NewSession picker's behavior.
-function buildMatchFromTemplate(tpl, { name, date, rifleId, rangeLocation, ammoShort, ammoLong } = {}) {
+function buildMatchFromTemplate(tpl, { name, date, rifleId, rangeLocation, ammoShort, ammoLong, firearms } = {}) {
   const now = Date.now();
+  // Every stage of a match is shot on one rifle, so they all carry one sight.
+  const sight = sightOf((firearms||[]).find(g => g.id === rifleId));
   const match = { id: uid(), name: (name||'').trim() || tpl.name, type: tpl.type, date: date || '', ts: now };
   const sessions = tpl.stages.map((st, i) => {
     const load = st.rangeYards >= 600 ? ammoLong : ammoShort;
@@ -1954,7 +2040,7 @@ function buildMatchFromTemplate(tpl, { name, date, rifleId, rangeLocation, ammoS
       name: st.name, date: date || '', type: 'Score',
       position: st.position, fireMode: st.fireMode,
       targetId: st.targetId, rangeYards: st.rangeYards,
-      rangeLocation: (rangeLocation||'').trim(), rifleId: rifleId || '',
+      rangeLocation: (rangeLocation||'').trim(), rifleId: rifleId || '', sight,
       wSpeed:'', wDir:6, temp:'', lighting:'Clear',
       ammoLot:'', ammoDesc: load ? load.name : '', equipment:'',
       ...(load ? { ammoId: load.id } : {}),
@@ -2015,22 +2101,27 @@ function classificationPace(sessions, matches) {
 
 /* ── Zero drift detection ────────────────────────────────────────────────
  * Given a DOPE cell's sessions (newest first), flag when the confirmed zero
- * has walked ≥ DRIFT_MIN_CLICKS on either axis between the oldest and newest
+ * has walked ≥ DRIFT_MIN_MOA on either axis between the oldest and newest
  * usable entries (≥3 entries with logged dial). Newest−oldest delta rather
  * than range: a monotonic walk is drift (mount/optic/barrel); oscillation is
  * conditions. Caveat still applies — temp and ammo changes shift real zeros,
  * so this is a "look at it", not a "fix it".
  */
-const DRIFT_MIN_CLICKS = 3;   // 0.75 MOA at 1/4-MOA clicks
+/* In MINUTES, because the cell being compared can hold sessions shot on
+   different sights -- three clicks is 0.375 MOA on one rifle and 1.5 on
+   another, and a threshold in clicks would fire on the sight rather than on
+   the drift. 0.75 MOA is three clicks of a 1/4-MOA turret, which is what this
+   was calibrated at. */
+const DRIFT_MIN_MOA = 0.75;
 function zeroDriftInfo(cellSessions) {
   const usable = (cellSessions||[]).filter(e => !e.noDope);
   if (usable.length < 3) return null;
   const newest = usable[0], oldest = usable[usable.length-1];
-  const dE = (newest.elev||0) - (oldest.elev||0);
-  const dW = (newest.wind||0) - (oldest.wind||0);
+  const dE = (newest.elevMoa||0) - (oldest.elevMoa||0);
+  const dW = (newest.windMoa||0) - (oldest.windMoa||0);
   const flagged = [];
-  if (Math.abs(dE) >= DRIFT_MIN_CLICKS) flagged.push({ axis:'E', clicks:dE });
-  if (Math.abs(dW) >= DRIFT_MIN_CLICKS) flagged.push({ axis:'W', clicks:dW });
+  if (Math.abs(dE) >= DRIFT_MIN_MOA) flagged.push({ axis:'E', moa:dE });
+  if (Math.abs(dW) >= DRIFT_MIN_MOA) flagged.push({ axis:'W', moa:dW });
   return flagged.length ? { flagged, n: usable.length } : null;
 }
 
@@ -2161,20 +2252,27 @@ async function idbReadSnapshot() {
  * sessions newest-first). Values in MOA, up/right positive, matching the
  * on-screen convention.
  */
-function dopeCardText(byFirearm) {
+function dopeCardText(byFirearm, sightFor) {
   const lines = [];
   const today = todayLocal();
   lines.push(`ZERO — DOPE CARD · ${today}`);
-  lines.push(`E/W in MOA · up/right + · ${MOA_PER_CLICK} MOA/click`);
-  lines.push('dist  position   load             zero');
+  lines.push(`up/right +`);
+  /* The unit legend moved onto the firearm header. It was a single global
+     line, which is exactly the claim that stops being true the moment two
+     rifles in the same card wear different sights -- and a DOPE card taped to
+     a stock is read at a firing point, where nobody is going to notice that
+     the minutes at the top belong to the other rifle. */
+  lines.push('dist  position load             zero');
   for (const [fname, locs] of Object.entries(byFirearm)) {
+    const sight = sightFor ? sightFor(fname) : { ...SIGHT_LEGACY };
     lines.push('');
-    lines.push(`== ${fname} ==`);
+    lines.push(`== ${fname} ==  (${sightUnitLabel(sight)} · ${sightLabel(sight)})`);
     for (const [loc, cs] of Object.entries(locs)) {
       lines.push(`-- ${loc} --`);
       for (const cell of cs) {
         const h = cell.sessions[0];
-        const zero = h.noDope ? 'no dial logged' : `E${fmtMoaSigned(h.elev)}  W${fmtMoaSigned(h.wind)}`;
+        const zero = h.noDope ? 'no dial logged'
+          : `E${fmtMoaAsUnit(h.elevMoa, sight, 'e')}  W${fmtMoaAsUnit(h.windMoa, sight, 'w')}`;
         /* The load is a column rather than a parenthetical: it is part of what
            identifies the row now, and a shooter reading this at the line scans
            down distance and load, not through a comment at the end. */
@@ -5435,6 +5533,10 @@ function zeroFirearmsOutbound(core, firearms) {
     if (!f.remoteId) { f2 = { ...f, remoteId: core.uuid() }; changed = true; }
 
     const life = Number(f2.barrelLife);
+    /* The detent goes up in the firearm's OWN unit, not normalised to minutes:
+       0.1 mil normalised is 0.34377 MOA, and a round trip through that loses
+       the turret's own label -- which is the thing the shooter reads. */
+    const sg = sightOf(f2);
     core.upsert('firearms', {
       id: f2.remoteId,
       name: String(f2.name).trim(),
@@ -5442,6 +5544,9 @@ function zeroFirearmsOutbound(core, firearms) {
       notes: f2.notes ? String(f2.notes) : null,
       barrel_life_rounds: Number.isFinite(life) && life > 0 ? Math.round(life) : null,
       rounds_at_start: Math.max(0, Math.round(Number(f2.roundsAtStart) || 0)),
+      sight_unit: sg.unit,
+      click_elev: sg.clickElev,
+      click_wind: sg.clickWind,
     });
     queued++;
     /* Marked as sent at QUEUE time, like the remote id above. The outbox is
@@ -5478,17 +5583,33 @@ function zeroFirearmsApply(rows, firearms) {
     if (!row.name) continue;
 
     const life = row.barrel_life_rounds;
+    /* A row that states no sight is a row written before 0023 or by Bench,
+       which never writes these columns. It is NOT a row asserting the default,
+       so an existing local sight survives the pull rather than being reset to
+       quarter minutes by an app that has no opinion on the subject. */
+    const statesSight = row.sight_unit != null || row.click_elev != null || row.click_wind != null;
     const patch = {
       name: row.name,
       caliber: row.cartridge || '',
       notes: row.notes || '',
       barrelLife: (life === null || life === undefined || life === '') ? null : Number(life),
       roundsAtStart: Math.max(0, Math.round(Number(row.rounds_at_start) || 0)),
+      ...(statesSight ? { sight: normSight({
+        unit: row.sight_unit,
+        clickElev: row.click_elev == null ? undefined : Number(row.click_elev),
+        clickWind: row.click_wind == null ? undefined : Number(row.click_wind),
+      }) } : {}),
     };
 
     if (i >= 0) {
       const merged = { ...list[i], ...patch, mtime: 0, syncedAt: Date.now() };
-      const same = Object.keys(patch).every(k => merged[k] === list[i][k]);
+      /* `sight` is an object, and === on two structurally identical objects is
+         false forever -- which would mark every firearm updated on every pull,
+         rewrite storage and re-render the tab each time. Compared by value. */
+      const eq = (k, a, b) => k === 'sight'
+        ? (!!a === !!b && (!a || (a.unit === b.unit && a.clickElev === b.clickElev && a.clickWind === b.clickWind)))
+        : a === b;
+      const same = Object.keys(patch).every(k => eq(k, merged[k], list[i][k]));
       /* Accepting a remote row makes the local copy agree with the server, so
          it is clean by definition -- mtime is cleared and syncedAt restamped.
          Leaving it dirty would push the value straight back next sync. */
@@ -7781,7 +7902,7 @@ function App() {
       ammo={ammo}
       onBack={()=>setScreen('home')}
       onCreate={(tpl, opts) => {
-        const built = buildMatchFromTemplate(tpl, opts);
+        const built = buildMatchFromTemplate(tpl, { ...opts, firearms });
         /* A template names its paper by id -- SR at 200, SR-3 at 300, MR-1 at
          * 600 -- and the user may have hidden any of those built-ins. Nothing
          * checked, and `getTarget` falls back to `allTargets[0]` rather than
@@ -8075,7 +8196,7 @@ function App() {
           )}
           {tab==='more' && more !== null && (
             <>
-              {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
+              {more==='firearms' && <FirearmsTab firearms={firearms} sessions={sessions} getTarget={getTarget} onSave={saveFirearms} onSaveSessions={saveSessions} ammo={ammo} onSaveAmmo={saveAmmo} core={core} />}
               {more==='solver' && <SolverTab sessions={sessions} firearms={firearms} ammo={ammo} />}
               {more==='targets' && <TargetsTab customTargets={customTargets} onSave={saveCustomTargets} deletedBuiltins={deletedBuiltins}
                 onDeleteBuiltin={id=>{ saveDeletedBuiltins([...deletedBuiltins,id]);
@@ -8595,7 +8716,11 @@ function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave
       newMatch = {id:uid(), name:newMatchName.trim(), type:newMatchType, date:f.date, ts:Date.now()};
       matchId = newMatch.id;
     }
-    onSave({...f, id:uid(), shots:[], matchId, ts:Date.now()}, newMatch);
+    /* The snapshot. Taken at creation rather than read live off the firearm,
+       because the clicks this session is about to record only mean anything
+       against the sight that was on the rifle while they were being turned. */
+    const gun = (firearms||[]).find(g => g.id === f.rifleId);
+    onSave({...f, id:uid(), shots:[], matchId, ts:Date.now(), sight: sightOf(gun)}, newMatch);
   }
 
   return (
@@ -8872,6 +8997,11 @@ function NewSession({ targets, matches, firearms, sessions, ammo, onBack, onSave
 
 /* ── Export / share ── */
 function buildExportText(session, target, a, firearm, wa) {
+  /* The sight this session was SHOT on, not the one the rifle wears now --
+     an export is a record, and a record that re-reads itself through today's
+     hardware is not one. */
+  const sight = sightOf(session);
+  const uLbl = sightUnitLabel(sight);
   const lines = [];
   const name = session.name || `${target.name} · ${session.rangeYards}yd`;
   lines.push(`Zero — ${name}`);
@@ -8881,6 +9011,7 @@ function buildExportText(session, target, a, firearm, wa) {
   if (session.fireMode && session.fireMode !== 'Slow') lines.push(`Fire mode: ${session.fireMode}`);
   if (session.fireMode) lines.push(`Fire mode: ${session.fireMode} fire`);
   if (firearm) lines.push(`Firearm: ${firearm.name}${firearm.caliber?` · ${firearm.caliber}`:''}`);
+  lines.push(`Sight: ${uLbl} · ${sightLabel(sight)}`);
   if (session.wSpeed) lines.push(`Wind: ${session.wSpeed}mph · ${session.wDir} o'clock`);
   if (session.temp) lines.push(`Temp: ${session.temp}°F · ${session.lighting||''}`);
   if (session.ammoDesc||session.ammoLot) lines.push(`Ammo: ${[session.ammoDesc,session.ammoLot&&`lot ${session.ammoLot}`].filter(Boolean).join(' · ')}`);
@@ -8895,7 +9026,7 @@ function buildExportText(session, target, a, firearm, wa) {
   }
 
   if (wa && wa.n >= 1) {
-    lines.push(`Wind call: ${wa.n} calls · ${wa.absMeanErr.toFixed(2)} MOA avg error · bias ${wa.biasDir==='neutral'?'neutral':wa.biasDir+' '+Math.abs(wa.meanErr).toFixed(2)+' MOA'}`);
+    lines.push(`Wind call: ${wa.n} calls · ${fmtMoaAsUnitAbs(wa.absMeanErr, sight, 'w')} ${uLbl} avg error · bias ${wa.biasDir==='neutral'?'neutral':wa.biasDir+' '+fmtMoaAsUnitAbs(wa.meanErr, sight, 'w')+' '+uLbl}`);
     lines.push('');
   }
 
@@ -8910,10 +9041,10 @@ function buildExportText(session, target, a, firearm, wa) {
       if (!sh.isSighter) return;
       sc++;
       const lbl = String.fromCharCode(64 + sc);
-      const wcTag = typeof sh.windCallMoa === 'number' ? ` wc:${sh.windCallMoa}${sh.windCallDir}` : '';
+      const wcTag = typeof sh.windCallMoa === 'number' ? ` wc:${fmtMoaAsUnitAbs(sh.windCallMoa, sight, 'w')}${sh.windCallDir}` : '';
       const psw = typeof sh.perShotWind === 'number' ? ` ${sh.perShotWind}mph${sh.perShotWindDir?'@'+sh.perShotWindDir:''}` : '';
       const cer = (sh.callXY && sh.xy) ? ` Δ${Math.hypot(sh.xy.x-sh.callXY.x, sh.xy.y-sh.callXY.y).toFixed(2)}"` : '';
-      lines.push(`   ${lbl}  ${sh.ring}  ${sh.clockH}:${String(sh.clockM).padStart(2,'0')}  E${fmtMoaSigned(sh.elev)} W${fmtMoaSigned(sh.wind)} MOA${psw}${wcTag}${cer}${sh.notes?' — '+sh.notes:''}`);
+      lines.push(`   ${lbl}  ${sh.ring}  ${sh.clockH}:${String(sh.clockM).padStart(2,'0')}  E${fmtDial(sh.elev, sight, 'e')} W${fmtDial(sh.wind, sight, 'w')} ${uLbl}${psw}${wcTag}${cer}${sh.notes?' — '+sh.notes:''}`);
     });
     lines.push('');
   }
@@ -8923,10 +9054,10 @@ function buildExportText(session, target, a, firearm, wa) {
   shots.forEach(sh => {
     if (sh.isSighter) return;
     ri++;
-    const wcTag = typeof sh.windCallMoa === 'number' ? ` wc:${sh.windCallMoa}${sh.windCallDir}` : '';
+    const wcTag = typeof sh.windCallMoa === 'number' ? ` wc:${fmtMoaAsUnitAbs(sh.windCallMoa, sight, 'w')}${sh.windCallDir}` : '';
     const psw = typeof sh.perShotWind === 'number' ? ` ${sh.perShotWind}mph${sh.perShotWindDir?'@'+sh.perShotWindDir:''}` : '';
     const cer = (sh.callXY && sh.xy) ? ` Δ${Math.hypot(sh.xy.x-sh.callXY.x, sh.xy.y-sh.callXY.y).toFixed(2)}"` : '';
-    lines.push(`  ${String(ri).padStart(2)}  ${sh.ring.padStart(2)}  ${sh.clockH}:${String(sh.clockM).padStart(2,'0')}  E${fmtMoaSigned(sh.elev)} W${fmtMoaSigned(sh.wind)} MOA${psw}${wcTag}${cer}${sh.notes?' — '+sh.notes:''}`);
+    lines.push(`  ${String(ri).padStart(2)}  ${sh.ring.padStart(2)}  ${sh.clockH}:${String(sh.clockM).padStart(2,'0')}  E${fmtDial(sh.elev, sight, 'e')} W${fmtDial(sh.wind, sight, 'w')} ${uLbl}${psw}${wcTag}${cer}${sh.notes?' — '+sh.notes:''}`);
   });
 
   return lines.join('\n');
@@ -9051,7 +9182,7 @@ function CallErrorChart({ shots, target, yards }) {
 /* ── Per-shot inspector: SVG showing hold trace, call point, and impact for one shot.
  * Used inline in SessionDetail when a shot is expanded.
  */
-function ShotInspector({ shot, target }) {
+function ShotInspector({ shot, target, sight }) {
   const SZ = 220;
   const c = SZ / 2;
 
@@ -9073,6 +9204,7 @@ function ShotInspector({ shot, target }) {
     : '';
 
   const callDistIn = (callXY && shot.xy) ? Math.hypot(shot.xy.x - callXY.x, shot.xy.y - callXY.y) : null;
+  const sg = sight || { ...SIGHT_LEGACY };
 
   return (
     <div style={{padding:'10px 12px',background:'var(--bg)',borderTop:'1px solid var(--bdr)',borderBottom:'1px solid var(--bdr)'}}>
@@ -9170,14 +9302,14 @@ function ShotInspector({ shot, target }) {
           {(shot.elev !== 0 || shot.wind !== 0) && (
             <>
               <div style={{display:'flex',alignItems:'center',gap:4}}>
-                <span style={{color:'var(--dim)',fontSize:9,letterSpacing:'.05em',textTransform:'uppercase'}}>sight MOA</span>
+                <span style={{color:'var(--dim)',fontSize:9,letterSpacing:'.05em',textTransform:'uppercase'}}>sight {sightUnitLabel(sg)}</span>
               </div>
               <div style={{display:'flex',alignItems:'center',gap:5}}>
                 <span style={{color:'var(--dim)'}}>E</span>
                 <span style={{
                   color: shot.elev === 0 ? 'var(--dim)' : 'var(--acc)',
                   fontWeight:700,minWidth:44,textAlign:'right',
-                }}>{fmtMoaSigned(shot.elev)}</span>
+                }}>{fmtDial(shot.elev, sg, 'e')}</span>
                 <span style={{color:shot.elev === 0 ? 'var(--bdr)' : 'var(--acc)',fontSize:11,fontWeight:700}}>
                   {shot.elev > 0 ? '↑' : shot.elev < 0 ? '↓' : '·'}
                 </span>
@@ -9187,7 +9319,7 @@ function ShotInspector({ shot, target }) {
                 <span style={{
                   color: shot.wind === 0 ? 'var(--dim)' : 'var(--blue)',
                   fontWeight:700,minWidth:44,textAlign:'right',
-                }}>{fmtMoaSigned(shot.wind)}</span>
+                }}>{fmtDial(shot.wind, sg, 'w')}</span>
                 <span style={{color:shot.wind === 0 ? 'var(--bdr)' : 'var(--blue)',fontSize:11,fontWeight:700}}>
                   {shot.wind > 0 ? '→' : shot.wind < 0 ? '←' : '·'}
                 </span>
@@ -9206,7 +9338,7 @@ function ShotInspector({ shot, target }) {
             <div style={{display:'flex',alignItems:'center',gap:4}}>
               <span style={{color:'var(--dim)'}}>hold</span>
               <span style={{color:'var(--blue)',fontWeight:700}}>
-                {shot.windCallMoa} MOA {shot.windCallDir}
+                {fmtMoaAsUnitAbs(shot.windCallMoa, sg, 'w')} {sightUnitLabel(sg)} {shot.windCallDir}
               </span>
             </div>
           )}
@@ -9255,6 +9387,10 @@ function CopyButton({ text }) {
 }
 
 function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack, onAddShot, onDelShot, onDelSess, core, onPublish, onRetracted, live, hostName, onHostName, onGoLive, onJoinLive, onEndLive }) {
+  /* The session's snapshot, which is what its clicks mean. Read once here and
+     handed down, so no child can quietly reach for the firearm's CURRENT
+     sight and render this session's history through hardware it never wore. */
+  const sight = sightOf(session);
   const [addingShot, setAddingShot] = useState(false);
   /* Above `if (addingShot) return ...` deliberately. A hook after a
    * conditional return is only called on some renders, which changes the hook
@@ -9302,11 +9438,12 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
           yards: session.rangeYards,
           position: session.position,
           ammoId: session.ammoId,
-        }, session.id)
+        }, session.id, sight)
       : null;
     return <ShotEntry
       num={shots.length+1}
       target={target}
+      sight={sight}
       yards={session.rangeYards}
       fireMode={session.fireMode || 'Slow'}
       priorShots={shots}
@@ -9427,12 +9564,12 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
               <div style={{margin:'0 13px 8px',background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,padding:'11px 13px'}}>
                 <div style={{display:'flex',justifyContent:'space-between',gap:14,marginBottom:8}}>
                   <div style={{flex:1}}>
-                    <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--blue)',fontWeight:700}}>{wa.absMeanErr.toFixed(2)} MOA</div>
+                    <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--blue)',fontWeight:700}}>{fmtMoaAsUnitAbs(wa.absMeanErr, sight, 'w')} {sightUnitLabel(sight)}</div>
                     <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>mean abs error</div>
                   </div>
                   <div style={{flex:1}}>
                     <div style={{fontFamily:'var(--fm)',fontSize:10,color: wa.biasDir==='neutral' ? 'var(--green)' : 'var(--acc)',fontWeight:700}}>
-                      {wa.biasDir==='neutral' ? 'neutral' : `${Math.abs(wa.meanErr).toFixed(2)} ${wa.biasDir}`}
+                      {wa.biasDir==='neutral' ? 'neutral' : `${fmtMoaAsUnitAbs(wa.meanErr, sight, 'w')} ${wa.biasDir}`}
                     </div>
                     <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',letterSpacing:'.08em'}}>directional bias</div>
                   </div>
@@ -9440,7 +9577,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                 <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.5}}>
                   {wa.biasDir==='neutral'
                     ? 'Your wind calls are balanced — no consistent directional error.'
-                    : `Your calls tend to be ${Math.abs(wa.meanErr).toFixed(2)} MOA too far ${wa.biasDir==='R'?'right':'left'}. Consider adjusting hold.`}
+                    : `Your calls tend to be ${fmtMoaAsUnitAbs(wa.meanErr, sight, 'w')} ${sightUnitLabel(sight)} too far ${wa.biasDir==='R'?'right':'left'}. Consider adjusting hold.`}
                 </div>
               </div>
             </>
@@ -9476,10 +9613,10 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                     }}>{sh.ring}</div>
                 }
                 <div className="scall">{sh.isSighter ? 'sighter · ' : ''}{sh.clockH}:{String(sh.clockM).padStart(2,'0')}</div>
-                <div className="ssight">E{fmtMoaSigned(sh.elev)} W{fmtMoaSigned(sh.wind)}</div>
+                <div className="ssight">E{fmtDial(sh.elev, sight, 'e')} W{fmtDial(sh.wind, sight, 'w')}</div>
                 {typeof sh.windCallMoa === 'number' && (
                   <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--blue)',border:'1px solid var(--blue-line)',borderRadius:3,padding:'1px 4px',letterSpacing:'.05em',flexShrink:0}}>
-                    wc {sh.windCallMoa}{sh.windCallDir}
+                    wc {fmtMoaAsUnitAbs(sh.windCallMoa, sight, 'w')}{sh.windCallDir}
                   </div>
                 )}
                 {typeof sh.perShotWind === 'number' && (
@@ -9517,7 +9654,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
                 )}
               </div>
               {expanded && (
-                <ShotInspector shot={sh} target={target} />
+                <ShotInspector shot={sh} target={target} sight={sight} />
               )}
               </div>
               );
@@ -9527,7 +9664,7 @@ function SessionDetail({ session, target, firearm, match, sessions, ammo, onBack
           {shots.length > 0 && (
             <div style={{padding:'12px 13px 4px'}}>
               <div className="shdr" style={{padding:'0 0 8px'}}>Sight drift</div>
-              <SightChart shots={shots} />
+              <SightChart shots={shots} sight={sightOf(session)} />
             </div>
           )}
 
@@ -9895,7 +10032,7 @@ function ringBorderColor(ringCol, outerCol) {
  * optional (can skip) but the actual shot is required for save.
  */
 function TapInput({
-  target, yards, fireMode, priorShots, partners,
+  target, yards, fireMode, priorShots, partners, sight,
   tapXY, setTapXY,
   callXY, setCallXY,
   holdTrace, setHoldTrace,
@@ -10285,15 +10422,19 @@ function TapInput({
               // Correction to bring THIS impact to center. Impact right/high ->
               // dial left/down. This is a suggestion read off the grid, not the
               // applied dial — that still lives in the sight-adjustment pad.
+              const sg = sight || { ...SIGHT_LEGACY };
               const moaX = inchesToMoa(Math.abs(tapXY.x), yards);
               const moaY = inchesToMoa(Math.abs(tapXY.y), yards);
               const wDir = tapXY.x > 0.001 ? 'L' : tapXY.x < -0.001 ? 'R' : '·';
               const eDir = tapXY.y > 0.001 ? 'D' : tapXY.y < -0.001 ? 'U' : '·';
+              /* Clicks per axis: a sight whose windage is 1/8 and elevation
+                 1/2 would otherwise be told to turn the same number of clicks
+                 on both, which is wrong by a factor of four on one of them. */
               return (
                 <div style={{flexBasis:'100%',marginTop:2,paddingTop:6,borderTop:'1px solid var(--bdr)',display:'flex',gap:14,flexWrap:'wrap'}}>
                   <span style={{color:'var(--dim)'}}>to center: </span>
-                  <span><span style={{color:'var(--blue)',fontWeight:700}}>{moaX.toFixed(2)} MOA {wDir}</span><span style={{color:'var(--dim)'}}> · {Math.round(moaX/MOA_PER_CLICK)} clk</span></span>
-                  <span><span style={{color:'var(--acc)',fontWeight:700}}>{moaY.toFixed(2)} MOA {eDir}</span><span style={{color:'var(--dim)'}}> · {Math.round(moaY/MOA_PER_CLICK)} clk</span></span>
+                  <span><span style={{color:'var(--blue)',fontWeight:700}}>{fmtMoaAsUnitAbs(moaX, sg, 'w')} {sightUnitLabel(sg)} {wDir}</span><span style={{color:'var(--dim)'}}> · {moaToClicks(moaX, sg, 'w')} clk</span></span>
+                  <span><span style={{color:'var(--acc)',fontWeight:700}}>{fmtMoaAsUnitAbs(moaY, sg, 'e')} {sightUnitLabel(sg)} {eDir}</span><span style={{color:'var(--dim)'}}> · {moaToClicks(moaY, sg, 'e')} clk</span></span>
                 </div>
               );
             })()}
@@ -10305,7 +10446,13 @@ function TapInput({
 }
 
 /* ── ShotEntry with live target preview ── */
-function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWind, lastRing, dopeSource, onBack, onSave, onDone, getShotCount, partners }) {
+function ShotEntry({ num, target, sight, yards, fireMode, priorShots, lastElev, lastWind, lastRing, dopeSource, onBack, onSave, onDone, getShotCount, partners }) {
+  const sg = sight || { ...SIGHT_LEGACY };
+  const uLbl = sightUnitLabel(sg);
+  /* One whole unit per axis -- what the coarse bump buttons are for. This was
+     a hardcoded 4, which is one MOA only on a 1/4-MOA turret and is 0.4 mil
+     on a mil scope: the same button, four different meanings. */
+  const bumpE = clicksPerUnit(sg, 'e'), bumpW = clicksPerUnit(sg, 'w');
   const rings = target.rings.map(r=>r.score);
   const defaultRing = rings.includes(lastRing) ? lastRing : (rings[1]||rings[0]);
   const [inputMode, setInputMode] = useState('tap'); // 'tap' | 'classic'
@@ -10419,7 +10566,11 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
       };
     }
     if (windCallMoa !== '' && !isNaN(parseFloat(windCallMoa))) {
-      shot.windCallMoa = parseFloat(windCallMoa);
+      /* Typed in whatever the sight reads in; STORED in minutes. The field
+         name is the storage unit and stays honest -- the conversion happens
+         at the edge, once, so every pooled wind-call statistic downstream can
+         add calls made on a mil scope to calls made on iron sights. */
+      shot.windCallMoa = unitToMoa(parseFloat(windCallMoa), sg);
       shot.windCallDir = windCallDir;
     }
     if (perShotWind !== '' && !isNaN(parseFloat(perShotWind))) {
@@ -10467,7 +10618,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
             })()}
           </div>
           <div style={{fontFamily:'var(--fm)',fontSize:10,color:'var(--dim)'}}>
-            E{fmtMoaSigned(elev)} / W{fmtMoaSigned(wind)} MOA
+            E{fmtDial(elev, sg, 'e')} / W{fmtDial(wind, sg, 'w')} {uLbl}
           </div>
         </div>
 
@@ -10503,6 +10654,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
             <div style={{padding:'8px 13px 4px'}}>
               <TapInput
                 target={target}
+                sight={sg}
                 yards={yards}
                 fireMode={fireMode}
                 priorShots={priorShots || []}
@@ -10670,20 +10822,21 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                     background:'#00708c14',border:'1px solid #00708c55',
                     fontFamily:'var(--fm)',fontSize:9,color:'#00708c',lineHeight:1.5,
                   }}>
-                    Starting dial from DOPE: E{fmtMoaSigned(dopeSource.elev)} / W{fmtMoaSigned(dopeSource.wind)} MOA
+                    Starting dial from DOPE: E{fmtDial(dopeSource.elev, sg, 'e')} / W{fmtDial(dopeSource.wind, sg, 'w')} {uLbl}
                     {dopeSource.date ? ` · confirmed ${dopeSource.date}` : ''}. Adjust below if conditions differ.
+                    {dopeSource.rounded && ' That zero was confirmed on a different detent and has been rounded to the nearest click on this one.'}
                   </div>
                 : <div style={{
                     marginBottom:6,padding:'5px 9px',borderRadius:5,
                     background:'var(--surf2)',border:'1px dashed var(--bdr)',
                     fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.5,
                   }}>
-                    Adjusted from DOPE start (was E{fmtMoaSigned(dopeSource.elev)} / W{fmtMoaSigned(dopeSource.wind)}).
+                    Adjusted from DOPE start (was E{fmtDial(dopeSource.elev, sg, 'e')} / W{fmtDial(dopeSource.wind, sg, 'w')}).
                   </div>
               )}
               <div className="lbl" style={{marginBottom:5,display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
                 <span>Sight adjustment</span>
-                <span style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',textTransform:'none',letterSpacing:0}}>tap to bump</span>
+                <span style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',textTransform:'none',letterSpacing:0}}>{sightLabel(sg)}</span>
               </div>
               <div style={{
                 display:'grid',
@@ -10732,9 +10885,9 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                   display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
                   fontFamily:'var(--fm)',fontSize:10,color:'var(--ink)',
                 }}>
-                  <div style={{color:'var(--acc)',fontWeight:700}}>E{fmtMoaSigned(elev)}</div>
-                  <div style={{color:'var(--blue)',fontWeight:700,marginTop:1}}>W{fmtMoaSigned(wind)}</div>
-                  <div style={{color:'var(--dim)',fontSize:7,letterSpacing:'.08em',marginTop:1}}>MOA</div>
+                  <div style={{color:'var(--acc)',fontWeight:700}}>E{fmtDial(elev, sg, 'e')}</div>
+                  <div style={{color:'var(--blue)',fontWeight:700,marginTop:1}}>W{fmtDial(wind, sg, 'w')}</div>
+                  <div style={{color:'var(--dim)',fontSize:7,letterSpacing:'.08em',marginTop:1}}>{uLbl}</div>
                 </div>
                 <button
                   onClick={()=>setWind(w=>w+1)}
@@ -10779,10 +10932,10 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                     dope
                   </button>
                 )}
-                <button onClick={()=>{setElev(e=>e+4);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1↑</button>
-                <button onClick={()=>{setElev(e=>e-4);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1↓</button>
-                <button onClick={()=>{setWind(w=>w-4);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1←</button>
-                <button onClick={()=>{setWind(w=>w+4);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1→</button>
+                <button onClick={()=>{setElev(e=>e+bumpE);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1↑</button>
+                <button onClick={()=>{setElev(e=>e-bumpE);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1↓</button>
+                <button onClick={()=>{setWind(w=>w-bumpW);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1←</button>
+                <button onClick={()=>{setWind(w=>w+bumpW);}} style={{flex:1,background:'none',border:'1px solid var(--bdr)',borderRadius:4,padding:'4px',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',cursor:'pointer'}}>+1→</button>
               </div>
             </div>
 
@@ -11007,7 +11160,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                 {showWindCall
                   ? '− hold call'
                   : (windCallMoa
-                      ? `✓ hold: ${windCallMoa} MOA ${windCallDir}`
+                      ? `✓ hold: ${windCallMoa} ${uLbl} ${windCallDir}`
                       : '+ predicted hold (optional)')}
               </button>
               {showWindCall && (
@@ -11025,7 +11178,7 @@ function ShotEntry({ num, target, yards, fireMode, priorShots, lastElev, lastWin
                       outline:'none',padding:'2px 4px',
                     }}
                     autoFocus/>
-                  <span style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>MOA</span>
+                  <span style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)'}}>{uLbl}</span>
                   <div style={{display:'flex',gap:3}}>
                     {['L','R'].map(d=>(
                       <button key={d} onClick={()=>setWindCallDir(d)}
@@ -11220,18 +11373,32 @@ function commonestLabel(counts) {
  * making the shooter re-dial from scratch every session.
  * Returns null if there's no prior match, or the match has nothing dialed
  * (all-zero elev/wind — "no dope logged") worth carrying forward.
+ *
+ * What crosses between the two sessions is the ANGLE, not the click count. A
+ * zero of seven clicks means 1.75 MOA on the sight it was confirmed on and
+ * 3.5 MOA on a 1/2-MOA sight, and handing the raw integer forward would
+ * silently double a shooter's come-up the first session after they change
+ * optics. It is re-expressed in the new session's own detents and rounded to
+ * one, because a turret cannot be set to half a click -- `rounded` says when
+ * that rounding actually moved the number, so the screen can admit it.
  */
 /* The slot a confirmed zero belongs to, and the ONLY place its shape is
  * written down. The DOPE tab groups by it and the shot screen pre-fills from
  * it; when the two disagreed about what counts as the same slot, the number on
  * the DOPE card and the number the app put in the box were different numbers
- * for the same question. */
+ * for the same question.
+ *
+ * Note what is NOT in the key: the sight. Two sessions shot through different
+ * detents are still the same zero on the same rifle at the same place — the
+ * angle is the fact, and the clicks are only how it was written down. That is
+ * what makes converting between them below the right move rather than a
+ * reason to split the slot. */
 function zeroSlotKey({ rifleId, location, yards, position, ammoId }) {
   return [rifleId || '', locationKey(location), Number(yards) || 0,
           (position || '').trim() || 'Unspecified', ammoId || ''].join('|');
 }
 
-function findConfirmedZero(sessions, { rifleId, location, yards, position, ammoId }, excludeSessionId) {
+function findConfirmedZero(sessions, { rifleId, location, yards, position, ammoId }, excludeSessionId, targetSight) {
   const want = zeroSlotKey({ rifleId, location, yards, position, ammoId });
   const matches = (sessions||[])
     .filter(s => s.id !== excludeSessionId)
@@ -11247,7 +11414,14 @@ function findConfirmedZero(sessions, { rifleId, location, yards, position, ammoI
   const last = pool[pool.length-1];
   if (!last) return null;
   if (!(last.elev||0) && !(last.wind||0)) return null; // nothing dialed — blank start is the honest default
-  return { elev: last.elev||0, wind: last.wind||0, date: s.date||'', name: s.name||'' };
+  const from = sightOf(s);
+  const to = targetSight || from;
+  const eMoa = clicksToMoa(last.elev||0, from, 'e'), wMoa = clicksToMoa(last.wind||0, from, 'w');
+  const elev = moaToClicks(eMoa, to, 'e'), wind = moaToClicks(wMoa, to, 'w');
+  const rounded = Math.abs(clicksToMoa(elev, to, 'e') - eMoa) > 1e-9
+               || Math.abs(clicksToMoa(wind, to, 'w') - wMoa) > 1e-9;
+  return { elev, wind, elevMoa: eMoa, windMoa: wMoa, rounded,
+           date: s.date||'', name: s.name||'' };
 }
 
 /* DOPE tab — persistent confirmed-zero table: the dialed sight setting per
@@ -11256,9 +11430,9 @@ function findConfirmedZero(sessions, { rifleId, location, yards, position, ammoI
  * "Confirmed zero" for a session = the LAST record shot's elev/wind. That's the
  * setting you converged to (you adjust toward zero; the final dial is the come-up
  * that produced your last group). Settings are stored as integer turret CLICKS
- * and displayed as MOA via the global MOA_PER_CLICK (0.25). There is no
- * per-firearm click value yet — if a 1/8-MOA optic ever enters the stable,
- * that constant must become a firearm field threaded through fmtMoaSigned.
+ * and decoded through the sight snapshot on the session that recorded them,
+ * then shown in the unit the firearm wears NOW -- see the sight model at the
+ * top of the file for why those are two different questions.
  */
 /* ── Trajectory ──────────────────────────────────────────────────────────
  * The solver's screen. It reads the shooter's own confirmed zeros out of their
@@ -11452,7 +11626,8 @@ function SolverTab({ sessions, firearms, ammo }) {
         ammoId: s.ammoId || '',
         temp: s.temp === '' || s.temp == null ? null : Number(s.temp),
         yards: Number(s.rangeYards) || 0, date: s.date || '', ts: s.ts || 0,
-        elev: clicksToMoa(last.elev || 0), wind: clicksToMoa(last.wind || 0),
+        elev: clicksToMoa(last.elev || 0, sightOf(s), 'e'),
+        wind: clicksToMoa(last.wind || 0, sightOf(s), 'w'),
         noDope: elevs.every(v => v === 0) && winds.every(v => v === 0),
       };
     }), [sessions]);
@@ -11466,6 +11641,11 @@ function SolverTab({ sessions, firearms, ammo }) {
   const rid = rifleId != null && rifles.some(r => r.id === rifleId)
     ? rifleId : (rifles[0]?.id ?? '');
   const rifle = firearms.find(f => f.id === rid) || null;
+  /* The solver is MOA end to end -- drop is an angle and has no opinion about
+     turrets. This is purely the skin on the answer, and it is the rifle's
+     CURRENT sight because a come-up table is read while dialling that sight. */
+  const sight = sightOf(rifle);
+  const uLbl = sightUnitLabel(sight);
 
   const forRifle = useMemo(() =>
     cells.filter(c => c.rifleId === rid && !c.noDope && c.yards), [cells, rid]);
@@ -11757,7 +11937,7 @@ function SolverTab({ sessions, firearms, ammo }) {
                                      fontFamily: 'var(--fm)', fontSize: 10, padding: '3px 0' }}>
               <span>{a.yd} yd<span style={{ color: 'var(--dim)' }}> · {a.position}
                 {a.tempF !== undefined ? ` · ${a.tempF}°F` : ''}</span></span>
-              <span style={{ color: 'var(--acc)', fontWeight: 700 }}>{fmtMoaSigned(a.moa / MOA_PER_CLICK)} MOA</span>
+              <span style={{ color: 'var(--acc)', fontWeight: 700 }}>{fmtMoaAsUnit(a.moa, sight, 'e')} {uLbl}</span>
             </div>
           ))}
         <div style={{ ...note, marginTop: 6 }}>
@@ -11795,7 +11975,7 @@ function SolverTab({ sessions, firearms, ammo }) {
                 {' '}({solved.mvScale >= 1 ? '+' : ''}{((solved.mvScale - 1) * 100).toFixed(1)}% on what was entered)
                 and BC <strong style={{ color: 'var(--ink)' }}>{solved.bc.toFixed(3)}</strong>
                 {' '}({solved.bcScale >= 1 ? '+' : ''}{((solved.bcScale - 1) * 100).toFixed(1)}%).
-                The curve passes through your zeros to {solved.rmsMoa.toFixed(2)} MOA.
+                The curve passes through your zeros to {fmtMoaAsUnitAbs(solved.rmsMoa, sight, 'e')} {uLbl}.
               </div>
             </>
           ) : (
@@ -11851,7 +12031,7 @@ function SolverTab({ sessions, firearms, ammo }) {
         <>
           <div className="shdr" style={{ marginTop: 12 }}>Come-ups</div>
           <table className="rt">
-            <thead><tr><th>Distance</th><th>Elevation</th><th>Velocity</th><th></th></tr></thead>
+            <thead><tr><th>Distance</th><th>Elevation ({uLbl})</th><th>Velocity</th><th></th></tr></thead>
             <tbody>
               {ROWS.map(yd => {
                 const p = predict(solved, yd);
@@ -11865,8 +12045,8 @@ function SolverTab({ sessions, firearms, ammo }) {
                     </td>
                     <td style={{ fontFamily: 'var(--fm)', fontSize: 12, fontWeight: 700,
                                  color: p.inside ? 'var(--acc)' : 'var(--ink)' }}>
-                      {p.moa.toFixed(2)}
-                      <span style={{ fontWeight: 400, color: 'var(--dim)', fontSize: 9 }}> ±{p.ci.toFixed(2)}</span>
+                      {fmtMoaAsUnitAbs(p.moa, sight, 'e')}
+                      <span style={{ fontWeight: 400, color: 'var(--dim)', fontSize: 9 }}> ±{fmtMoaAsUnitAbs(p.ci, sight, 'e')}</span>
                     </td>
                     <td style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--dim)' }}>
                       {p.velocity.toFixed(0)}
@@ -11908,13 +12088,13 @@ function SolverTab({ sessions, firearms, ammo }) {
                   {o.from} → {o.to}
                 </span>
                 <span style={{ fontFamily: 'var(--fm)', fontSize: 11, fontWeight: 700 }}>
-                  <span style={{ color: 'var(--acc)' }}>E {o.elevMoa >= 0 ? '+' : ''}{o.elevMoa.toFixed(2)}</span>
-                  <span style={{ color: 'var(--blue)', marginLeft: 8 }}>W {o.windMoa >= 0 ? '+' : ''}{o.windMoa.toFixed(2)}</span>
+                  <span style={{ color: 'var(--acc)' }}>E {fmtMoaAsUnit(o.elevMoa, sight, 'e')}</span>
+                  <span style={{ color: 'var(--blue)', marginLeft: 8 }}>W {fmtMoaAsUnit(o.windMoa, sight, 'w')}</span>
                 </span>
               </div>
               <div style={{ ...note, marginTop: 4 }}>
                 {o.n} observation{o.n === 1 ? '' : 's'}
-                {o.elevSd != null ? ` · spread ±${o.elevSd.toFixed(2)} MOA` : ' · no spread from one observation'}
+                {o.elevSd != null ? ` · spread ±${fmtMoaAsUnitAbs(o.elevSd, sight, 'e')} ${uLbl}` : ' · no spread from one observation'}
               </div>
             </div>
           ))}
@@ -11944,6 +12124,12 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
     return [a.bullet, a.charge ? a.charge + 'gr' : '', a.powder,
             a.batchSerial ? '⛓ ' + a.batchSerial : ''].filter(Boolean).join(' · ');
   };
+  /* DISPLAY unit, and deliberately the firearm's current one rather than each
+     session's: a DOPE table exists to be read at a firing point against the
+     sight now on the rifle, so every row is normalised into the minutes (or
+     mils) the shooter will actually be turning today. The session snapshots
+     did their job on the way in, where the clicks were decoded. */
+  const sightForId = id => sightOf(firearms.find(f=>f.id===id));
 
   // One entry per session that has at least one shot.
   const entries = sessions
@@ -11967,6 +12153,12 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
         position: (s.position||'').trim() || 'Unspecified',
         yards: Number(s.rangeYards)||0, date: s.date||'', ts: s.ts||0,
         elev: last.elev||0, wind: last.wind||0, moved, noDope,
+        /* Minutes, resolved through the sight this session was SHOT on. The
+           cell below stacks sessions that may span an optic change, and two
+           click counts from two different turrets are not comparable
+           quantities -- only the angles they stand for are. */
+        elevMoa: clicksToMoa(last.elev||0, sightOf(s), 'e'),
+        windMoa: clicksToMoa(last.wind||0, sightOf(s), 'w'),
         temp: s.temp||'', lighting: s.lighting||'', ammo,
         mrMoa: a ? a.mrMoa : null, n: rec.length,
       };
@@ -12014,15 +12206,18 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
 
   // Order cells: firearm name, then location, then distance descending.
   const ordered = Object.entries(cells)
-    .map(([key,c]) => ({ key, ...c, fname: firearmName(c.rifleId), loadLabel: loadName(c.ammoId) }))
+    .map(([key,c]) => ({ key, ...c, fname: firearmName(c.rifleId),
+                         loadLabel: loadName(c.ammoId), sight: sightForId(c.rifleId) }))
     .sort((a,b)=> a.fname.localeCompare(b.fname) || a.locKey.localeCompare(b.locKey)
                || b.yards - a.yards || posRank(a.position) - posRank(b.position)
                || loadName(a.ammoId).localeCompare(loadName(b.ammoId)));
 
   // Re-group ordered cells under firearm → location headers for rendering.
   const byFirearm = {};
+  const sightByName = {};
   ordered.forEach(c => {
     (byFirearm[c.fname] ||= {});
+    sightByName[c.fname] = c.sight;
     (byFirearm[c.fname][c.location] ||= []).push(c);
   });
 
@@ -12033,12 +12228,12 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
     </div>
   );
 
-  const Zero = ({ e, faded }) => (
+  const Zero = ({ e, sight, faded }) => (
     <span style={{fontFamily:'var(--fm)',fontSize:13,fontWeight:700,opacity:faded?0.6:1}}>
       {e.noDope ? <span style={{color:'var(--dim)',fontWeight:400,fontSize:11}}>no dial logged</span> : <>
-        <span style={{color:'var(--acc)'}}>E {fmtMoaSigned(e.elev)}</span>
+        <span style={{color:'var(--acc)'}}>E {fmtMoaAsUnit(e.elevMoa, sight, 'e')}</span>
         <span style={{color:'var(--dim)',fontWeight:400}}> {e.elev>0?'↑':e.elev<0?'↓':'·'}  </span>
-        <span style={{color:'var(--blue)'}}>W {fmtMoaSigned(e.wind)}</span>
+        <span style={{color:'var(--blue)'}}>W {fmtMoaAsUnit(e.windMoa, sight, 'w')}</span>
         <span style={{color:'var(--dim)',fontWeight:400}}> {e.wind>0?'→':e.wind<0?'←':'·'}</span>
       </>}
     </span>
@@ -12048,10 +12243,10 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
     <div style={{paddingBottom:20}}>
       <div style={{margin:'12px 13px 4px',display:'flex',alignItems:'flex-start',gap:10}}>
         <div style={{flex:1,fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.5}}>
-          Confirmed zero = the last shot's dialed sight setting, in <strong style={{color:'var(--ink)'}}>MOA</strong> (up/right positive, ¼ MOA per click).
+          Confirmed zero = the last shot's dialed sight setting (up/right positive), shown in each firearm's own sight unit. Rows are decoded with the detent the session was shot on, so an optic change does not rewrite the zeros before it.
         </div>
         <button className="badd" style={{fontSize:10,padding:'5px 9px',background:'none',border:'1px solid var(--bdr)',color:'var(--ink)',flexShrink:0}}
-          onClick={()=>setCardText(t=>t?null:dopeCardText(byFirearm))}>⤓ card</button>
+          onClick={()=>setCardText(t=>t?null:dopeCardText(byFirearm, fn=>sightByName[fn]||{ ...SIGHT_LEGACY }))}>⤓ card</button>
       </div>
       {cardText && (
         <div style={{margin:'8px 13px 4px',background:'var(--surf2)',border:'1px solid var(--bdr)',borderRadius:9,overflow:'hidden'}}>
@@ -12090,7 +12285,7 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
                             {' · '}{loadName(cell.ammoId)}
                           </span>
                         </div>
-                        <Zero e={head} />
+                        <Zero e={head} sight={cell.sight} />
                         {loadSub(cell.ammoId) && (
                           <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--faint, var(--dim))',marginTop:2}}>
                             {loadSub(cell.ammoId)}
@@ -12108,7 +12303,7 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
                           const drift = zeroDriftInfo(cell.sessions);
                           return drift ? (
                             <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--acc)',marginTop:2,fontWeight:700}}>
-                              ⚠ zero drift: {drift.flagged.map(f=>`${f.axis} ${f.clicks>0?'+':''}${clicksToMoa(f.clicks).toFixed(2)} MOA`).join(' · ')} over {drift.n} sessions — check mount/optic
+                              ⚠ zero drift: {drift.flagged.map(f=>`${f.axis} ${fmtMoaAsUnit(f.moa, cell.sight, f.axis==='W'?'w':'e')} ${sightUnitLabel(cell.sight)}`).join(' · ')} over {drift.n} sessions — check mount/optic
                             </div>
                           ) : null;
                         })()}
@@ -12120,7 +12315,7 @@ function DopeTab({ sessions, firearms, ammo = [], getTarget }) {
                     {isOpen && history.map(h => (
                       <div key={h.sid} style={{padding:'6px 12px 6px 66px',display:'flex',alignItems:'center',gap:10,borderTop:'1px solid var(--bg)'}}>
                         <span style={{flex:1}}>
-                          <Zero e={h} faded />
+                          <Zero e={h} sight={cell.sight} faded />
                           <div style={{fontFamily:'var(--fm)',fontSize:8,color:'var(--dim)',marginTop:2}}>
                             {h.date}{h.temp && ` · ${h.temp}°`}{h.ammo && h.ammo !== loadName(cell.ammoId) && ` · ${h.ammo}`}{h.mrMoa!=null && ` · ${h.mrMoa.toFixed(2)} MOA grp`}
                           </div>
@@ -13115,10 +13310,13 @@ function ScoreDecomposition({ session, target, shots }) {
   );
 }
 
-function SightChart({ shots }) {
+function SightChart({ shots, sight }) {
   if (shots.length < 2) return null;
+  const sg = sight || { ...SIGHT_LEGACY };
   const W=320, H=80, PL=32, PR=8, PT=8, PB=20;
-  const elevs=shots.map(s=>clicksToMoa(s.elev)), winds=shots.map(s=>clicksToMoa(s.wind));
+  const dec = Math.max(dialDecimals(sg,'e'), dialDecimals(sg,'w'));
+  const elevs=shots.map(s=>moaToUnit(clicksToMoa(s.elev, sg, 'e'), sg)),
+        winds=shots.map(s=>moaToUnit(clicksToMoa(s.wind, sg, 'w'), sg));
   const allVals=[...elevs,...winds];
   const mn=Math.min(...allVals), mx=Math.max(...allVals);
   const rng=mx-mn||0;
@@ -13132,7 +13330,7 @@ function SightChart({ shots }) {
   return (
     <div style={{background:'var(--surf)',border:'1px solid var(--bdr)',borderRadius:9,overflow:'hidden'}}>
       <div style={{padding:'8px 12px',borderBottom:'1px solid var(--bdr)',fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',letterSpacing:'.1em',display:'flex',justifyContent:'space-between'}}>
-        <span>Sight settings per shot · MOA</span>
+        <span>Sight settings per shot · {sightUnitLabel(sg)}</span>
         <span><span style={{color:'var(--acc)'}}>— elev</span>  <span style={{color:'var(--green)'}}>-- wind</span></span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',display:'block',background:'var(--surf)'}}>
@@ -13140,7 +13338,7 @@ function SightChart({ shots }) {
           const y=gy(v);
           return <g key={i}>
             <line x1={PL} y1={y} x2={W-PR} y2={y} stroke="var(--grid)" strokeWidth={1}/>
-            <text x={PL-3} y={+y+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{v.toFixed(2)}</text>
+            <text x={PL-3} y={+y+3} textAnchor="end" fill="var(--dim)" fontSize={7} fontFamily="Space Mono,monospace">{v.toFixed(dec)}</text>
           </g>;
         })}
         <path d={ep} fill="none" stroke="var(--acc)" strokeWidth={1.8}/>
@@ -13353,7 +13551,7 @@ function TargetsTab({ customTargets, onSave, deletedBuiltins, onDeleteBuiltin, o
 }
 
 /* ── Firearms tab: round-count tracking + barrel life + per-firearm group trend ── */
-function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, core }) {
+function FirearmsTab({ firearms, sessions, getTarget, onSave, onSaveSessions, ammo, onSaveAmmo, core }) {
   /* ONE prop set for the ammunition section, spread into both returns.
    *
    * This function returns from two places -- an empty state and a populated
@@ -13373,6 +13571,15 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
   const [open, setOpen] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
 
+  /* Stamps a sight onto every session already logged against one firearm.
+     The escape hatch for sessions shot before this feature existed, which
+     otherwise read forever at the pre-feature 1/4 MOA. Only reachable from a
+     ticked box in the edit form; nothing calls it implicitly. */
+  function restampSessions(firearmId, sight) {
+    if (!onSaveSessions) return;
+    onSaveSessions((sessions||[]).map(s =>
+      (s.rifleId === firearmId) ? { ...s, sight, mtime: Date.now() } : s));
+  }
   if (adding) {
     return <AddFirearmForm
       onBack={()=>setAdding(false)}
@@ -13383,6 +13590,8 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
     const r = firearms.find(x=>x.id===editing);
     if (r) return <AddFirearmForm
       initial={r}
+      pastSessions={(sessions||[]).filter(s => s.rifleId === r.id).length}
+      onRestamp={restampSessions}
       onBack={()=>setEditing(null)}
       onSave={upd => { onSave(firearms.map(x=>x.id===editing?upd:x)); setEditing(null); }}
     />;
@@ -13427,6 +13636,7 @@ function FirearmsTab({ firearms, sessions, getTarget, onSave, ammo, onSaveAmmo, 
                       placeholder jammed against the count -- "—1,100 rds" -- which reads
                       as a negative number rather than as a missing field. */}
                   {r.caliber||'—'}{' · '}<span style={{color:'var(--acc)',fontWeight:700}}>{count.toLocaleString()} rds</span>
+                  {' · '}<span style={{color:'var(--dim)'}}>{sightLabel(sightOf(r))}</span>
                   {status && <> · <span style={{color:'var(--dim)'}}>of {status.life.toLocaleString()}</span></>}
                 </div>
               </div>
@@ -14200,7 +14410,16 @@ function FirearmGroupTrend({ sessions, firearm, getTarget }) {
 }
 
 /* ── Add/edit firearm form ── */
-function AddFirearmForm({ initial, onBack, onSave }) {
+function AddFirearmForm({ initial, onBack, onSave, pastSessions = 0, onRestamp }) {
+  const initSight = sightOf(initial);
+  const [sightUnit, setSightUnit] = useState(initSight.unit);
+  const [clickElev, setClickElev] = useState(initSight.clickElev);
+  const [clickWind, setClickWind] = useState(initSight.clickWind);
+  const [splitAxes, setSplitAxes] = useState(initSight.clickElev !== initSight.clickWind);
+  /* Default OFF. Restamping rewrites what every past session's clicks MEAN,
+     and the one thing worse than history frozen at the wrong detent is
+     history that silently moved while the shooter was editing a name. */
+  const [restamp, setRestamp] = useState(false);
   const [name, setName] = useState(initial?.name || '');
   const [caliber, setCaliber] = useState(initial?.caliber || '');
   const [barrelLife, setBarrelLife] = useState(initial?.barrelLife ? String(initial.barrelLife) : '');
@@ -14215,10 +14434,13 @@ function AddFirearmForm({ initial, onBack, onSave }) {
     if (barrelLife && (isNaN(bl) || bl <= 0)) { setError('Barrel life must be a positive integer.'); return; }
     if (roundsAtStart && (isNaN(rs) || rs < 0)) { setError('Starting round count must be zero or positive.'); return; }
     setError('');
+    const sight = normSight({ unit: sightUnit, clickElev, clickWind: splitAxes ? clickWind : clickElev });
+    if (restamp && onRestamp) onRestamp(initial.id, sight);
     onSave({
       id: initial?.id || uid(),
       name: name.trim(),
       caliber: caliber.trim(),
+      sight,
       barrelLife: barrelLife ? bl : null,
       roundsAtStart: roundsAtStart ? rs : 0,
       notes: notes.trim(),
@@ -14264,6 +14486,85 @@ function AddFirearmForm({ initial, onBack, onSave }) {
             <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.5,padding:'2px 0',marginTop:-4}}>
               Set <strong style={{color:'var(--ink)'}}>starting round count</strong> if this barrel already has rounds through it before you started logging here. The app will count up from this value as you log shots in sessions.
             </div>
+            <div className="field">
+              <div className="lbl">Sight unit</div>
+              <div style={{display:'flex',gap:5}}>
+                {SIGHT_UNITS.map(u => (
+                  <button key={u.v} onClick={()=>{
+                    /* Switching units carries the DETENT across as the new
+                       unit's default rather than keeping a number that means
+                       something else -- 0.25 mil is not a turret anybody
+                       sells, and silently keeping it would produce a sight
+                       that does not exist. */
+                    setSightUnit(u.v);
+                    const d = u.v === 'mil' ? 0.1 : 0.25;
+                    setClickElev(d); setClickWind(d);
+                  }}
+                    style={{flex:1,padding:'8px 0',borderRadius:5,cursor:'pointer',
+                      fontFamily:'var(--fm)',fontSize:11,fontWeight:700,
+                      background: sightUnit===u.v ? 'var(--tint-acc)' : 'none',
+                      border:`1px solid ${sightUnit===u.v ? 'var(--acc)' : 'var(--bdr)'}`,
+                      color: sightUnit===u.v ? 'var(--acc)' : 'var(--dim)'}}>{u.label}</button>
+                ))}
+              </div>
+            </div>
+            <div className="field">
+              <div className="lbl">{splitAxes ? 'Elevation per click' : 'Per click'}</div>
+              <div style={{display:'flex',gap:5}}>
+                {SIGHT_CLICKS[sightUnit].map(c => (
+                  <button key={c.v} onClick={()=>{ setClickElev(c.v); if (!splitAxes) setClickWind(c.v); }}
+                    style={{flex:1,padding:'8px 0',borderRadius:5,cursor:'pointer',
+                      fontFamily:'var(--fm)',fontSize:11,fontWeight:700,
+                      background: clickElev===c.v ? 'var(--tint-acc)' : 'none',
+                      border:`1px solid ${clickElev===c.v ? 'var(--acc)' : 'var(--bdr)'}`,
+                      color: clickElev===c.v ? 'var(--acc)' : 'var(--dim)'}}>{c.label}</button>
+                ))}
+              </div>
+            </div>
+            {splitAxes && (
+              <div className="field">
+                <div className="lbl">Windage per click</div>
+                <div style={{display:'flex',gap:5}}>
+                  {SIGHT_CLICKS[sightUnit].map(c => (
+                    <button key={c.v} onClick={()=>setClickWind(c.v)}
+                      style={{flex:1,padding:'8px 0',borderRadius:5,cursor:'pointer',
+                        fontFamily:'var(--fm)',fontSize:11,fontWeight:700,
+                        background: clickWind===c.v ? 'var(--tint-blue, var(--surf2))' : 'none',
+                        border:`1px solid ${clickWind===c.v ? 'var(--blue)' : 'var(--bdr)'}`,
+                        color: clickWind===c.v ? 'var(--blue)' : 'var(--dim)'}}>{c.label}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button onClick={()=>{ const nx = !splitAxes; setSplitAxes(nx); if (!nx) setClickWind(clickElev); }}
+              style={{background:'none',border:'none',padding:'0 0 2px',cursor:'pointer',textAlign:'left',
+                fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',textDecoration:'underline'}}>
+              {splitAxes ? '← same value on both axes' : 'windage clicks differ from elevation →'}
+            </button>
+            <div style={{fontFamily:'var(--fm)',fontSize:9,color:'var(--dim)',lineHeight:1.5,padding:'2px 0'}}>
+              Match iron sights often move a different amount per click on windage than on
+              elevation — set them separately if yours do. Sight settings are stored as
+              clicks, and each session records the sight it was shot on, so changing this
+              does <strong style={{color:'var(--ink)'}}>not</strong> rewrite sessions you
+              have already logged.
+            </div>
+            {initial && pastSessions > 0 && (
+              <button onClick={()=>setRestamp(v=>!v)}
+                style={{display:'flex',gap:8,alignItems:'flex-start',textAlign:'left',width:'100%',
+                  background: restamp ? 'var(--tint-red)' : 'var(--surf2)',
+                  border:`1px solid ${restamp ? 'var(--red)' : 'var(--bdr)'}`,
+                  borderRadius:5,padding:'8px 10px',cursor:'pointer'}}>
+                <span style={{fontFamily:'var(--fm)',fontSize:12,color: restamp ? 'var(--red)' : 'var(--dim)',lineHeight:1}}>
+                  {restamp ? '☑' : '☐'}
+                </span>
+                <span style={{fontFamily:'var(--fm)',fontSize:9,color: restamp ? 'var(--red)' : 'var(--dim)',lineHeight:1.5}}>
+                  Also apply to the {pastSessions} session{pastSessions===1?'':'s'} already logged
+                  against this firearm. Tick this only if those sessions were genuinely shot on
+                  this sight and were recorded under the wrong one — it re-reads every click
+                  already stored, so a zero of +8 becomes a different come-up than it shows today.
+                </span>
+              </button>
+            )}
             <div className="field">
               <div className="lbl">Notes</div>
               <textarea className="inp" value={notes} onChange={e=>setNotes(e.target.value)}
